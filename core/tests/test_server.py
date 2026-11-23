@@ -1,5 +1,7 @@
 import asyncio
 import os
+from pathlib import Path
+from unittest.mock import patch
 import unittest
 
 from aiohttp import CookieJar
@@ -94,6 +96,24 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         foreign = dict(self.local, Origin="http://example.test")
         self.assertEqual((await self.read("stub", stub, headers=foreign)).status, 403)
         self.assertEqual((await self.read("stub", stub, headers={"Host": self.local["Host"]})).status, 401)
+
+    async def test_health_requires_browser_bundle(self):
+        with patch("server.BUNDLE", Path(__file__)):
+            response = await self.browser.get("/health", headers=self.local)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.json(), {"status": "ready"})
+        with patch("server.BUNDLE", Path(__file__).parent):
+            response = await self.browser.get("/health", headers=self.local)
+            self.assertEqual(response.status, 503)
+
+    async def test_shutdown_closes_agent_and_interrupts_pending_read(self):
+        ws, generation = await self.board("board")
+        read = asyncio.create_task(self.read("board", generation))
+        await ws.receive_json()
+        await asyncio.wait_for(self.server.app.shutdown(), timeout=2)
+        self.assertEqual((await ws.receive(timeout=2)).type.name, "CLOSE")
+        response = await asyncio.wait_for(read, timeout=2)
+        self.assertEqual(response.status, 502)
 
     @unittest.skipUnless(os.path.isfile("node_modules/esptool-js/bundle.js"), "npm ci required")
     async def test_browser_assets(self):

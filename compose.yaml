@@ -1,0 +1,16 @@
+name: idlab
+
+services:
+  core:
+    build: .
+    environment:
+      IDLAB_LOOPBACK_FORWARDED: "1"
+      IDLAB_TOKEN: ${IDLAB_TOKEN:-}
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
+      interval: 3s
+      timeout: 3s
+      retries: 3
+    stop_grace_period: 10s

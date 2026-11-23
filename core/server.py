@@ -12,6 +12,7 @@ import uuid
 from aiohttp import WSMsgType, web
 
 ROOT = Path(__file__).resolve().parent
+BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
 MAX_READ = 4 * 1024 * 1024
 BOARD_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}")
 MAC = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", re.IGNORECASE)
@@ -59,14 +60,17 @@ def validate_identity(value):
     }
 
 
-def create_app(*, port=8080, token=None, read_timeout=600):
+def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=False):
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     session = secrets.token_urlsafe(32)
     boards = {}
+    sockets = set()
 
     @web.middleware
     async def local_access(request, handler):
-        if not request.remote or not ipaddress.ip_address(request.remote).is_loopback or request.host not in hosts:
+        if request.host not in hosts or not request.remote:
+            return problem(403, "local_access_required")
+        if not loopback_forwarded and not ipaddress.ip_address(request.remote).is_loopback:
             return problem(403, "local_access_required")
         origin = request.headers.get("Origin")
         if origin is not None and origin != f"http://{request.host}":
@@ -88,6 +92,11 @@ def create_app(*, port=8080, token=None, read_timeout=600):
         response.set_cookie("idlab_session", session, httponly=True, samesite="Strict")
         return response
 
+    async def health(request):
+        if not BUNDLE.is_file():
+            return problem(503, "browser_bundle_unavailable")
+        return web.json_response({"status": "ready"}, headers={"Cache-Control": "no-store"})
+
     async def devices(request):
         return web.json_response({name: board.describe() for name, board in boards.items()})
 
@@ -98,9 +107,10 @@ def create_app(*, port=8080, token=None, read_timeout=600):
         if name in boards:
             return problem(409, "device_already_connected")
         socket = web.WebSocketResponse(heartbeat=20, max_msg_size=MAX_READ + 1)
-        await socket.prepare(request)
+        sockets.add(socket)
         board = None
         try:
+            await socket.prepare(request)
             message = await socket.receive_json(timeout=90)
             if name in boards:
                 raise ValueError("device_already_connected")
@@ -125,6 +135,7 @@ def create_app(*, port=8080, token=None, read_timeout=600):
                 if board.pending and not board.pending.future.done():
                     board.pending.future.set_result(None)
             await socket.close()
+            sockets.discard(socket)
         return socket
 
     async def read_flash(request):
@@ -167,9 +178,14 @@ def create_app(*, port=8080, token=None, read_timeout=600):
         board = boards.get(request.match_info["name"])
         return web.json_response(board.describe()) if board and not board.socket.closed else problem(404, "device_disconnected")
 
+    async def close_agents(app):
+        await asyncio.gather(*(socket.close(code=1001) for socket in tuple(sockets)))
+
     app = web.Application(middlewares=[local_access], client_max_size=4096)
+    app.on_shutdown.append(close_agents)
     app.add_routes([
         web.get("/", index),
+        web.get("/health", health),
         web.get("/api/v1/devices", devices),
         web.get("/api/v1/devices/{name}", identify),
         web.post("/api/v1/devices/{name}/flash/read", read_flash),
@@ -177,7 +193,7 @@ def create_app(*, port=8080, token=None, read_timeout=600):
         web.static("/web", ROOT / "web"),
     ])
     async def esptool(request):
-        return web.FileResponse(ROOT / "node_modules/esptool-js/bundle.js")
+        return web.FileResponse(BUNDLE)
 
     app.router.add_get("/esptool.js", esptool)
     return app
@@ -185,4 +201,6 @@ def create_app(*, port=8080, token=None, read_timeout=600):
 
 if __name__ == "__main__":
     port = int(os.environ.get("IDLAB_PORT", "8080"))
-    web.run_app(create_app(port=port, token=os.environ.get("IDLAB_TOKEN")), host="127.0.0.1", port=port)
+    forwarded = os.environ.get("IDLAB_LOOPBACK_FORWARDED") == "1"
+    app = create_app(port=port, token=os.environ.get("IDLAB_TOKEN"), loopback_forwarded=forwarded)
+    web.run_app(app, host="0.0.0.0" if forwarded else "127.0.0.1", port=port, shutdown_timeout=3)
