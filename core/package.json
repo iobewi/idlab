@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "esptool-js": "0.7.0"
+  },
+  "name": "idlab-core",
+  "type": "module",
+  "private": true
+}

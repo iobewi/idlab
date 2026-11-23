@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="fr">
+<meta charset="utf-8">
+<title>IDLab</title>
+<style>
+  body { font: 1rem system-ui, sans-serif; margin: 3rem auto; max-width: 52rem; padding: 0 1rem }
+  form, article { border: 1px solid #bbb; padding: 1rem; margin: 1rem 0 }
+  label { display: inline-block; margin: .25rem }
+  button { margin: .25rem }
+  input[type=text] { width: 9rem }
+  output { display: block; min-height: 1.5em }
+</style>
+<h1>IDLab</h1>
+<form id="connect">
+  <label>Nom de la carte <input name="device" required pattern="[A-Za-z0-9][A-Za-z0-9_\-]{0,47}"></label>
+  <label>Chargeur <select name="loader"><option value="stub">Stub standard</option><option value="rom">ROM seule</option></select></label>
+  <label><input type="checkbox" name="manual"> Carte déjà en mode téléchargement</label>
+  <button>Connecter</button>
+</form>
+<output id="status" role="status"></output>
+<section id="boards" aria-label="Cartes connectées"></section>
+<template id="board">
+  <article>
+    <h2></h2>
+    <p></p>
+    <button type="button">Déconnecter</button>
+    <form>
+      <label>Adresse <input name="address" type="text" required value="0x0"></label>
+      <label>Taille en octets <input name="size" type="text" required value="4096"></label>
+      <button>Lire la flash</button>
+    </form>
+    <output role="status"></output>
+  </article>
+</template>
+<script type="module" src="/web/app.js"></script>
