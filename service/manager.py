@@ -1,74 +1,71 @@
-"""Loopback management API for the dedicated IDLab Compose service."""
+"""Manage only the IDLab HTTP child process."""
 
 import asyncio
 import hmac
-import json
 import os
 from pathlib import Path
+import sys
 
-from aiohttp import web
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
 
-ROOT = Path(__file__).resolve().parents[1]
-COMMANDS = {
-    "status": ("ps", "--all", "--format", "json", "core"),
-    "start": ("up", "--detach", "--no-build", "--no-recreate", "core"),
-    "stop": ("stop", "core"),
-    "restart": ("restart", "core"),
-}
+SERVER = Path(__file__).resolve().parents[1] / "core" / "server.py"
 
 
-class ComposeError(Exception):
-    pass
+class HTTPService:
+    def __init__(self, port=8080):
+        self.port = port
+        self.process = None
 
+    async def start(self):
+        if self.process is not None and self.process.returncode is None:
+            return
+        env = os.environ.copy()
+        env.pop("IDLAB_MANAGER_TOKEN", None)
+        env["IDLAB_PORT"] = str(self.port)
+        self.process = await asyncio.create_subprocess_exec(sys.executable, str(SERVER), env=env)
 
-async def run_compose(args):
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "docker", "compose", "--project-name", "idlab",
-            "--file", str(ROOT / "compose.yaml"), *args,
-            cwd=ROOT, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-    except OSError as error:
-        raise ComposeError from error
-    try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=45)
-    except (TimeoutError, asyncio.CancelledError):
+    async def stop(self):
+        process = self.process
+        if process is None:
+            return
         if process.returncode is None:
             try:
-                process.kill()
+                process.terminate()
             except ProcessLookupError:
                 pass
-        await process.wait()
-        raise
-    if process.returncode:
-        raise ComposeError
-    return stdout
+            try:
+                await asyncio.wait_for(process.wait(), timeout=6)
+            except TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+        self.process = None
+
+    async def status(self):
+        process = self.process
+        if process is None:
+            return {"state": "stopped", "ready": False}
+        ready = False
+        if process.returncode is None:
+            try:
+                async with ClientSession(timeout=ClientTimeout(total=1)) as session:
+                    async with session.get(f"http://127.0.0.1:{self.port}/health", allow_redirects=False) as response:
+                        # Verify that the HTTP listener belongs to the process we started.
+                        ready = response.status == 200 and response.headers.get("X-IDLab-Pid") == str(process.pid)
+            except (ClientError, TimeoutError):
+                pass
+        if process.returncode is not None:
+            return {"state": "exited", "ready": False, "exit_code": process.returncode}
+        return {"state": "running", "ready": ready}
 
 
-def service_status(output):
-    try:
-        raw = output.strip()
-        if raw.startswith(b"["):
-            rows = json.loads(raw)
-        else:
-            rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
-        if not rows:
-            return {"state": "absent", "health": None, "ready": False}
-        if len(rows) != 1 or not isinstance(rows[0], dict):
-            raise ValueError
-        state = rows[0]["State"]
-        health = rows[0].get("Health") or None
-        if not isinstance(state, str) or (health is not None and not isinstance(health, str)):
-            raise ValueError
-    except (KeyError, TypeError, ValueError) as error:
-        raise ComposeError from error
-    return {"state": state, "health": health, "ready": state == "running" and health == "healthy"}
-
-
-def create_app(*, token, port=8081, compose=run_compose):
+def create_app(*, token, port=8081, service=None):
     if not token:
         raise ValueError("Set IDLAB_MANAGER_TOKEN before starting the management API")
 
+    service = HTTPService() if service is None else service
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     authorization = f"Bearer {token}".encode()
     lock = asyncio.Lock()
@@ -87,28 +84,31 @@ def create_app(*, token, port=8081, compose=run_compose):
 
     async def dispatch(request):
         action = request.match_info["action"]
-        if action == "status" and request.method != "GET":
-            raise web.HTTPMethodNotAllowed(request.method, ["GET"])
-        if action != "status" and request.method != "POST":
-            raise web.HTTPMethodNotAllowed(request.method, ["POST"])
         if request.can_read_body or request.query:
             return problem(400, "unexpected_arguments")
         if lock.locked():
             return problem(409, "manager_busy")
 
         async with lock:
-            try:
-                output = await compose(COMMANDS[action])
-                if action == "status":
-                    return web.json_response(service_status(output), headers={"Cache-Control": "no-store"})
-            except ComposeError:
-                return problem(502, "compose_failed")
-            except TimeoutError:
-                return problem(504, "compose_timeout")
+            if action == "status":
+                return web.json_response(await service.status(), headers={"Cache-Control": "no-store"})
+            if action in {"stop", "restart"}:
+                await service.stop()
+            if action in {"start", "restart"}:
+                try:
+                    await service.start()
+                except OSError:
+                    return problem(502, "http_start_failed")
         return web.json_response({"action": action})
 
+    async def stop_service(app):
+        async with lock:
+            await service.stop()
+
     app = web.Application(middlewares=[authenticate])
-    app.router.add_route("*", "/v1/{action:status|start|stop|restart}", dispatch)
+    app.router.add_get("/v1/{action:status}", dispatch)
+    app.router.add_post("/v1/{action:start|stop|restart}", dispatch)
+    app.on_cleanup.append(stop_service)
     return app
 
 
@@ -118,4 +118,5 @@ if __name__ == "__main__":
         raise SystemExit("Set IDLAB_MANAGER_TOKEN before starting the management API")
     if manager_token == os.environ.get("IDLAB_TOKEN"):
         raise SystemExit("IDLAB_MANAGER_TOKEN must differ from IDLAB_TOKEN")
-    web.run_app(create_app(token=manager_token), host="127.0.0.1", port=8081)
+    forwarded = os.environ.get("IDLAB_LOOPBACK_FORWARDED") == "1"
+    web.run_app(create_app(token=manager_token), host="0.0.0.0" if forwarded else "127.0.0.1", port=8081)

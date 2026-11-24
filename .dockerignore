@@ -6,3 +6,5 @@
 !core/server.py
 !core/web/
 !core/web/**
+!service/
+!service/manager.py

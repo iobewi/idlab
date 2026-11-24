@@ -1,38 +1,29 @@
-# Gestion du service web IDLab
+# Gestion du service HTTP IDLab
 
-Le serveur web tourne dans le conteneur `core`. Le gestionnaire tourne sur
-l'hôte Docker et reste disponible quand le conteneur est arrêté. Le
-devcontainer peut appeler les deux API par HTTP. Le navigateur reste
-propriétaire des ports Web Serial.
+Le gestionnaire et le serveur HTTP tournent dans le même conteneur.
+Le gestionnaire démarre avec le conteneur. Le serveur HTTP démarre sur
+commande et peut être arrêté ou redémarré indépendamment.
 
-## Première installation
+## Lancer le conteneur
 
-Depuis la racine du dépôt, sur l'hôte Docker, avec Docker Engine 28 ou plus
-récent, le plugin Docker Compose et Python 3.12+ :
-
-```sh
-python -m pip install -r core/requirements.txt
-docker compose build core
-python service/manager.py
-```
-
-Avant de lancer le gestionnaire, définir dans son environnement un secret
-aléatoire `IDLAB_MANAGER_TOKEN`. Si des scripts doivent aussi accéder à
-l'API du banc, définir séparément `IDLAB_TOKEN` dans le même environnement.
-Compose transmet seulement `IDLAB_TOKEN` au conteneur. Garder les secrets
-hors de Git. Le compte qui lance le gestionnaire doit pouvoir appeler Docker.
+Sur l'hôte Docker, définir un secret aléatoire `IDLAB_MANAGER_TOKEN` et
+exécuter `docker compose up -d --build core` depuis la racine du dépôt.
+Définir séparément `IDLAB_TOKEN` si des scripts doivent aussi accéder à
+l'API du banc. Le gestionnaire écoute sur le port `8081`. Le serveur web,
+une fois démarré, écoute sur le port `8080`. Compose publie les deux ports
+sur `127.0.0.1` de l'hôte. Utiliser Docker Engine 28 ou plus récent.
 
 ## Appels HTTP
 
-Le gestionnaire écoute sur `127.0.0.1:8081`. Chaque requête doit porter
+Chaque requête de gestion doit porter
 `Authorization: Bearer <IDLAB_MANAGER_TOKEN>`. Les POST ont un corps vide.
 
 | Requête | Effet |
 |---|---|
-| `GET /v1/status` | Renvoie `state`, `health` et `ready`. `ready` vaut vrai si le conteneur est en cours d'exécution et que Docker le déclare sain. |
-| `POST /v1/start` | Démarre le conteneur à partir de l'image construite. |
-| `POST /v1/stop` | Arrête le conteneur. |
-| `POST /v1/restart` | Redémarre un conteneur déjà créé. Pour le premier démarrage, utiliser `start`. |
+| `GET /v1/status` | Renvoie `state` (`stopped`, `running` ou `exited`) et `ready`. En cas de sortie du processus, donne aussi `exit_code`. |
+| `POST /v1/start` | Lance le serveur HTTP. Si le processus tourne déjà, le laisse en place. |
+| `POST /v1/stop` | Arrête le serveur HTTP et attend la fin du processus. |
+| `POST /v1/restart` | Arrête le serveur HTTP, puis démarre un nouveau processus. |
 
 ```sh
 curl --fail-with-body -X POST \
@@ -44,25 +35,20 @@ curl --fail-with-body \
   http://127.0.0.1:8081/v1/status
 ```
 
-Le gestionnaire redémarre les conteneurs existants avec leur image actuelle.
-Pour appliquer une image ou une configuration modifiée, exécuter
+Après `start` ou `restart`, attendre `ready: true`. Ce champ indique
+que le processus HTTP démarré par le gestionnaire répond à `/health`.
+Une commande concurrente donne `409 manager_busy`. Un arrêt ou
+redémarrage ferme les sessions de carte. Reconnecter les cartes dans
+le navigateur.
+
+Docker Compose reste l'outil de déploiement du conteneur. Pour appliquer
+une image ou une configuration modifiée, relancer
 `docker compose up -d --build core` sur l'hôte Docker.
-
-Un succès sur `start` ou `restart` indique que Compose a terminé sa commande.
-Attendre `ready: true` via `status` avant de lancer un script. Le contrôle
-de santé du conteneur utilise `GET http://127.0.0.1:8080/health`.
-Une autre commande en cours donne `409 manager_busy`. Un échec de Compose
-donne `502 compose_failed`. Après un délai dépassé (`504 compose_timeout`),
-relire l'état avant de réessayer.
-
-Un arrêt ou redémarrage ferme les sessions des cartes et interrompt les
-lectures actives. Reconnecter les cartes dans le navigateur après reprise.
 
 ## Depuis le devcontainer
 
-Sur l'hôte Docker, les deux ports sont publiés en boucle locale. Si le
-devcontainer a son propre réseau, établir un tunnel SSH depuis celui-ci
-vers l'hôte Docker, puis conserver les mêmes URL HTTP :
+Si le devcontainer a son propre réseau, établir un tunnel SSH depuis
+celui-ci vers l'hôte Docker pour conserver les mêmes URL HTTP.
 
 ```sh
 ssh -N -o ExitOnForwardFailure=yes \
@@ -70,12 +56,14 @@ ssh -N -o ExitOnForwardFailure=yes \
   -L 127.0.0.1:8081:127.0.0.1:8081 utilisateur@hote-docker
 ```
 
-Utiliser les jetons correspondants depuis le devcontainer. Seul le
-conteneur IDLab rejoint le réseau Compose du service. L'interface web
-s'ouvre sur le poste opérateur à l'adresse `http://127.0.0.1:8080`, avec le
-même transfert du port 8080 si l'hôte Docker est distant.
+Le navigateur reste propriétaire des ports Web Serial. Il ouvre
+`http://127.0.0.1:8080` sur le poste opérateur, avec un transfert du
+port 8080 si l'hôte Docker est distant.
 
-## Tests logiciels
+## Tests sans Docker
 
-Depuis la racine, `python -m unittest discover -s service/tests -v`
-teste l'API du gestionnaire avec des réponses Compose simulées.
+Après installation des dépendances de `core/` et
+`npm ci --ignore-scripts --prefix core`, exécuter
+`python -m unittest discover -s service/tests -v` depuis la racine.
+Le test de cycle de vie lance le véritable serveur HTTP comme processus
+enfant, sur un port de test.

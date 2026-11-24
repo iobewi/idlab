@@ -95,7 +95,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     async def health(request):
         if not BUNDLE.is_file():
             return problem(503, "browser_bundle_unavailable")
-        return web.json_response({"status": "ready"}, headers={"Cache-Control": "no-store"})
+        return web.json_response({"status": "ready"}, headers={
+            "Cache-Control": "no-store", "X-IDLab-Pid": str(os.getpid()),
+        })
 
     async def devices(request):
         return web.json_response({name: board.describe() for name, board in boards.items()})
