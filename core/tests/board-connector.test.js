@@ -8,7 +8,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
   const events = [];
   const reads = [];
   const progress = [];
-  let identity, socket, responseBytes;
+  let identity, socket, responseBytes, commandResult;
   let deviceBaud = 115200;
   const bytes = Uint8Array.of(0, 255, 13);
   const port = {getInfo: () => ({usbVendorId: vid})};
@@ -72,7 +72,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
       events.push('console');
       onBytes(new TextEncoder().encode('READY\n'));
       const done = Promise.withResolvers();
-      return { done: done.promise, async close() { events.push('close-console'); done.resolve(); } };
+      return { done: done.promise, async write(value) { events.push('uart:' + new TextDecoder().decode(value)); }, async close() { events.push('close-console'); done.resolve(); } };
     },
     async reset() { events.push('reset'); },
     createSocket() {
@@ -84,9 +84,14 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
             responseBytes = message;
             return;
           }
-          identity = {...JSON.parse(message), generation: 'generation', capabilities: ['identify', 'flash.read']};
-          if (identity.loader === 'rom') identity.capabilities = ['identify'];
-          queueMicrotask(() => socket.onmessage({data: '{"generation":"generation"}'}));
+          const payload = JSON.parse(message);
+          if (payload.uart) return;
+          if (payload.result) { commandResult = payload; return; }
+          identity = {...(payload.identity ?? payload), generation: 'generation',
+            capabilities: ['identify', 'flash.read']};
+          if (identity.loader === 'rom' || identity.mode === 'console') identity.capabilities = ['identify'];
+          const reply = payload.identity ? {identity} : {generation: 'generation'};
+          queueMicrotask(() => socket.onmessage({data: JSON.stringify(reply)}));
         },
         close() { socket.readyState = 3; socket.onclose(); },
       };
@@ -98,9 +103,17 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
         if (socket.readyState === 3) throw new Error('device_disconnected');
         return {json: async () => identity};
       }
-      if (path === '/devices/board/control/return-console') {
+      if (path.startsWith('/devices/board/control/')) {
         assert.deepEqual(JSON.parse(options.body), {generation: 'generation'});
-        events.push('reserve-return');
+        return {};
+      }
+      if (path === '/devices/board/command') {
+        const payload = JSON.parse(options.body);
+        assert.equal(payload.generation, 'generation');
+        commandResult = null;
+        await socket.onmessage({data: JSON.stringify({...payload, id: 'test-command', generation: undefined})});
+        assert.equal(commandResult?.result, 'test-command');
+        if (commandResult.error) throw new Error(commandResult.error);
         return {};
       }
       assert.equal(path, '/devices/board/flash/read');
@@ -130,7 +143,7 @@ test('identification and flash reads from console restore the same console and r
   assert.equal((await card.identify()).mac, '10:20:30:40:50:60');
   assert.equal(card.mode, 'console');
   assert.equal(card.lastIdentity.flash_id, 0x184068);
-  assert.equal(card.identity, null);
+  assert.equal(card.identity.mode, 'console');
   const result = await card.readFlash(0x8000, 3);
   assert.equal(result.capacity, 16 * 1024 * 1024);
   assert.deepEqual([...new Uint8Array(await result.blob.arrayBuffer())], [0, 255, 13]);
@@ -170,15 +183,20 @@ test('an automatically detected loader stays in download mode through reads and 
 test('the explicit loader action can return to console and switch again', async () => {
   const {card, events} = fixture();
   await card.connect();
+  const socket = card.socket;
+  await card.write('status');
+  assert.equal(events.at(-1), 'uart:status');
   await card.enterLoader();
+  assert.equal(card.socket, socket);
   assert.equal(card.canReturnToConsole, true);
   card.control = 'external';
   await assert.rejects(card.returnConsole(), /Carte indisponible/);
   card.control = 'available';
   await card.returnConsole();
+  assert.equal(card.socket, socket);
   assert.equal(card.mode, 'console');
   assert.equal(card.consoleUnavailable, false);
-  assert.deepEqual(events.slice(-4), ['reserve-return', 'close-loader', 'console', 'reset']);
+  assert.deepEqual(events.slice(-3), ['close-loader', 'console', 'reset']);
   await card.enterLoader();
   assert.equal(card.canReturnToConsole, true);
   await card.disconnect();

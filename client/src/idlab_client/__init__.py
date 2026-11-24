@@ -7,7 +7,7 @@ import json
 import os
 import re
 from urllib.error import HTTPError
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
@@ -46,13 +46,56 @@ class Board:
 
     name: str
     generation: str
-    chip: str
-    mac: str
+    chip: str | None
+    mac: str | None
     flash_size: int | None
     transport: str
-    loader: str
+    loader: str | None
     capabilities: tuple[str, ...]
     _client: "IDLabClient" = field(repr=False, compare=False)
+
+    @property
+    def mode(self) -> str:
+        return "console" if self.loader is None else "loader"
+
+    def _command(self, command: str, **params) -> "Board":
+        result = self._client._request(_board_path(self.name) + "/command", {
+            "generation": self.generation, "command": command, **params,
+        })
+        return self._client._board(self.name, result)
+
+    def enter_loader(self) -> "Board":
+        """Switch from console to the flash loader on a supported transport."""
+        return self._command("mode.loader")
+
+    def return_console(self) -> "Board":
+        """Return to console if this connection entered the loader from console."""
+        return self._command("mode.console")
+
+    def reset(self) -> None:
+        """Restart the firmware from console mode."""
+        self._command("console.reset")
+
+    def write_uart(self, data: str | bytes) -> None:
+        """Send bytes or UTF-8 text verbatim to the running console."""
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        if not isinstance(data, bytes) or not 1 <= len(data) <= 1900:
+            raise ValueError("Expected 1 to 1900 UART bytes")
+        self._command("uart.write", hex=data.hex())
+
+    def read_uart(self, cursor: int | None = None) -> tuple[bytes, int, int]:
+        """Return captured RX bytes, the next cursor, and the number of lost bytes."""
+        query = {"generation": self.generation}
+        if cursor is not None:
+            if type(cursor) is not int or cursor < 0:
+                raise ValueError("Expected a nonnegative UART cursor")
+            query["cursor"] = str(cursor)
+        page = self._client._request(_board_path(self.name) + "/uart?" + urlencode(query))
+        try:
+            return bytes.fromhex(page["hex"]), page["cursor"], page["dropped"]
+        except (KeyError, TypeError, ValueError) as error:
+            raise IDLabError("Invalid UART capture response") from error
 
     def read_flash(self, address: int, size: int) -> bytes:
         """Read exactly size bytes using this board's current session."""

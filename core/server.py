@@ -1,6 +1,6 @@
 """Loopback HTTP API and WebSocket broker for browser-owned serial ports."""
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hmac
 import ipaddress
 import os
@@ -16,6 +16,8 @@ from campaigns import CampaignError, Campaigns, search_parameters
 ROOT = Path(__file__).resolve().parent
 BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
 MAX_READ = 4 * 1024 * 1024
+UART_BUFFER = 1024 * 1024
+UART_PAGE = 64 * 1024
 BOARD_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}")
 MAC = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", re.IGNORECASE)
 
@@ -41,11 +43,14 @@ class Board:
     identity: dict
     pending: Operation | None = None
     control: Control | None = None
-    returning_to_console: bool = False
+    port_key: str | None = None
+    local_transition: bool = False
+    uart: bytearray = field(default_factory=bytearray)
+    uart_end: int = 0
 
     def describe(self):
         state = ("stopping" if self.control and self.control.stopped else
-                 "busy" if self.pending or self.returning_to_console else "external" if self.control else "available")
+                 "busy" if self.pending or self.local_transition else "external" if self.control else "available")
         return {"generation": self.generation, **self.identity, "control": state}
 
 
@@ -58,14 +63,20 @@ def validate_identity(value):
         raise ValueError("invalid_identity")
     chip, mac = value.get("chip"), value.get("mac")
     size, transport, loader = (value.get(key) for key in ("flash_size", "transport", "loader"))
+    if transport not in ("usb_uart", "usb_serial_jtag", "usb_otg", "unknown"):
+        raise ValueError("invalid_transport")
+    if value.get("mode") == "console":
+        capabilities = ["identify", "uart.write"]
+        if transport in ("usb_uart", "usb_serial_jtag"):
+            capabilities += ["mode.loader", "console.reset"]
+        return {"mode": "console", "chip": None, "mac": None, "flash_size": None,
+                "loader": None, "transport": transport, "capabilities": capabilities}
     if not isinstance(chip, str) or not re.fullmatch(r"esp32[a-z0-9]*", chip):
         raise ValueError("invalid_chip")
     if not isinstance(mac, str) or not MAC.fullmatch(mac) or mac.lower() in {"00:" * 5 + "00", "ff:" * 5 + "ff"}:
         raise ValueError("invalid_mac")
     if size is not None and (type(size) is not int or not 0 < size <= 2**26):
         raise ValueError("invalid_flash_capacity")
-    if transport not in ("usb_uart", "usb_serial_jtag", "usb_otg", "unknown"):
-        raise ValueError("invalid_transport")
     if loader not in ("rom", "stub"):
         raise ValueError("invalid_loader")
     metadata = {}
@@ -80,9 +91,14 @@ def validate_identity(value):
             if field is not None and (type(field) is not int or not 0 <= field <= maximum):
                 raise ValueError(f"invalid_{key}")
             metadata[key] = field
+    capabilities = ["identify", "flash.read"] if loader == "stub" and size else ["identify"]
+    if value.get("return_to_console") is True and transport in ("usb_uart", "usb_serial_jtag"):
+        capabilities.append("mode.console")
+    if value.get("mode") == "loader":
+        metadata["mode"] = "loader"
     return {
         "chip": chip, "mac": mac.lower(), "flash_size": size, "transport": transport, "loader": loader,
-        "capabilities": ["identify", "flash.read"] if loader == "stub" and size else ["identify"],
+        "capabilities": capabilities,
         **metadata,
     }
 
@@ -124,7 +140,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             browser = hmac.compare_digest(cookie.encode(), session.encode())
             bearer = request.headers.get("Authorization", "")
             script = token and hmac.compare_digest(bearer.encode(), f"Bearer {token}".encode())
-            scoped = re.fullmatch(r"/api/v1/devices/([\w-]+)(/flash/read)?", request.path)
+            scoped = re.fullmatch(r"/api/v1/devices/([\w-]+)(/flash/read|/command|/uart)?", request.path)
             board = boards.get(scoped[1]) if scoped else None
             control = board.control if board else None
             control_request = control and hmac.compare_digest(
@@ -223,26 +239,27 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         name = request.match_info["name"]
         action = request.match_info["action"]
         board = boards.get(name)
-        if action == "return-console":
+        if action in ("local-transition", "finish-transition"):
             generation = await text_field(request, "generation", 32)
             board = boards.get(name)
             if not board or board.socket.closed or board.generation != generation:
                 return problem(409, "device_session_changed")
             if board.control:
                 return problem(409, "externally_controlled")
-            if board.pending or board.returning_to_console:
+            if board.pending or (action == "local-transition" and board.local_transition):
                 return problem(409, "device_busy")
-            board.returning_to_console = True
-            return web.json_response({"control": "busy"})
+            board.local_transition = action == "local-transition"
+            return web.json_response({"control": board.describe()["control"]})
         if action == "token":
             if not board or board.socket.closed:
                 return problem(404, "device_disconnected")
-            if "flash.read" not in board.identity["capabilities"]:
+            binding = board.port_key or board.identity["mac"]
+            if not binding:
                 return problem(409, "operation_unsupported")
             if name in tokens:
                 return problem(409, "control_token_exists")
             credential = secrets.token_urlsafe(32)
-            tokens[name] = (credential, board.identity["mac"])
+            tokens[name] = (credential, binding)
             await publish_control(board, name)
             return web.json_response({"token": credential}, headers={"Cache-Control": "no-store"})
         if action == "revoke":
@@ -263,11 +280,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         board = boards.get(name)
         if not board or board.socket.closed:
             return problem(404, "device_disconnected")
-        if board.identity["mac"] != grant[1]:
+        if (board.port_key or board.identity["mac"]) != grant[1]:
             return problem(403, "control_token_device_mismatch")
-        if "flash.read" not in board.identity["capabilities"]:
-            return problem(409, "operation_unsupported")
-        if board.control or board.pending or board.returning_to_console:
+        if board.control or board.pending or board.local_transition:
             return problem(409, "device_busy")
         socket = web.WebSocketResponse(heartbeat=20)
         control = Control(secrets.token_urlsafe(32), socket)
@@ -298,11 +313,35 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             message = await socket.receive_json(timeout=90)
             if name in boards:
                 raise ValueError("device_already_connected")
-            board = Board(uuid.uuid4().hex, socket, validate_identity(message))
+            identity = validate_identity(message)
+            port_key = message.get("port_key")
+            if port_key is not None and (not isinstance(port_key, str) or not re.fullmatch(r"[0-9a-f-]{36}", port_key)):
+                raise ValueError("invalid_port_key")
+            board = Board(uuid.uuid4().hex, socket, identity, port_key=port_key)
             boards[name] = board
             await socket.send_json({"generation": board.generation, "has_token": name in tokens})
             async for message in socket:
                 pending = board.pending
+                if message.type == WSMsgType.TEXT and message.data.startswith("{"):
+                    event = message.json()
+                    if not isinstance(event, dict):
+                        break
+                    if "identity" in event and (pending or board.local_transition):
+                        board.identity = validate_identity(event["identity"])
+                        await socket.send_json({"identity": board.describe()})
+                    elif "uart" in event and board.identity.get("mode") == "console":
+                        encoded = event["uart"]
+                        if not isinstance(encoded, str) or len(encoded) > UART_PAGE * 2:
+                            break
+                        data = bytes.fromhex(encoded)
+                        board.uart.extend(data)
+                        board.uart_end += len(data)
+                        del board.uart[:max(0, len(board.uart) - UART_BUFFER)]
+                    elif pending and not pending.future.done() and event.get("result") == pending.id:
+                        pending.future.set_result(event)
+                    else:
+                        break
+                    continue
                 if not pending or pending.future.done():
                     break
                 if message.type == WSMsgType.BINARY:
@@ -324,6 +363,91 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             sockets.discard(socket)
         return socket
 
+    def command_refusal(request, board):
+        control = board.control
+        if request[LOCAL_OPERATOR]:
+            if control:
+                return problem(409, "externally_controlled")
+        elif not control or not hmac.compare_digest(
+            request.headers.get("Authorization", "").encode(), f"Bearer {control.credential}".encode(),
+        ):
+            return problem(403, "control_session_required")
+        elif control.stopped:
+            return problem(403, control.stopped)
+        return None
+
+    async def device_command(request):
+        try:
+            payload = await request.json()
+        except (TypeError, ValueError):
+            return problem(400, "invalid_json")
+        if not isinstance(payload, dict) or not isinstance(payload.get("command"), str):
+            return problem(400, "invalid_arguments")
+        command = payload["command"]
+        fields = {"generation", "command"}
+        if command == "uart.write":
+            fields.add("hex")
+            encoded = payload.get("hex")
+            if not isinstance(encoded, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{2}){1,1900}", encoded):
+                return problem(400, "invalid_arguments")
+        elif command not in ("mode.loader", "mode.console", "console.reset"):
+            return problem(409, "operation_unsupported")
+        if set(payload) != fields:
+            return problem(400, "invalid_arguments")
+        name = request.match_info["name"]
+        board = boards.get(name)
+        if not board or board.socket.closed or payload["generation"] != board.generation:
+            return problem(409, "device_session_changed")
+        refusal = command_refusal(request, board)
+        if refusal is not None:
+            return refusal
+        if board.pending or board.local_transition:
+            return problem(409, "device_busy")
+        if command not in board.identity["capabilities"]:
+            return problem(409, "operation_unsupported")
+        control = board.control
+        operation = Operation(uuid.uuid4().hex, asyncio.get_running_loop().create_future())
+        board.pending = operation
+        try:
+            message = {"id": operation.id, "command": command}
+            if command == "uart.write":
+                message["hex"] = payload["hex"]
+            await board.socket.send_json(message)
+            result = await asyncio.wait_for(operation.future, timeout=30)
+            if control and control.stopped:
+                return problem(403, control.stopped)
+            if not isinstance(result, dict):
+                return problem(502, "device_session_changed")
+            if result.get("error"):
+                return problem(502, "device_command_failed")
+            return web.json_response(board.describe())
+        except (ConnectionError, TimeoutError):
+            await board.socket.close(code=1011)
+            return problem(502, "device_session_changed")
+        finally:
+            board.pending = None
+            if control and control.stopped and board.control is control:
+                board.control = None
+                await publish_control(board, name)
+
+    async def read_uart(request):
+        board = boards.get(request.match_info["name"])
+        if not board or board.socket.closed:
+            return problem(404, "device_disconnected")
+        if request.query.get("generation") != board.generation:
+            return problem(409, "device_session_changed")
+        start = board.uart_end - len(board.uart)
+        try:
+            cursor = int(request.query.get("cursor", start))
+        except (TypeError, ValueError):
+            return problem(400, "invalid_arguments")
+        if not 0 <= cursor <= board.uart_end:
+            return problem(400, "invalid_arguments")
+        offset = max(cursor, start)
+        data = board.uart[offset - start:offset - start + UART_PAGE]
+        return web.json_response({"hex": data.hex(), "cursor": offset + len(data), "dropped": offset - cursor},
+                                 headers={"Cache-Control": "no-store"})
+
     async def read_flash(request):
         try:
             params = await request.json()
@@ -340,22 +464,16 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if not board or board.socket.closed or params["generation"] != board.generation:
             return problem(409, "device_session_changed")
         control = board.control
-        if request[LOCAL_OPERATOR]:
-            if control:
-                return problem(409, "externally_controlled")
-        elif not control or not hmac.compare_digest(
-            request.headers.get("Authorization", "").encode(), f"Bearer {control.credential}".encode(),
-        ):
-            return problem(403, "control_session_required")
-        elif control.stopped:
-            return problem(403, control.stopped)
+        refusal = command_refusal(request, board)
+        if refusal is not None:
+            return refusal
         if "flash.read" not in board.identity["capabilities"]:
             return problem(409, "operation_unsupported")
         address, size = params["address"], params["size"]
         if (type(address) is not int or type(size) is not int or address < 0
                 or not 0 < size <= MAX_READ or address + size > board.identity["flash_size"]):
             return problem(400, "invalid_flash_range")
-        if board.pending or board.returning_to_console:
+        if board.pending:
             return problem(409, "device_busy")
 
         campaigns = request.app[CAMPAIGNS]
@@ -367,7 +485,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         try:
             await board.socket.send_json({"id": operation.id, "command": "flash.read", "address": address, "size": size})
             data = await asyncio.wait_for(operation.future, timeout=read_timeout)
-            complete = data is not None and len(data) == size
+            complete = isinstance(data, bytes) and len(data) == size
             if control and control.stopped:
                 return problem(403, control.stopped)
             if complete:
@@ -414,8 +532,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         web.post("/api/v1/campaigns/{id}/abort", abort_campaign),
         web.get("/api/v1/devices", devices),
         web.get("/api/v1/devices/{name}", identify),
-        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke|return-console}", manage_control),
+        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke|local-transition|finish-transition}", manage_control),
         web.get("/api/v1/devices/{name}/control/connect", connect_control),
+        web.post("/api/v1/devices/{name}/command", device_command),
+        web.get("/api/v1/devices/{name}/uart", read_uart),
         web.post("/api/v1/devices/{name}/flash/read", read_flash),
         web.get("/agent", agent),
         web.static("/web", ROOT / "web"),

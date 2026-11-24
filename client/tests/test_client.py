@@ -30,13 +30,14 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
         self.client = IDLabClient(self.origin, token="test-token", timeout=3)
 
-    async def connect(self):
+    async def connect(self, *, console=False):
         socket = await self.browser.ws_connect(
             self.origin + "/agent?device=test-board", origin=self.origin,
             timeout=ClientWSTimeout(ws_close=2),
         )
         self.addAsyncCleanup(socket.close)
-        await socket.send_json({
+        await socket.send_json({"mode": "console", "transport": "usb_uart",
+                                "port_key": "00000000-0000-4000-8000-000000000001"} if console else {
             "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
             "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
         })
@@ -66,6 +67,9 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("flash.read", board.capabilities)
 
         async with self.control(socket) as controller:
+            with self.assertRaises(IDLabHTTPError) as refused:
+                await asyncio.to_thread(controller.return_console)
+            self.assertEqual(refused.exception.code, "operation_unsupported")
             task = asyncio.create_task(asyncio.to_thread(controller.read_flash, 4096, 4))
             command = await socket.receive_json(timeout=2)
             self.assertEqual((command["command"], command["address"], command["size"]),
@@ -83,6 +87,55 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IDLabHTTPError) as caught:
             await asyncio.to_thread(old.read_flash, 0, 4)
         self.assertEqual((caught.exception.status, caught.exception.code), (409, "device_session_changed"))
+
+    async def test_one_control_session_writes_uart_and_switches_modes(self):
+        socket = await self.connect(console=True)
+        async with self.control(socket) as console:
+            self.assertEqual(console.mode, "console")
+            await socket.send_json({"uart": b"ready\n".hex()})
+            for _ in range(10):
+                data, cursor, dropped = await asyncio.to_thread(console.read_uart)
+                if data:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual((data, cursor, dropped), (b"ready\n", 6, 0))
+            observer = await asyncio.to_thread(self.client.identify, "test-board")
+            self.assertEqual(await asyncio.to_thread(observer.read_uart), (b"ready\n", 6, 0))
+            self.assertEqual(await asyncio.to_thread(observer.read_uart, 6), (b"", 6, 0))
+            with self.assertRaises(IDLabHTTPError) as refused:
+                await asyncio.to_thread(observer.write_uart, b"blocked")
+            self.assertEqual(refused.exception.code, "control_session_required")
+
+            async def command(method, expected, *, data=None, identity=None):
+                args = (data,) if data is not None else ()
+                task = asyncio.create_task(asyncio.to_thread(method, *args))
+                request = await socket.receive_json(timeout=2)
+                self.assertEqual(request["command"], expected)
+                self.assertNotIn("generation", request)
+                if data is not None:
+                    self.assertEqual(bytes.fromhex(request["hex"]), data)
+                if identity is not None:
+                    await socket.send_json({"identity": identity})
+                    updated = await socket.receive_json(timeout=2)
+                    self.assertEqual(updated["identity"]["generation"], console.generation)
+                await socket.send_json({"result": request["id"]})
+                return await task
+
+            await command(console.write_uart, "uart.write", data=b"status\r\n")
+            await command(console.reset, "console.reset")
+            loader = await command(console.enter_loader, "mode.loader", identity={
+                "mode": "loader", "loader": "stub", "transport": "usb_uart",
+                "chip": "esp32s3", "mac": "10:20:30:40:50:60", "flash_size": 16777216,
+                "return_to_console": True,
+            })
+            self.assertEqual(loader.mode, "loader")
+            with self.assertRaises(IDLabHTTPError) as reset:
+                await asyncio.to_thread(loader.reset)
+            self.assertEqual(reset.exception.code, "operation_unsupported")
+            again = await command(loader.return_console, "mode.console",
+                                  identity={"mode": "console", "transport": "usb_uart"})
+            self.assertEqual((again.mode, again.generation), ("console", console.generation))
+            await command(again.write_uart, "uart.write", data=b"after\n")
 
     async def test_truncated_read_is_an_error(self):
         socket = await self.connect()

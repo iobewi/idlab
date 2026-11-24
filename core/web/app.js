@@ -249,7 +249,7 @@ function renderPartitions(loader) {
 
 function renderIdentification() {
   const card = selected;
-  const current = card?.identity;
+  const current = card?.mode === 'loader' ? card.identity : null;
   const info = current ?? card?.lastIdentity;
   const transport = info?.transport ?? card?.transport;
   const nativeUsb = transport === 'usb_otg' || transport === 'usb_serial_jtag';
@@ -382,12 +382,12 @@ function render() {
   $('pause').textContent = selected?.pausedAt != null ? 'Reprendre l’affichage' : 'Pause affichage';
   $('follow').hidden = !selected || selected.follow;
   $('follow-state').textContent = selected?.follow ? 'Suivi du direct' : 'Défilement manuel';
-  $('status-label-agent').textContent = [...cards.values()].some(c => c.mode === 'loader')
+  $('status-label-agent').textContent = [...cards.values()].some(c => c.socket?.readyState === 1)
     ? 'Agent connecté' : 'Agent hors ligne';
   $('server-state').textContent = $('status-label-agent').textContent;
   $('control-state').textContent = selected?.control === 'stopping' ? 'Arrêt en cours'
     : selected?.busy || selected?.requesting ? 'Opération en cours' : external ? 'Pilotage externe' : 'Disponible';
-  $('grant').disabled = !selected?.identity?.capabilities.includes('flash.read') || selected.hasControlToken;
+  $('grant').disabled = !selected?.identity || selected.hasControlToken || !['console', 'loader'].includes(selected.mode);
   $('revoke').disabled = !selected?.hasControlToken;
   $('release-control').disabled = !external || selected.control === 'stopping';
   $('grant-state').textContent = selected?.hasControlToken ? 'Jeton émis' : 'Aucun jeton';
@@ -694,7 +694,6 @@ $('send').onclick = async () => {
       payload = Uint8Array.from(compact.match(/../g), byte => parseInt(byte, 16));
     }
     await card.write(payload);
-    card.capture.note('TX', value);
     $('uart').value = '';
     scheduleConsole(card);
   } catch (error) { say(error.message); }

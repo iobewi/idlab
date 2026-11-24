@@ -58,17 +58,21 @@ curl --fail-with-body \
 | `GET /api/v1/devices/{name}` | `200`, description de la session |
 | `POST /api/v1/devices/{name}/flash/read` | `200`, octets bruts en `application/octet-stream` |
 
-Le reset matériel est indisponible via l’API des cartes, en ROM comme
-avec un stub. Pour quitter le mode téléchargement, déconnecter la carte
-dans IDLab, appuyer physiquement sur RESET sans maintenir BOOT, puis
-reconnecter la carte. `POST /api/v1/httpd/restart` redémarre le processus HTTP.
+Le reset via l’API des cartes est disponible en console sur les transports
+compatibles. En téléchargement, le retour automatique est réservé aux
+connexions ayant ouvert le chargeur depuis la console. Si IDLab a détecté
+le chargeur à la connexion, déconnecter la carte dans IDLab, appuyer
+physiquement sur RESET sans maintenir BOOT, puis reconnecter la carte.
+`POST /api/v1/httpd/restart` redémarre le processus HTTP.
 
 ### Pilotage exclusif
 
-Pour une carte en session stub, le web peut créer un jeton avec **Get token**.
-Le jeton est réutilisable pour cette carte et sa MAC, y compris après
-reconnexion. Les jetons sont conservés en mémoire jusqu’à leur révocation
-ou au redémarrage du serveur.
+Pour une carte connectée en console ou en téléchargement, le web peut
+créer un jeton avec **Get token**. Il est réutilisable tant que la carte
+reste associée au même connecteur, y compris après une reconnexion dans
+la même page. En cas de retrait de la carte ou de rechargement de la page,
+révoquer l’ancien jeton et en créer un autre. Les jetons sont conservés
+en mémoire jusqu’à leur révocation ou au redémarrage du serveur.
 
 | Méthode et chemin sous `/api/v1/devices/{name}` | Accès et effet |
 |---|---|
@@ -76,7 +80,7 @@ ou au redémarrage du serveur.
 | `GET /control/connect` (WebSocket) | Le jeton de pilotage est envoyé en Bearer. Renvoie un identifiant secret de session et la génération. La connexion ouverte réserve la carte. |
 | `POST /control/stop` | Session navigateur locale. Arrête le pilotage externe. Le jeton peut resservir. |
 | `POST /control/revoke` | Session navigateur locale. Supprime le jeton et arrête le pilotage externe. |
-| `POST /control/return-console` | Réserve la transition au navigateur local pour la génération fournie en JSON. Le connecteur ferme ensuite le canal du chargeur et effectue le retour console. |
+| `POST /control/local-transition` et `POST /control/finish-transition` | Le navigateur local réserve puis libère une transition interne pour la génération fournie en JSON. |
 
 Pendant le pilotage externe, la lecture flash exige l’identifiant secret
 de la session en Bearer. Le jeton général `IDLAB_TOKEN` permet de consulter
@@ -84,6 +88,25 @@ l’état de la carte et de piloter les campagnes. Une deuxième session de
 pilotage est refusée avec `409`. Une lecture interrompue par le web renvoie
 `403 control_stopped` ou `403 control_revoked`. Si l’arrêt coupe un
 transfert série, reconnecter la carte pour reprendre les commandes.
+
+Le navigateur et Python appellent `POST /api/v1/devices/{name}/command`
+avec `generation` et `command`. La réponse est la description actualisée
+de la carte. Les bascules console–chargeur gardent la même génération et
+le même canal agent.
+
+| Commande | Effet |
+|---|---|
+| `uart.write` | Envoie de 1 à 1 900 octets en console. Champ `hex` sans séparateur. |
+| `console.reset` | Redémarre le firmware depuis la console si le transport le permet. |
+| `mode.loader` | Ouvre le chargeur flash depuis la console si le transport le permet. |
+| `mode.console` | Revient en console depuis un chargeur ouvert par IDLab sur cette connexion. |
+
+`GET /api/v1/devices/{name}/uart?generation=…&cursor=…` renvoie les octets
+RX en hexadécimal, le prochain curseur et le nombre d’octets perdus avant
+ce curseur (`hex`, `cursor`, `dropped`). Sans curseur, la lecture commence
+au plus ancien octet conservé. Le serveur conserve au plus 1 Mio par carte
+et renvoie jusqu’à 64 Kio par appel. L’observation utilise le jeton général
+ou celui de la session de pilotage. En Python, utiliser `board.read_uart()`.
 
 Un nom de carte contient de 1 à 48 caractères ASCII parmi les lettres,
 chiffres, tirets et underscores. Le premier caractère est alphanumérique.

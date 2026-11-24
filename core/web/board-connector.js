@@ -4,6 +4,7 @@ import { ConsoleBuffer } from './console-buffer.js';
 import { BootIdentity } from './boot-identity.js';
 
 const CONSOLE_BAUD = 115200;
+const toHex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 
 async function api(path, options) {
   const response = await fetch('/api/v1' + path, options);
@@ -29,6 +30,7 @@ export class BoardConnector {
       [info.usbVendorId, info.usbProductId].filter(Number.isInteger)
         .map(value => value.toString(16).padStart(4, '0')).join(':');
     this.mode = 'disconnected';
+    this.portKey = crypto.randomUUID();
     this.lastLoaderBaud = ESP_SYNC_BAUD;
     this.temporaryLoader = false;
     this.loaderFromConsole = false;
@@ -88,12 +90,23 @@ export class BoardConnector {
     }
   }
 
-  async #openConsole() {
+  async #openConsole(restart = false) {
     if (this.lost) throw new Error('Port USB déconnecté.');
     this.boot.tail = '';
+    const startupBytes = [];
+    let ready = false;
+    const sendUart = bytes => {
+      if (this.socket?.readyState === 1) {
+        for (let offset = 0; offset < bytes.length; offset += 65536) {
+          this.socket.send(JSON.stringify({uart: toHex(bytes.subarray(offset, offset + 65536))}));
+        }
+      }
+    };
     const session = await this.openConsole(this.port, CONSOLE_BAUD, null, bytes => {
       const event = this.capture.append(bytes);
       this.boot.append(event.text);
+      if (ready) sendUart(bytes);
+      else startupBytes.push(new Uint8Array(bytes));
       this.onCapture();
     });
     this.session = session;
@@ -103,7 +116,11 @@ export class BoardConnector {
       this.disconnect(true).catch(failure => this.onJournal(failure.message));
     };
     session.done.then(() => ended(), ended);
+    if (restart) await this.reset(this.port, this.resetWait);
+    this.identity = await this.#publishIdentity({mode: 'console', transport: this.transport});
     if (this.lost) throw new Error('Port USB déconnecté.');
+    ready = true;
+    for (const bytes of startupBytes.splice(0)) sendUart(bytes);
     this.#setMode('console');
     this.onJournal('Console ouverte à ' + CONSOLE_BAUD + ' bauds');
   }
@@ -121,7 +138,9 @@ export class BoardConnector {
       await this.#closeSession();
       return;
     }
-    this.identity = await this.#register(driver);
+    this.identity = await this.#publishIdentity({
+      ...identity, mode: 'loader', return_to_console: fromConsole && this.canEnterLoader,
+    });
     this.romJedec = null;
     if (this.lost) throw new Error('Port USB déconnecté.');
     this.lastIdentity = this.identity;
@@ -133,7 +152,23 @@ export class BoardConnector {
     if (identity.transport === 'usb_uart') this.onJournal('Débit chargeur · ' + this.lastLoaderBaud + ' bauds');
   }
 
-  #register(driver) {
+  #publishIdentity(identity) {
+    if (!this.socket) return this.#register(identity);
+    return new Promise((resolve, reject) => {
+      const settle = (error, value) => {
+        clearTimeout(deadline);
+        this.identityReply = null;
+        if (error) reject(error);
+        else resolve(value);
+      };
+      const deadline = setTimeout(() => settle(new Error('Mode non confirmé par le serveur.')), 3000);
+      this.identityReply = settle;
+      try { this.socket.send(JSON.stringify({identity})); }
+      catch (error) { settle(error); }
+    });
+  }
+
+  #register(identity) {
     const url = new URL('/agent', this.origin);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     url.searchParams.set('device', this.name);
@@ -144,10 +179,12 @@ export class BoardConnector {
       const deadline = setTimeout(() => reject(new Error('Le serveur n’a pas enregistré la carte à temps.')), 10000);
       const registered = identity => { clearTimeout(deadline); resolve(identity); };
       const failed = error => { clearTimeout(deadline); reject(error); };
-      socket.onopen = () => socket.send(JSON.stringify(driver.identity));
+      socket.onopen = () => socket.send(JSON.stringify({...identity, port_key: this.portKey}));
       socket.onclose = () => {
         failed(interrupted);
-        if (this.socket === socket && this.mode === 'loader' && !this.requesting) {
+        if (this.socket !== socket) return;
+        this.identityReply?.(interrupted);
+        if (!this.requesting && !this.busy) {
           this.disconnect().catch(error => this.onJournal(error.message));
         }
       };
@@ -160,7 +197,9 @@ export class BoardConnector {
             this.hasControlToken = command.has_token;
             this.onChange();
           } else if (command.cancel) {
-            if (command.cancel === this.activeRead) this.cancelRead = true;
+            if (command.cancel === this.activeCommand) this.commandCancelled = true;
+          } else if (command.identity) {
+            this.identityReply?.(null, command.identity);
           } else if (command.generation) {
             const identity = await this.request('/devices/' + this.name).then(reply => reply.json());
             if (socket.readyState !== 1) throw interrupted;
@@ -168,7 +207,7 @@ export class BoardConnector {
             this.hasControlToken = command.has_token;
             registered(identity);
           } else {
-            await this.#serveRead(socket, driver, command);
+            await this.#serveCommand(socket, command);
           }
         } catch (error) {
           failed(error);
@@ -178,23 +217,28 @@ export class BoardConnector {
     });
   }
 
-  async #serveRead(socket, driver, command) {
+  async #serveCommand(socket, command) {
     if (this.busy || this.socket !== socket) return;
     this.busy = true;
-    this.activeRead = command.id;
+    this.activeCommand = command.id;
     this.onChange();
     const check = () => {
-      if (this.cancelRead) throw new Error('Lecture interrompue par l’opérateur.');
+      if (this.commandCancelled) throw new Error('Opération interrompue par l’opérateur.');
       if (socket.readyState !== 1 || this.socket !== socket || this.lost) throw new Error('device_session_changed');
     };
     try {
       check();
-      if (command.command !== 'flash.read') throw new Error('operation_unsupported');
+      if (command.command !== 'flash.read') {
+        await this.#runCommand(command);
+        check();
+        socket.send(JSON.stringify({result: command.id}));
+        return;
+      }
       const started = performance.now();
       let lastUpdate = started;
       this.flashProgress = {address: command.address, received: 0, total: command.size};
       this.onProgress();
-      const data = await driver.readFlash(command.address, command.size, check, received => {
+      const data = await this.session.readFlash(command.address, command.size, check, received => {
         const now = performance.now();
         if (received < command.size && now - lastUpdate < 250) return;
         lastUpdate = now;
@@ -207,26 +251,52 @@ export class BoardConnector {
       if (data.length === command.size) this.flashReadRate = data.length * 1000 / elapsed;
       this.onJournal('Lecture flash terminée · ' + command.size + ' octets');
     } catch (error) {
-      if (socket.readyState === 1) socket.send(command.id);
+      if (socket.readyState === 1) {
+        socket.send(command.command === 'flash.read' ? command.id
+          : JSON.stringify({result: command.id, error: 'device_command_failed'}));
+      }
       this.onJournal(error.message);
     } finally {
       this.flashProgress = null;
-      this.activeRead = null;
-      this.cancelRead = false;
+      this.activeCommand = null;
+      this.commandCancelled = false;
       this.onProgress();
       this.busy = false;
-      if (!this.requesting && (this.lost || socket.readyState !== 1)) await this.disconnect();
+      if (this.mode === 'connecting') await this.#clearSession();
+      else if (!this.requesting && (this.lost || socket.readyState !== 1)) await this.disconnect();
       this.onChange();
     }
   }
 
-  async #closeSession() {
+  async #runCommand({command, hex}) {
+    if (command === 'mode.loader' && this.mode === 'console' && this.canEnterLoader) {
+      this.#setMode('connecting');
+      await this.#closeSession(true);
+      await this.#openLoader('stub', {fromConsole: true});
+    } else if (command === 'mode.console' && this.canReturnToConsole) {
+      await this.#resumeConsole();
+    } else if (command === 'console.reset' && this.mode === 'console' && this.resetWait) {
+      await this.reset(this.port, this.resetWait);
+      this.onJournal('Redémarrage du firmware demandé');
+    } else if (command === 'uart.write' && this.mode === 'console') {
+      const bytes = Uint8Array.from(hex.match(/../g), byte => parseInt(byte, 16));
+      await this.session.write(bytes);
+      this.capture.note('TX', new TextDecoder().decode(bytes));
+      this.onCapture();
+    } else {
+      throw new Error('Commande indisponible dans ce mode.');
+    }
+  }
+
+  async #closeSession(keepAgent = false) {
     const session = this.session;
     const socket = this.socket;
-    this.session = this.socket = this.identity = null;
+    this.session = null;
     this.loaderFromConsole = false;
-    this.control = null;
-    socket?.close();
+    if (!keepAgent || socket?.readyState !== 1) {
+      this.socket = this.identity = this.control = null;
+      socket?.close();
+    }
     try {
       await session?.close();
     } catch (error) {
@@ -283,42 +353,56 @@ export class BoardConnector {
 
   async #resumeConsole() {
     this.#setMode('connecting');
-    await this.#closeSession();
-    await this.#openConsole();
-    if (this.resetWait) {
-      await this.reset(this.port, this.resetWait);
-    } else {
-      this.onJournal('Console ouverte · redémarre la carte si elle est encore en téléchargement.');
+    await this.#closeSession(true);
+    await this.#openConsole(true);
+  }
+
+  async #withLocalTransition(action) {
+    const socket = this.socket;
+    const generation = this.identity?.generation;
+    const request = suffix => this.request('/devices/' + this.name + '/control/' + suffix, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({generation}),
+    });
+    if (generation) await request('local-transition');
+    try {
+      return await action();
+    } finally {
+      if (generation && this.socket === socket && socket.readyState === 1) {
+        try { await request('finish-transition'); }
+        catch (error) { await this.#clearSession(); throw error; }
+      }
     }
   }
 
   async #withLoader(operation) {
-    return this.#exclusive(async () => {
+    return this.#exclusive(() => {
       if (this.mode === 'loader') return operation();
-      if (!this.canEnterLoader) {
-        throw new Error('Place la carte en mode téléchargement, puis reconnecte-la dans IDLab.');
-      }
-      this.#setMode('connecting');
-      this.onJournal('Passage au chargeur…');
-      let result, failure;
-      try {
-        await this.#closeSession();
-        await this.#openLoader('stub', {temporary: true});
-        result = await operation();
-      } catch (error) {
-        failure = error;
-      }
-      if (!this.lost) {
-        try {
-          this.onJournal('Retour en console…');
-          await this.#resumeConsole();
-        } catch (error) {
-          await this.#clearSession();
-          throw new Error((failure ? failure.message + ' · ' : '') + 'Retour console impossible : ' + error.message);
+      return this.#withLocalTransition(async () => {
+        if (!this.canEnterLoader) {
+          throw new Error('Place la carte en mode téléchargement, puis reconnecte-la dans IDLab.');
         }
-      }
-      if (failure) throw failure;
-      return result;
+        this.#setMode('connecting');
+        this.onJournal('Passage au chargeur…');
+        let result, failure;
+        try {
+          await this.#closeSession(true);
+          await this.#openLoader('stub', {temporary: true});
+          result = await operation();
+        } catch (error) {
+          failure = error;
+        }
+        if (!this.lost) {
+          try {
+            this.onJournal('Retour en console…');
+            await this.#resumeConsole();
+          } catch (error) {
+            await this.#clearSession();
+            throw new Error((failure ? failure.message + ' · ' : '') + 'Retour console impossible : ' + error.message);
+          }
+        }
+        if (failure) throw failure;
+        return result;
+      });
     });
   }
 
@@ -355,52 +439,30 @@ export class BoardConnector {
     });
   }
 
-  enterLoader() {
-    return this.#exclusive(async () => {
-      if (this.mode !== 'console') return;
-      if (!this.canEnterLoader) throw new Error('Place la carte en mode téléchargement, puis reconnecte-la dans IDLab.');
-      this.#setMode('connecting');
-      try {
-        await this.#closeSession();
-        await this.#openLoader('stub', {fromConsole: true});
-      } catch (error) {
-        await this.#clearSession();
-        throw error;
-      }
-    });
-  }
+  enterLoader() { return this.#command('mode.loader'); }
 
   returnConsole() {
-    return this.#exclusive(async () => {
-      if (!this.canReturnToConsole) throw new Error('Un RESET manuel sans BOOT est nécessaire.');
-      await this.request('/devices/' + this.name + '/control/return-console', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({generation: this.identity.generation}),
-      });
-      try { await this.#resumeConsole(); }
-      catch (error) { await this.#clearSession(); throw error; }
-    });
+    if (!this.canReturnToConsole) return Promise.reject(new Error('Un RESET manuel sans BOOT est nécessaire.'));
+    return this.#command('mode.console');
   }
 
   enterRom({reset = this.canResetIntoRom} = {}) {
-    return this.#exclusive(async () => {
+    return this.#exclusive(() => this.#withLocalTransition(async () => {
       if (this.identity?.loader === 'rom') return this.identity;
       const resetToRom = reset && this.canResetIntoRom;
       const previousMode = this.mode;
       const fromConsole = this.canEnterLoader && (previousMode === 'console' || this.loaderFromConsole);
-      const wasRegistered = Boolean(this.identity);
       this.lost = false;
       this.#setMode('connecting');
       try {
-        await this.#closeSession();
-        if (wasRegistered) await this.#waitForUnregister();
+        await this.#closeSession(true);
         if (this.lost) throw new Error('Port USB déconnecté.');
         await this.#openLoader('rom', {resetToRom, fromConsole});
         return this.identity;
       } catch (error) {
         if (previousMode === 'console' && !this.lost) {
           try {
-            await this.#closeSession();
+            await this.#closeSession(true);
             await this.#openConsole();
           } catch (recoveryError) {
             await this.#clearSession();
@@ -411,46 +473,33 @@ export class BoardConnector {
         }
         throw error;
       }
-    }, true);
-  }
-
-  async #waitForUnregister() {
-    // The gateway can finish closing the old agent after the local port closes.
-    // Wait for its registration to disappear before using the same card name.
-    for (let attempt = 0; attempt < 10; attempt++) {
-      try {
-        await this.request('/devices/' + this.name);
-      } catch (error) {
-        if (error.message === 'device_disconnected') return;
-        throw error;
-      }
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
-    throw new Error('L’ancienne session du chargeur est encore enregistrée.');
+    }), true);
   }
 
   readRomJedec() {
-    return this.#exclusive(async () => {
+    return this.#exclusive(() => this.#withLocalTransition(async () => {
       if (this.mode !== 'loader' || this.identity?.loader !== 'rom') {
         throw new Error('Ouvre une session ROM seule.');
       }
       this.romJedec = await this.session.readJedec();
       return this.romJedec;
-    });
+    }));
   }
 
   restart() {
-    return this.#exclusive(async () => {
-      if (this.mode !== 'console' || !this.resetWait) throw new Error('Reset indisponible.');
-      await this.reset(this.port, this.resetWait);
-      this.onJournal('Redémarrage du firmware demandé');
-    });
+    if (this.mode !== 'console' || !this.resetWait) return Promise.reject(new Error('Reset indisponible.'));
+    return this.#command('console.reset');
   }
 
   write(bytes) {
-    return this.#exclusive(() => {
-      if (this.mode !== 'console') throw new Error('Console indisponible.');
-      return this.session.write(bytes);
-    });
+    const payload = typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes;
+    return this.#command('uart.write', {hex: toHex(payload)});
+  }
+
+  #command(command, args = {}) {
+    return this.#exclusive(() => this.request('/devices/' + this.name + '/command', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command, generation: this.identity.generation, ...args}),
+    }));
   }
 }

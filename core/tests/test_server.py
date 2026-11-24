@@ -111,7 +111,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         ws = await self.browser.ws_connect(base + "connect", headers=headers)
         session = (await ws.receive_json(timeout=2))["session"]
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "external")
-        denied = await self.browser.post(base + "return-console", headers=self.local, json={"generation": generation})
+        denied = await self.browser.post(base + "local-transition", headers=self.local, json={"generation": generation})
         self.assertEqual((denied.status, await denied.json()), (409, {"error": "externally_controlled"}))
         with self.assertRaises(WSServerHandshakeError) as busy:
             await self.browser.ws_connect(base + "connect", headers=headers)
@@ -142,7 +142,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             await self.browser.ws_connect(base + "connect", headers=headers)
         self.assertEqual(caught.exception.status, 403)
 
-    async def test_return_to_console_reserves_the_board_until_the_agent_disconnects(self):
+    async def test_local_transition_reserves_the_board_until_finished(self):
         agent, generation = await self.board("board")
         base = "/api/v1/devices/board/control/"
         response = await self.browser.post(base + "token", headers=self.local)
@@ -150,21 +150,19 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await agent.receive_json(timeout=2)
 
         request = {"generation": generation}
-        response = await self.browser.post(base + "return-console", headers=self.script, json=request)
+        response = await self.browser.post(base + "local-transition", headers=self.script, json=request)
         self.assertEqual(response.status, 403)
-        response = await self.browser.post(base + "return-console", headers=self.local, json=request)
+        response = await self.browser.post(base + "local-transition", headers=self.local, json=request)
         self.assertEqual((response.status, await response.json()), (200, {"control": "busy"}))
-        self.assertEqual((await self.read("board", generation)).status, 409)
         headers = self.script | {"Authorization": "Bearer " + token}
         with self.assertRaises(WSServerHandshakeError) as busy:
             await self.browser.ws_connect(base + "connect", headers=headers)
         self.assertEqual(busy.exception.status, 409)
 
-        await agent.close()
-        _, fresh = await self.board("board")
-        self.assertNotEqual(fresh, generation)
+        response = await self.browser.post(base + "finish-transition", headers=self.local, json=request)
+        self.assertEqual(response.status, 200)
         async with self.browser.ws_connect(base + "connect", headers=headers) as control:
-            self.assertEqual((await control.receive_json(timeout=2))["generation"], fresh)
+            self.assertEqual((await control.receive_json(timeout=2))["generation"], generation)
 
     async def test_two_boards_stay_independent(self):
         a, ga = await self.board("a")
