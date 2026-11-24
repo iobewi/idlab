@@ -194,3 +194,7 @@
 }
 .control-token-actions { justify-content: flex-end; }
 #control-token-feedback:empty { display: none; }
+
+#client-state { text-align: end; }
+#server-alert { flex-basis: 100%; margin: 0; color: var(--warning); text-align: end; }
+#server-alert:empty { display: none; }

@@ -14,12 +14,12 @@ async function api(path, options) {
 }
 
 export class BoardConnector {
-  constructor(name, port, {flashBaud = ESP_SYNC_BAUD, onChange, campaignId = () => null}, {
+  constructor(name, port, {flashBaud = ESP_SYNC_BAUD, onChange, onLinkLost = () => {}, campaignId = () => null}, {
     request = api, loadTools = () => import('/esptool.js'),
     createSocket = url => new WebSocket(url), openConsole = openSerialConsole, reset = resetConsole,
     origin = location.href,
   } = {}) {
-    Object.assign(this, {name, port, flashBaud, onChange, campaignId,
+    Object.assign(this, {name, port, flashBaud, onChange, onLinkLost, campaignId,
       request, loadTools, createSocket, openConsole, reset, origin});
     const info = port.getInfo();
     this.transport = connectionPlan(info, {}).transport;
@@ -175,8 +175,9 @@ export class BoardConnector {
       socket.onclose = () => {
         failed(interrupted);
         if (this.socket !== socket) return;
+        if (this.identity && !this.lost && this.mode !== 'closing') this.onLinkLost();
         this.identityReply?.(interrupted);
-        if (!this.requesting && !this.busy) {
+        if (!this.lost && !this.requesting && !this.busy) {
           this.disconnect().catch(error => this.#log(error.message));
         }
       };
@@ -335,6 +336,7 @@ export class BoardConnector {
 
   async disconnect(lost = false) {
     if (lost) {
+      if (this.identity && !this.lost && this.mode !== 'closing') this.onLinkLost();
       this.lost = true;
       this.socket?.close();
     }

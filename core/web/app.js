@@ -87,10 +87,18 @@ for (const button of document.querySelectorAll('[data-close-status]')) {
   button.onclick = () => { selectBand(null); $('status-' + button.dataset.closeStatus).focus(); };
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') selectBand(null); });
-$('access-toggle').onclick = event => {
-  $('access-panel').hidden = !$('access-panel').hidden;
-  event.currentTarget.setAttribute('aria-expanded', !$('access-panel').hidden);
-};
+async function checkServer() {
+  const alert = $('server-alert');
+  let message;
+  try {
+    const response = await fetch('/health', { cache: 'no-store', signal: AbortSignal.timeout(3000) });
+    message = response.ok ? '' : 'Service IDLab indisponible.';
+  } catch {
+    message = 'Connexion au serveur perdue.';
+  }
+  if (alert.textContent !== message) alert.textContent = message;
+  setTimeout(checkServer, 5000);
+}
 
 function element(tag, content, cls) {
   const el = document.createElement(tag);
@@ -430,9 +438,6 @@ function render() {
   $('pause').textContent = selected?.pausedAt != null ? 'Reprendre l’affichage' : 'Pause affichage';
   $('follow').hidden = !selected || selected.follow;
   $('follow-state').textContent = selected?.follow ? 'Suivi du direct' : 'Défilement manuel';
-  $('status-label-agent').textContent = [...cards.values()].some(c => c.socket?.readyState === 1)
-    ? 'Agent connecté' : 'Agent hors ligne';
-  $('server-state').textContent = $('status-label-agent').textContent;
   $('control-state').textContent = selected?.observation?.device.control === 'stopping' ? 'Arrêt en cours'
     : selected?.observation?.device.control === 'busy' || selected?.requesting ? 'Opération en cours' : external ? 'Pilotage externe' : 'Disponible';
   $('grant').disabled = !selected?.identity || selected.hasControlToken || !['console', 'loader'].includes(selected.mode);
@@ -450,6 +455,7 @@ function addCard(name, port, flashBaud) {
   const card = new BoardConnector(name, port, {
     flashBaud,
     campaignId: () => activeCampaignId,
+    onLinkLost: () => say('Liaison perdue avec « ' + name + ' ».'),
     onChange: () => {
       if (!card.identity) card.observation = null;
       render();
@@ -775,3 +781,4 @@ $('active-cards').replaceChildren(emptyCards);
 $('server-origin').textContent = location.origin;
 say('Ajoute une carte pour ouvrir une console ou une session chargeur.');
 render();
+void checkServer();

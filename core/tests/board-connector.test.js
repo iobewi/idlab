@@ -4,7 +4,7 @@ import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
 function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud, failBaud = false,
-  readBlock, shortResponseAt, campaignId } = {}) {
+  readBlock, shortResponseAt, campaignId, onLinkLost } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -56,7 +56,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
     async usesUsbOtg() { return vid === 0x303a; }
   }
   const card = new BoardConnector('board', port, {
-    flashBaud, onChange() {}, campaignId,
+    flashBaud, onChange() {}, campaignId, onLinkLost,
   }, {
     origin: 'http://127.0.0.1:8080/',
     loadTools: async () => ({
@@ -134,6 +134,22 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
   port.readable = null;
   return {card, events, reads, progress, uart, manualReset() { inDownload = false; deviceBaud = 115200; }};
 }
+
+test('only unexpected disconnections report a lost board link', async () => {
+  let losses = 0;
+  const {card} = fixture({onLinkLost: () => { losses++; }});
+  await card.connect();
+  await card.disconnect();
+  assert.equal(losses, 0);
+  await card.connect();
+  await card.disconnect(true);
+  assert.equal(losses, 1);
+  await card.connect();
+  card.socket.close();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(card.mode, 'disconnected');
+  assert.equal(losses, 2);
+});
 
 test('identification and flash reads from console restore the same console and retain identity', async () => {
   const {card, events, uart} = fixture();
