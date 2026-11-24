@@ -1,8 +1,21 @@
+const idleSignals = {dataTerminalReady: false, requestToSend: false};
+
+// An explicit firmware restart for the known USB reset circuits.
+export async function resetConsole(port, holdMs) {
+  try {
+    await port.setSignals({dataTerminalReady: false, requestToSend: true});
+    await new Promise(resolve => setTimeout(resolve, holdMs));
+  } finally {
+    await port.setSignals(idleSignals);
+  }
+}
+
 // A console owns this Web Serial port until close() completes.
 export async function openSerialConsole(port, baudRate, onText, onBytes = () => {}) {
   await port.open({ baudRate });
   let reader;
   try {
+    await port.setSignals?.(idleSignals);
     reader = port.readable.getReader();
   } catch (error) {
     await port.close();

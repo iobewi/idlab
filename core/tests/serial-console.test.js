@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { openSerialConsole } from '../web/serial-console.js';
+import { openSerialConsole, resetConsole } from '../web/serial-console.js';
 
 test('console reads split UTF-8, writes commands and releases the port', async () => {
   let input;
@@ -62,4 +62,29 @@ test('historical console receives raw UART data and sends literal hex bytes', as
   assert.deepEqual(captured, [input]);
   assert.deepEqual(writes, [input]);
   await session.close();
+});
+
+test('opening the console releases DTR and RTS before reading', async () => {
+  const signals = [];
+  const port = {
+    readable: new ReadableStream(),
+    async open() {},
+    async setSignals(value) {
+      assert.equal(this.readable.locked, false);
+      signals.push(value);
+    },
+    async close() {},
+  };
+  const console = await openSerialConsole(port, 115200, null);
+  assert.deepEqual(signals, [{dataTerminalReady: false, requestToSend: false}]);
+  await console.close();
+});
+
+test('an explicit reset pulses RTS and leaves DTR deasserted', async () => {
+  const signals = [];
+  await resetConsole({async setSignals(value) { signals.push(value); }}, 0);
+  assert.deepEqual(signals, [
+    {dataTerminalReady: false, requestToSend: true},
+    {dataTerminalReady: false, requestToSend: false},
+  ]);
 });

@@ -1,6 +1,7 @@
-import { EspDriver } from './esp-driver.js';
-import { openSerialConsole } from './serial-console.js';
+import { EspDriver, connectionPlan } from './esp-driver.js';
+import { openSerialConsole, resetConsole } from './serial-console.js';
 import { ConsoleBuffer } from './console-buffer.js';
+import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
 const $ = id => document.getElementById(id);
 const cards = new Map();
@@ -88,7 +89,8 @@ function renderConsole() {
   }));
   if (!rows.length) log.append(element('p', 'Aucune donnée à afficher.', 'console-empty'));
   log.scrollTop = selected?.follow ? log.scrollHeight : scroll;
-  $('capture-state').textContent = buffer ? buffer.byteLength + ' octets capturés' : 'Aucune capture';
+  $('capture-state').textContent = buffer?.byteLength ? buffer.byteLength + ' octets capturés'
+    : selected?.mode === 'console' ? 'Console ouverte · en attente d’octets UART' : 'Aucune capture';
 }
 
 function scheduleConsole(card) {
@@ -119,6 +121,30 @@ function renderOperations() {
   }
 }
 
+function renderPartitions(loader) {
+  const table = selected?.partitions;
+  $('read-partitions').disabled = !loader;
+  $('try-partition-address').disabled = !loader;
+  $('partition-suggestion').hidden = !selected?.suggestPartition;
+  $('partition-state').textContent = selected?.partitionStatus ?? 'Aucune table lue.';
+  $('partitions-body').replaceChildren(...(table ?? []).map(part => {
+    const row = element('tr');
+    const hex = value => '0x' + value.toString(16);
+    for (const value of [part.label, hex(part.type) + ' / ' + hex(part.subtype),
+      hex(part.address), hex(part.size), hex(part.address + part.size)]) row.append(element('td', value));
+    const action = element('td');
+    const read = element('button', 'Sélectionner la plage');
+    read.onclick = () => {
+      $('address').value = hex(part.address);
+      $('size').value = hex(part.size);
+      $('tab-memory').click();
+    };
+    action.append(read);
+    row.append(action);
+    return row;
+  }));
+}
+
 function render() {
   for (const card of cards.values()) {
     card.nameButton.setAttribute('aria-pressed', card === selected);
@@ -138,7 +164,12 @@ function render() {
   })) $(id).textContent = value ?? '—';
   const available = selected && !selected.busy && !selected.requesting;
   const loader = available && selected.mode === 'loader';
-  $('read').disabled = !(loader && info?.capabilities.includes('flash.read'));
+  const canRead = loader && info?.capabilities.includes('flash.read');
+  $('read').disabled = !canRead;
+  renderPartitions(canRead);
+  const reset = $('reset-device');
+  reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
+  reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
   $('identify-live').disabled = !loader;
   $('return-console').disabled = !loader;
   $('enter-loader').disabled = !(available && selected.mode === 'console');
@@ -165,7 +196,9 @@ function addCard(name, port, baud, manual, use) {
   const portLabel = portInfo.usbVendorId == null ? 'Port série' :
     [portInfo.usbVendorId, portInfo.usbProductId].filter(Number.isInteger)
       .map(value => value.toString(16).padStart(4, '0')).join(':');
-  const card = {name, port, baud, manual, use, portLabel, mode: 'disconnected', busy: false,
+  const transport = connectionPlan(portInfo, {}).transport;
+  const resetWait = {usb_uart: 100, usb_serial_jtag: 200}[transport];
+  const card = {name, port, baud, manual, use, portLabel, resetWait, mode: 'disconnected', busy: false,
     follow: true, pausedAt: null, capture: new ConsoleBuffer(), operations: [], journal: []};
   const row = element('div', undefined, 'active-board');
   card.nameButton = element('button', name, 'board-name');
@@ -325,6 +358,24 @@ navigator.serial?.addEventListener('disconnect', event => {
   }
 });
 
+async function restartFirmware(card) {
+  if (!card?.resetWait || card.mode !== 'console' || card.requesting) return;
+  card.requesting = true;
+  render();
+  try {
+    await resetConsole(card.port, card.resetWait);
+    note(card, 'Redémarrage du firmware demandé');
+    say('Redémarrage demandé. La console attend les octets du firmware.');
+  } catch (error) {
+    note(card, error.message);
+    say(error.message);
+  } finally {
+    card.requesting = false;
+    render();
+  }
+}
+$('reset-device').onclick = () => restartFirmware(selected);
+
 async function switchMode(use) {
   const card = selected;
   if (!card || card.busy || card.requesting || (card.mode !== 'console' && card.mode !== 'loader')) return;
@@ -333,6 +384,10 @@ async function switchMode(use) {
   if (await connect(card)) {
     $(use === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
     if (use === 'stub') $('tab-memory').click();
+    if (use === 'console') {
+      if (card.resetWait) await restartFirmware(card);
+      else say('Console ouverte. Redémarre la carte si elle est encore en mode chargeur.');
+    }
   }
 }
 $('return-console').onclick = () => switchMode('console');
@@ -358,6 +413,39 @@ function flashNumber(value) {
   if (!/^(0x[0-9a-f]+|[0-9]+)$/i.test(value)) throw new Error('Adresse ou taille invalide.');
   return Number(value);
 }
+function readFlash(card, address, size) {
+  return api('/devices/' + card.name + '/flash/read', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({generation: card.identity.generation, address, size}),
+  });
+}
+
+async function readPartitions() {
+  const card = selected;
+  if (!card || card.busy || card.requesting || card.mode !== 'loader') return;
+  card.requesting = true;
+  card.partitions = [];
+  card.suggestPartition = false;
+  card.partitionStatus = 'Lecture de la table…';
+  render();
+  let address;
+  try {
+    address = flashNumber($('partition-address').value.trim());
+    const response = await readFlash(card, address, PARTITION_TABLE_BYTES);
+    card.partitions = decodePartitions(new Uint8Array(await response.arrayBuffer()), card.identity.flash_size);
+    card.partitionStatus = card.partitions.length + ' partition(s) lue(s).';
+  } catch (error) {
+    card.suggestPartition = address === 0x8000 && error.message === 'partition_table_invalid';
+    card.partitionStatus = error.message === 'partition_table_invalid' ? 'Aucune table valide à cette adresse.' : error.message;
+  } finally {
+    card.requesting = false;
+    note(card, 'Partitions : ' + card.partitionStatus);
+    if (card === selected) render();
+  }
+}
+$('read-partitions').onclick = readPartitions;
+$('try-partition-address').onclick = () => { $('partition-address').value = '0x10000'; readPartitions(); };
+
 $('read').onclick = async () => {
   const card = selected;
   if (!card || card.busy || card.requesting || card.mode !== 'loader') return;
@@ -370,10 +458,7 @@ $('read').onclick = async () => {
   try {
     const address = flashNumber($('address').value.trim());
     const size = flashNumber($('size').value.trim());
-    const response = await api('/devices/' + card.name + '/flash/read', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({generation: card.identity.generation, address, size}),
-    });
+    const response = await readFlash(card, address, size);
     const blob = await response.blob();
     const preview = new Uint8Array(await blob.slice(0, 256).arrayBuffer());
     card.dump = {blob, filename: card.name + '-0x' + address.toString(16) + '.bin',

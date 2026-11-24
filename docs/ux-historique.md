@@ -4,14 +4,16 @@ La page d’accueil reprend la navigation, les panneaux et le CSS de
 [l’interface historique](https://github.com/iobewi/rust_dev/tree/79fd7bf943751755de65b4212f08c5bd88a51e7c/bench/web).
 Les cartes connectées sont réelles. La console gère la capture UART, les
 filtres, l’affichage hexadécimal, l’export, l’envoi et les repères. La lecture
-flash utilise la session chargeur et l’API du banc. Les campagnes se
+flash et les partitions utilisent la session chargeur et l’API du banc. Les campagnes se
 consultent depuis le nouvel onglet correspondant.
 
 Les panneaux historiques restent visibles pour la revue. Les commandes
 qui attendent un raccordement au nouveau cœur sont grisées, notamment
-l’écriture, l’effacement, les diagnostics P4, Reset, BOOT et les autorisations
+l’écriture, l’effacement, les diagnostics P4, BOOT et les autorisations
 distantes. La [documentation historique](https://github.com/iobewi/rust_dev/blob/79fd7bf943751755de65b4212f08c5bd88a51e7c/bench/docs/interface.md)
-décrit leurs anciens comportements.
+décrit leurs anciens comportements. En mode console, le reset est disponible
+sur les ponts UART reconnus et USB Serial/JTAG. Sur un autre transport,
+utiliser le bouton Reset de la carte pour revoir les logs de démarrage.
 
 ## Éléments à revoir ensemble
 
