@@ -127,7 +127,10 @@ export class BoardConnector {
       auto: use === 'auto', romOnly: use === 'rom', resetToRom, flashBaud: this.flashBaud,
     }).catch(error => {
       if (error.message === 'serial_timeout' || error.message === 'serial_partial_packet') {
-        throw new Error(driver.connectionStage + ' · délai série dépassé (' + error.message + ')', {cause: error});
+        const detail = driver.connectionStage + ' · délai série dépassé (' + error.message + ')';
+        const recovery = fromConsole && this.transport === 'usb_serial_jtag' && driver.identificationAfterSync
+          ? ' Appuie brièvement sur RESET, puis rouvre le chargeur.' : '';
+        throw new Error(detail + recovery, {cause: error});
       }
       throw error;
     });

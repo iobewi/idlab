@@ -4,7 +4,8 @@ import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
-  readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false } = {}) {
+  readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
+  romIdentificationTimeout = false } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -33,6 +34,10 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
       if ((attempts === 1 && (!inDownload || this.initialBaud !== deviceBaud)) ||
           (entry === 'default_reset' && failLoader)) {
         throw new Error('Failed to connect with the device');
+      }
+      if (entry === 'default_reset' && romIdentificationTimeout) {
+        await this.openAndSync();
+        throw new Error('serial_timeout');
       }
     }
     async runStub() {
@@ -244,6 +249,14 @@ test('a failed USB Serial/JTAG loader entry reports the cause and restores the s
   assert.deepEqual(events.slice(-5), ['close-console', 'detect:default_reset', 'close-loader', 'console', 'reset']);
   await card.write('status');
   assert.equal(events.at(-1), 'uart:status');
+  await card.disconnect();
+});
+
+test('an identification timeout after SYNC on USB Serial/JTAG suggests manual RESET', async () => {
+  const {card} = fixture({vid: 0x303a, pid: 0x1001, romIdentificationTimeout: true});
+  await card.connect();
+  await assert.rejects(card.enterLoader(), /SYNC reçu.*serial_timeout.*Appuie brièvement sur RESET/);
+  assert.equal(card.mode, 'console');
   await card.disconnect();
 });
 

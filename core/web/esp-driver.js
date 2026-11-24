@@ -33,13 +33,16 @@ export class EspDriver {
     const usb = this.port.getInfo();
     const plan = connectionPlan(usb, options);
     const loader = this.loader;
+    this.identificationAfterSync = false;
     this.connectionStage = 'Synchronisation du chargeur ROM';
     let synced = false;
     const openAndSync = loader.openAndSync;
     loader.openAndSync = async (...args) => {
+      this.identificationAfterSync = false;
       if (synced) this.connectionStage = 'Resynchronisation du chargeur ROM';
       await openAndSync.apply(loader, args);
       synced = true;
+      this.identificationAfterSync = true;
       this.connectionStage = 'Identification de la puce par la ROM (SYNC reçu)';
     };
     try {
@@ -53,6 +56,7 @@ export class EspDriver {
     } finally {
       loader.openAndSync = openAndSync;
     }
+    this.identificationAfterSync = false;
     if (romOnly && loader.syncStubDetected) throw new Error('Un stub tourne déjà. Remets la carte en mode ROM.');
     if (loader.secureDownloadMode) throw new Error('Identité indisponible en mode téléchargement sécurisé.');
 
