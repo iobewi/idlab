@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { openSerialConsole, resetConsole } from '../web/serial-console.js';
+import { openSerialConsole, resetConsole } from '../serial-console.js';
 
 test('console reads split UTF-8, writes commands and releases the port', async () => {
   let input;

@@ -9,7 +9,7 @@ from aiohttp import ClientSession, ClientWSTimeout, CookieJar, web
 
 from idlab_client import IDLabClient, IDLabHTTPError
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "core"))
 from server import create_app
 
 

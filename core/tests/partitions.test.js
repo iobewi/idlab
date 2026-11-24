@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {decodePartitions, PARTITION_TABLE_BYTES} from '../web/partitions.js';
+import {decodePartitions, PARTITION_TABLE_BYTES} from '../../web/partitions.js';
 
 test('decodes a table with an ESP partition and a checksum marker', () => {
   const bytes = new Uint8Array(PARTITION_TABLE_BYTES).fill(255);

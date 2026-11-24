@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { connectionPlan, EspDriver } from '../web/esp-driver.js';
-import { serialTransport } from '../web/serial-transport.js';
+import { connectionPlan, EspDriver } from '../esp-driver.js';
+import { serialTransport } from '../serial-transport.js';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
 
 test('transport and loader choices are independent', () => {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
-import {BoardConnector} from '../web/board-connector.js';
+import {BoardConnector} from '../board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
   readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,

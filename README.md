@@ -4,9 +4,9 @@ IOBEWI Device Lab relie des cartes embarquées aux scripts et à l'interface
 opérateur. Le navigateur possède les ports Web Serial. Le serveur local
 coordonne les appels. Les deux utilisent la même opération de lecture.
 
-`core/` contient le serveur, le navigateur et le pilote ESP32.
-`client/` fournit le connecteur Python. Le banc couvre la connexion,
-l'identification et la lecture flash.
+- `core/` contient les services HTTP, l’API et le connecteur Web Serial avec son pilote ESP32.
+- `web/` contient l’interface opérateur servie par IDLab.
+- `clients/` regroupe les clients tiers qui utilisent l’API. Le client Python et son paquet sont dans `clients/python/`.
 
 ## Démarrer
 
@@ -78,7 +78,7 @@ disponible via **Essayer la connexion**.
 
 ## Piloter depuis Python
 
-Installer le connecteur avec `python -m pip install ./client`. Utiliser la
+Installer le client avec `python -m pip install ./clients/python`. Utiliser la
 même valeur de `IDLAB_TOKEN` pour le serveur et le script, puis connecter la
 carte dans le navigateur.
 
@@ -149,7 +149,7 @@ pilotent le serveur depuis la palette de commandes.
 
 Avec l’extension **Dev Containers**, ouvrir le dépôt dans VS Code puis choisir
 **Dev Containers: Reopen in Container**. Le conteneur de développement installe
-Python 3.12, Node.js 22, le connecteur Python en mode éditable et les dépendances
+Python 3.12, Node.js 22, le client Python en mode éditable et les dépendances
 du cœur. VS Code sélectionne l’environnement Python dédié. Dans un terminal,
 l’activer avec `. "$HOME/.venv/idlab/bin/activate"`.
 
@@ -166,10 +166,10 @@ python -m unittest discover -s tests -v
 node --test tests/*.test.js
 ```
 
-Pour tester le connecteur contre le serveur avec un agent simulé, depuis la
+Pour tester le client Python contre le serveur avec un agent simulé, depuis la
 racine après installation des dépendances de `core/` :
 
 ```sh
-python -m pip install -e ./client
-python -m unittest discover -s client/tests -v
+python -m pip install -e ./clients/python
+python -m unittest discover -s clients/python/tests -v
 ```

@@ -7,8 +7,8 @@ FROM python:3.12-slim-bookworm
 WORKDIR /app
 COPY core/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY core/manager.py core/server.py core/campaigns.py core/api_activity.py ./core/
-COPY core/web ./core/web
+COPY core/*.py core/*.js ./core/
+COPY web ./web
 COPY --from=browser /build/node_modules/esptool-js/bundle.js ./core/node_modules/esptool-js/bundle.js
 RUN install -d -o 65534 -g 65534 -m 0700 /var/lib/idlab
 USER 65534:65534

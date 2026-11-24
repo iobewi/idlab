@@ -18,7 +18,9 @@ from api_activity import ApiActivity
 from campaigns import CampaignError, Campaigns, search_parameters
 
 ROOT = Path(__file__).resolve().parent
+WEB_ROOT = ROOT.parent / "web"
 BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
+SERIAL_MODULES = ("board-connector.js", "esp-driver.js", "serial-console.js", "serial-transport.js")
 MAX_READ = 4 * 1024 * 1024
 MAX_FLASH = 64 * 1024 * 1024
 UART_BUFFER = 1024 * 1024
@@ -250,7 +252,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         return web.json_response(campaign, status=202 if campaign["state"] == "abort_requested" else 200)
 
     async def index(request):
-        response = web.FileResponse(ROOT / "web/index.html")
+        response = web.FileResponse(WEB_ROOT / "index.html")
         response.set_cookie("idlab_session", session, httponly=True, samesite="Strict")
         return response
 
@@ -654,6 +656,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if request.path in {"/", "/esptool.js"} or request.path.startswith("/web/"):
             response.headers["Cache-Control"] = "no-cache"
 
+    async def serial_module(request):
+        return web.FileResponse(ROOT / request.path.rsplit("/", 1)[-1])
+
     activity = ApiActivity()
     app = web.Application(middlewares=[local_access, activity.track], client_max_size=4096)
     app.cleanup_ctx.append(campaign_storage)
@@ -680,7 +685,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         web.get("/api/v1/devices/{name}/activity", read_activity),
         web.post("/api/v1/devices/{name}/flash/read", read_flash),
         web.get("/agent", agent),
-        web.static("/web", ROOT / "web"),
+        *(web.get(f"/web/{module}", serial_module) for module in SERIAL_MODULES),
+        web.static("/web", WEB_ROOT),
     ])
     async def esptool(request):
         return web.FileResponse(BUNDLE)

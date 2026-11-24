@@ -455,7 +455,14 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(os.path.isfile("node_modules/esptool-js/bundle.js"), "npm ci required")
     async def test_browser_assets(self):
-        for path in ("/web/app.js", "/esptool.js"):
-            response = await self.browser.get(path, headers=self.local)
+        for module in ("app", "boot-identity", "campaign-view", "console-buffer", "partitions",
+                       "board-connector", "esp-driver", "serial-console", "serial-transport"):
+            with self.subTest(module=module):
+                async with self.browser.get(f"/web/{module}.js", headers=self.local) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertIn("javascript", response.content_type)
+        async with self.browser.get("/esptool.js", headers=self.local) as response:
             self.assertEqual(response.status, 200)
             self.assertIn("javascript", response.content_type)
+        async with self.browser.get("/web/server.py", headers=self.local) as response:
+            self.assertEqual(response.status, 404)

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {BootIdentity} from '../web/boot-identity.js';
+import {BootIdentity} from '../../web/boot-identity.js';
 
 test('extracts the S3 identity and configured flash from split boot logs', () => {
   const observed = new BootIdentity();
