@@ -7,5 +7,4 @@
 !core/campaigns.py
 !core/web/
 !core/web/**
-!service/
-!service/manager.py
+!core/manager.py

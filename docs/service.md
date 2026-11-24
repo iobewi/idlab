@@ -15,7 +15,7 @@ sur un port privé du conteneur. Utiliser Docker Engine 28 ou plus récent.
 
 ## Appels HTTP
 
-Voir la [référence API v1](../docs/api.md) pour les cartes et les campagnes.
+Voir la [référence API v1](api.md) pour les cartes et les campagnes.
 
 Chaque requête de gestion doit porter
 `Authorization: Bearer <IDLAB_MANAGER_TOKEN>`. Les POST ont un corps vide.
@@ -67,6 +67,6 @@ port 8080 si l'hôte Docker est distant.
 
 Après installation des dépendances de `core/` et
 `npm ci --ignore-scripts --prefix core`, exécuter
-`python -m unittest discover -s service/tests -v` depuis la racine.
+`python -m unittest discover -s tests -p test_manager.py -v` depuis `core/`.
 Le test de cycle de vie lance le véritable serveur HTTP comme processus
 enfant, sur un port de test.

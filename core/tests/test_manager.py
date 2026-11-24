@@ -9,7 +9,7 @@ from unittest.mock import patch
 from aiohttp import CookieJar
 from aiohttp.test_utils import TestClient, TestServer
 
-from service.manager import HTTPService, create_app
+from manager import HTTPService, create_app
 
 
 class ManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -44,7 +44,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.05)
 
     @unittest.skipUnless(
-        (Path(__file__).resolve().parents[2] / "core/node_modules/esptool-js/bundle.js").is_file(),
+        (Path(__file__).resolve().parents[1] / "node_modules/esptool-js/bundle.js").is_file(),
         "npm ci --prefix core required",
     )
     async def test_manages_http_process_without_stopping_manager(self):
