@@ -255,7 +255,7 @@ test('a failed USB Serial/JTAG loader entry reports the cause and restores the s
 test('an identification timeout after SYNC on USB Serial/JTAG suggests manual RESET', async () => {
   const {card} = fixture({vid: 0x303a, pid: 0x1001, romIdentificationTimeout: true});
   await card.connect();
-  await assert.rejects(card.enterLoader(), /SYNC reçu.*serial_timeout.*Appuie brièvement sur RESET/);
+  await assert.rejects(card.enterLoader(), /SYNC reçu.*serial_timeout.*RESET sans maintenir BOOT, recharge la page/);
   assert.equal(card.mode, 'console');
   await card.disconnect();
 });

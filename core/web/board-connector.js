@@ -129,7 +129,7 @@ export class BoardConnector {
       if (error.message === 'serial_timeout' || error.message === 'serial_partial_packet') {
         const detail = driver.connectionStage + ' · délai série dépassé (' + error.message + ')';
         const recovery = fromConsole && this.transport === 'usb_serial_jtag' && driver.identificationAfterSync
-          ? ' Appuie brièvement sur RESET, puis rouvre le chargeur.' : '';
+          ? ' Appuie sur RESET sans maintenir BOOT, recharge la page et reconnecte la carte avant de rouvrir le chargeur.' : '';
         throw new Error(detail + recovery, {cause: error});
       }
       throw error;
