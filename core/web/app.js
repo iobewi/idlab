@@ -180,6 +180,26 @@ function renderIdentification() {
 
 }
 
+function renderRom(available) {
+  const card = selected;
+  const active = card?.mode === 'loader' && card.identity?.loader === 'rom';
+  const canOpen = card && !card.busy && !card.requesting && !['connecting', 'closing'].includes(card.mode);
+  $('open-rom').disabled = !canOpen || active;
+  $('rom-jedec').disabled = !available || !active;
+  $('rom-console').disabled = !available || !active;
+  $('rom-help').textContent = !card ? 'Ajoute et sélectionne une carte.'
+    : active ? 'Session ROM active. Les lectures du contenu flash utilisent le stub standard.'
+    : card.canEnterLoader ? 'Ouvrir la ROM redémarre la carte et la place en mode téléchargement, sans charger de stub.'
+    : 'Place la carte en téléchargement avec BOOT et RESET, puis ouvre la session ROM.';
+  $('rom-identity').textContent = active
+    ? (card.identity.model ?? card.identity.chip) + ' · MAC ' + card.identity.mac : '';
+  const jedec = active ? card.romJedec : null;
+  $('rom-flash-id').textContent = jedec
+    ? 'RDID 0x' + jedec.flash_id.toString(16).padStart(6, '0') + ' · ' +
+      (jedec.flash_size ? jedec.flash_size / (1024 * 1024) + ' Mio' : 'capacité inconnue')
+    : '';
+}
+
 function render() {
   for (const card of cards.values()) {
     card.nameButton.setAttribute('aria-pressed', card === selected);
@@ -195,6 +215,7 @@ function render() {
   const info = selected?.identity;
   const available = selected && !selected.busy && !selected.requesting;
   const loader = available && selected.mode === 'loader';
+  renderRom(available);
   const autoLoader = available && selected.mode === 'console' && selected.canEnterLoader;
   const canRead = autoLoader || (loader && info?.capabilities.includes('flash.read'));
   $('read').disabled = !canRead;
@@ -307,6 +328,12 @@ $('enter-loader').onclick = () => run(async () => {
   $('workspace-tab-operations').click();
   $('tab-memory').click();
 });
+$('open-rom').onclick = () => run(async () => {
+  const identity = await selected?.enterRom();
+  if (identity) say('Session ROM ouverte sur ' + (identity.model ?? identity.chip) + '.');
+});
+$('rom-jedec').onclick = () => run(() => selected?.readRomJedec());
+$('rom-console').onclick = () => $('return-console').click();
 $('identify-live').onclick = () => run(async () => {
   const identity = await selected?.identify();
   if (identity) say((identity.model ?? identity.chip) + ' · MAC ' + identity.mac);

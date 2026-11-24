@@ -55,6 +55,7 @@ function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = fal
           if (message === 'request') return;
           if (typeof message !== 'string') return;
           identity = {...JSON.parse(message), generation: 'generation', capabilities: ['identify', 'flash.read']};
+          if (identity.loader === 'rom') identity.capabilities = ['identify'];
           queueMicrotask(() => socket.onmessage({data: '{"generation":"generation"}'}));
         },
         close() { socket.readyState = 3; socket.onclose(); },
@@ -63,7 +64,10 @@ function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = fal
       return socket;
     },
     async request(path, options) {
-      if (!options) return {json: async () => identity};
+      if (!options) {
+        if (socket.readyState === 3) throw new Error('device_disconnected');
+        return {json: async () => identity};
+      }
       assert.equal(path, '/devices/board/flash/read');
       const params = JSON.parse(options.body);
       assert.equal(params.generation, 'generation');
@@ -125,5 +129,27 @@ test('a manual transport leaves the running console open and requests manual dow
   await assert.rejects(card.identify(), /mode téléchargement/);
   assert.equal(card.mode, 'console');
   assert.deepEqual(events, ['console']);
+  await card.disconnect();
+});
+
+test('ROM is an explicit operation that replaces the stub and permits only JEDEC reads', async () => {
+  const {card, events} = fixture({use: 'stub'});
+  await card.connect();
+  assert.equal(card.identity.loader, 'stub');
+  assert.equal((await card.enterRom()).loader, 'rom');
+  assert.deepEqual(card.identity.capabilities, ['identify']);
+  assert.deepEqual(await card.readRomJedec(), {flash_id: 0x184068, flash_size: 16 * 1024 * 1024});
+  await assert.rejects(card.readFlash(0, 3), /Lecture flash indisponible/);
+  await card.returnConsole();
+  assert.equal(card.mode, 'console');
+  assert.deepEqual(events, ['detect:default_reset', 'close-loader', 'detect:default_reset',
+    'close-loader', 'console', 'reset']);
+  await card.disconnect();
+});
+
+test('ROM can open from a selected disconnected card and preserves manual entry', async () => {
+  const {card, events} = fixture({manual: true});
+  assert.equal((await card.enterRom()).loader, 'rom');
+  assert.deepEqual(events, ['detect:no_reset']);
   await card.disconnect();
 });

@@ -45,7 +45,11 @@ La carte peut redémarrer et la capture UART est suspendue pendant
 l’opération. Pour un port à entrée manuelle, place la carte en mode
 téléchargement et reconnecte-la en **Automatique** avant la lecture.
 L’identité mesurée et la capture restent affichées au retour en console.
-Le débit de la console se règle dans les options avancées.
+Les options avancées règlent le débit UART, l’ouverture en console seule
+et l’entrée BOOT manuelle. **Opérations → ROM seule** ouvre une session
+sans stub sur la carte sélectionnée, affiche son identité et permet une
+lecture du JEDEC. Sur un port sans reset automatique, placer d’abord
+la carte en mode téléchargement.
 
 ## Piloter depuis Python
 

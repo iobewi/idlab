@@ -30,6 +30,7 @@ export class BoardConnector {
     this.busy = false;
     this.requesting = false;
     this.lost = false;
+    this.romJedec = null;
     this.capture = new ConsoleBuffer();
     this.boot = new BootIdentity();
   }
@@ -85,7 +86,7 @@ export class BoardConnector {
     const driver = new EspDriver(this.port, await this.loadTools());
     if (this.lost) throw new Error('Port USB déconnecté.');
     this.session = driver;
-    const identity = await driver.connect({auto: use === 'auto', romOnly: use === 'rom', manualEntry: this.manual});
+    const identity = await driver.connect({auto: use === 'auto', romOnly: use === 'rom', manualEntry: this.manual, resetToRom: use === 'rom'});
     if (this.lost) throw new Error('Port USB déconnecté.');
     if (!identity) {
       await this.#closeSession();
@@ -93,6 +94,7 @@ export class BoardConnector {
       return;
     }
     this.identity = await this.#register(driver);
+    this.romJedec = null;
     if (this.lost) throw new Error('Port USB déconnecté.');
     this.lastIdentity = this.identity;
     this.#setMode('loader');
@@ -176,7 +178,7 @@ export class BoardConnector {
     try {
       await this.#closeSession();
     } finally {
-      this.lastIdentity = null;
+      this.lastIdentity = this.romJedec = null;
       this.boot = new BootIdentity();
       this.#setMode('disconnected');
     }
@@ -194,8 +196,9 @@ export class BoardConnector {
     this.onJournal('Port fermé');
   }
 
-  async #exclusive(action) {
-    if (this.requesting || this.busy || !['console', 'loader'].includes(this.mode)) {
+  async #exclusive(action, allowDisconnected = false) {
+    const available = ['console', 'loader'].includes(this.mode) || (allowDisconnected && this.mode === 'disconnected');
+    if (this.requesting || this.busy || !available) {
       throw new Error('Carte indisponible.');
     }
     this.requesting = true;
@@ -285,6 +288,61 @@ export class BoardConnector {
         await this.#clearSession();
         throw error;
       }
+    });
+  }
+
+  enterRom() {
+    return this.#exclusive(async () => {
+      if (this.identity?.loader === 'rom') return this.identity;
+      const previousMode = this.mode;
+      const wasRegistered = Boolean(this.identity);
+      this.lost = false;
+      this.#setMode('connecting');
+      try {
+        await this.#closeSession();
+        if (wasRegistered) await this.#waitForUnregister();
+        if (this.lost) throw new Error('Port USB déconnecté.');
+        await this.#openLoader('rom');
+        return this.identity;
+      } catch (error) {
+        if (previousMode === 'console' && !this.lost) {
+          try {
+            await this.#closeSession();
+            await this.#openConsole();
+          } catch (recoveryError) {
+            await this.#clearSession();
+            throw new Error(error.message + ' · Console indisponible : ' + recoveryError.message);
+          }
+        } else {
+          await this.#clearSession();
+        }
+        throw error;
+      }
+    }, true);
+  }
+
+  async #waitForUnregister() {
+    // The gateway can finish closing the old agent after the local port closes.
+    // Wait for its registration to disappear before using the same card name.
+    for (let attempt = 0; attempt < 10; attempt++) {
+      try {
+        await this.request('/devices/' + this.name);
+      } catch (error) {
+        if (error.message === 'device_disconnected') return;
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error('L’ancienne session du chargeur est encore enregistrée.');
+  }
+
+  readRomJedec() {
+    return this.#exclusive(async () => {
+      if (this.mode !== 'loader' || this.identity?.loader !== 'rom') {
+        throw new Error('Ouvre une session ROM seule.');
+      }
+      this.romJedec = await this.session.readJedec();
+      return this.romJedec;
     });
   }
 

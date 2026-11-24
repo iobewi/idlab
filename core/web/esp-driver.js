@@ -3,13 +3,13 @@ import { serialTransport } from './serial-transport.js';
 const UART_BRIDGES = new Set([0x0403, 0x067b, 0x10c4, 0x1a86]);
 const FLASH_BLOCK = 1024 * 1024;
 
-export function connectionPlan(portInfo, { romOnly, manualEntry }) {
+export function connectionPlan(portInfo, { romOnly, manualEntry, resetToRom }) {
   const { usbVendorId: vid, usbProductId: pid } = portInfo;
   let transport = 'unknown';
   if (vid === 0x303a && pid === 0x1001) transport = 'usb_serial_jtag';
   else if (UART_BRIDGES.has(vid)) transport = 'usb_uart';
 
-  const autoReset = !manualEntry && !romOnly && transport !== 'unknown';
+  const autoReset = !manualEntry && (!romOnly || resetToRom) && transport !== 'unknown';
   return { transport, entry: autoReset ? 'default_reset' : 'no_reset', useStub: !romOnly };
 }
 
@@ -64,9 +64,7 @@ export class EspDriver {
     }
     let flashId = null, flashSize = null;
     if (loader.IS_STUB) {
-      flashId = (await loader.readFlashId()) >>> 0;
-      const capacityCode = (flashId >>> 16) & 255;
-      if (capacityCode >= 12 && capacityCode <= 26) flashSize = 2 ** capacityCode;
+      ({flash_id: flashId, flash_size: flashSize} = await this.readJedec());
     }
     const chip = loader.chip.CHIP_NAME.toLowerCase().replace(/[^a-z0-9]/g, '');
     this.identity = {
@@ -75,6 +73,15 @@ export class EspDriver {
       loader: loader.IS_STUB ? 'stub' : 'rom',
     };
     return this.identity;
+  }
+
+  async readJedec() {
+    const flashId = (await this.loader.readFlashId()) >>> 0;
+    const capacityCode = (flashId >>> 16) & 255;
+    return {
+      flash_id: flashId,
+      flash_size: capacityCode >= 12 && capacityCode <= 26 ? 2 ** capacityCode : null,
+    };
   }
 
   async readFlash(address, size, checkSession) {
