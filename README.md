@@ -50,6 +50,9 @@ avec `IDLabHTTPError.status` et `IDLabHTTPError.code`.
 
 ## Appeler l'API HTTP
 
+La [référence API v1](docs/api.md) décrit les commandes HTTP, les opérations
+des cartes et le cycle de vie des campagnes.
+
 Définir `IDLAB_TOKEN` dans l'environnement du serveur et du script. Garder
 sa valeur hors du dépôt. Le navigateur local fonctionne avec son propre
 cookie de session. Le serveur écoute uniquement sur la boucle locale.
@@ -65,6 +68,12 @@ type `application/json`. La génération de l'identification empêche
 d'exécuter la demande sur une autre session. Une seule lecture est active
 par carte. Une lecture incomplète ferme la session sans rendre de
 résultat partiel. Pour lire de nouveau, reconnecter la carte et l'identifier.
+
+## Service web dédié
+
+IDLab peut tourner dans un conteneur Docker indépendant du devcontainer.
+L'[API de gestion du service](service/README.md) permet de le démarrer,
+de l'arrêter, de le redémarrer et de vérifier son état depuis un script.
 
 ## Tests sans matériel
 

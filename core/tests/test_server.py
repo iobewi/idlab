@@ -1,5 +1,7 @@
 import asyncio
 import os
+from pathlib import Path
+from unittest.mock import patch
 import unittest
 
 from aiohttp import CookieJar
@@ -94,6 +96,76 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         foreign = dict(self.local, Origin="http://example.test")
         self.assertEqual((await self.read("stub", stub, headers=foreign)).status, 403)
         self.assertEqual((await self.read("stub", stub, headers={"Host": self.local["Host"]})).status, 401)
+
+    async def start_campaign(self):
+        response = await self.browser.post("/api/v1/campaigns", headers=self.script, json={"name": "Readback"})
+        self.assertEqual(response.status, 201)
+        campaign = await response.json()
+        self.assertEqual(response.headers["Location"], "/api/v1/campaigns/" + campaign["id"])
+        return campaign
+
+    async def test_abort_blocks_new_reads_but_drains_in_flight_reads(self):
+        a, ga = await self.board("a")
+        _, gb = await self.board("b")
+        campaign = await self.start_campaign()
+        campaign_id = campaign["id"]
+        base = f"/api/v1/campaigns/{campaign_id}"
+
+        def read(name, generation):
+            return self.browser.post(
+                f"/api/v1/devices/{name}/flash/read", headers=self.script,
+                json={"generation": generation, "address": 0, "size": 4, "campaign_id": campaign_id},
+            )
+
+        active = asyncio.create_task(read("a", ga))
+        await a.receive_json(timeout=2)
+        finish = await self.browser.post(base + "/finish", headers=self.script, json={"verdict": "PASS"})
+        self.assertEqual((finish.status, await finish.json()), (409, {"error": "campaign_busy"}))
+        abort = await self.browser.post(base + "/abort", headers=self.script, json={"reason": "operator stop"})
+        self.assertEqual(abort.status, 202)
+        self.assertEqual((await abort.json())["state"], "abort_requested")
+
+        blocked = await read("b", gb)
+        self.assertEqual((blocked.status, await blocked.json()), (409, {"error": "campaign_not_active"}))
+        await a.send_bytes(b"data")
+        self.assertEqual(await (await active).read(), b"data")
+
+        response = await self.browser.get(base, headers=self.script)
+        final = await response.json()
+        self.assertEqual((final["state"], final["in_flight"], final["reason"]), ("aborted", 0, "operator stop"))
+        self.assertIsNotNone(final["ended_at"])
+        self.assertIsNone(final["verdict"])
+
+    async def test_finish_is_idempotent_and_preserves_verdict(self):
+        campaign = await self.start_campaign()
+        path = "/api/v1/campaigns/" + campaign["id"] + "/finish"
+        verdict = {"verdict": "INDETERMINATE"}
+        first = await self.browser.post(path, headers=self.script, json=verdict)
+        self.assertEqual(first.status, 200)
+        finished = await first.json()
+        self.assertEqual((finished["state"], finished["verdict"]), ("finished", "INDETERMINATE"))
+        again = await self.browser.post(path, headers=self.script, json=verdict)
+        self.assertEqual(await again.json(), finished)
+        conflict = await self.browser.post(path, headers=self.script, json={"verdict": "PASS"})
+        self.assertEqual(conflict.status, 409)
+
+    async def test_health_requires_browser_bundle(self):
+        with patch("server.BUNDLE", Path(__file__)):
+            response = await self.browser.get("/health", headers=self.local)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(await response.json(), {"status": "ready"})
+        with patch("server.BUNDLE", Path(__file__).parent):
+            response = await self.browser.get("/health", headers=self.local)
+            self.assertEqual(response.status, 503)
+
+    async def test_shutdown_closes_agent_and_interrupts_pending_read(self):
+        ws, generation = await self.board("board")
+        read = asyncio.create_task(self.read("board", generation))
+        await ws.receive_json()
+        await asyncio.wait_for(self.server.app.shutdown(), timeout=2)
+        self.assertEqual((await ws.receive(timeout=2)).type.name, "CLOSE")
+        response = await asyncio.wait_for(read, timeout=2)
+        self.assertEqual(response.status, 502)
 
     @unittest.skipUnless(os.path.isfile("node_modules/esptool-js/bundle.js"), "npm ci required")
     async def test_browser_assets(self):
