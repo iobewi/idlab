@@ -186,8 +186,10 @@ function renderRom(available) {
   const canOpen = card && !card.busy && !card.requesting && !['connecting', 'closing'].includes(card.mode);
   $('open-rom').disabled = !canOpen || active;
   $('rom-jedec').disabled = !available || !active;
-  $('rom-console').disabled = !available || !active;
+  $('rom-console').hidden = Boolean(card?.romRequiresManualReturn);
+  $('rom-console').disabled = !available || !active || $('rom-console').hidden;
   $('rom-help').textContent = !card ? 'Ajoute et sélectionne une carte.'
+    : card.romRequiresManualReturn ? 'ROM active en BOOT manuel. Pour retrouver la console, déconnecte la carte, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.'
     : active ? 'Session ROM active. Les lectures du contenu flash utilisent le stub standard.'
     : 'Ouvre une session ROM pour identifier la carte ou lire son JEDEC.';
   $('rom-identity').textContent = active
@@ -232,7 +234,8 @@ function render() {
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
   $('identify-live').disabled = !(loader || autoLoader);
-  $('return-console').disabled = !loader;
+  $('return-console').hidden = Boolean(selected?.romRequiresManualReturn);
+  $('return-console').disabled = !loader || $('return-console').hidden;
   $('enter-loader').disabled = !autoLoader;
   $('send').disabled = !(available && selected.mode === 'console');
   $('mark').disabled = !selected;

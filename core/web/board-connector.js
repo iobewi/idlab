@@ -39,6 +39,10 @@ export class BoardConnector {
     return !this.manual && Boolean(this.resetWait);
   }
 
+  get romRequiresManualReturn() {
+    return this.mode === 'loader' && this.identity?.loader === 'rom' && !this.canEnterLoader;
+  }
+
   #setMode(mode) {
     this.mode = mode;
     this.onChange();
@@ -349,6 +353,9 @@ export class BoardConnector {
   returnConsole() {
     return this.#exclusive(async () => {
       if (this.mode !== 'loader') return;
+      if (this.romRequiresManualReturn) {
+        throw new Error('Déconnecte la carte, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.');
+      }
       try { await this.#resumeConsole(); }
       catch (error) { await this.#clearSession(); throw error; }
     });

@@ -28,6 +28,7 @@ function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = fal
       return bytes;
     }
     async openAndSync() {}
+    async usesUsbOtg() { return vid === 0x303a; }
   }
   const card = new BoardConnector('board', port, {
     baud: 115200, use, manual, onChange() {}, onCapture() {}, onJournal() {},
@@ -138,6 +139,7 @@ test('ROM is an explicit operation that replaces the stub and permits only JEDEC
   assert.equal(card.identity.loader, 'stub');
   assert.equal((await card.enterRom()).loader, 'rom');
   assert.deepEqual(card.identity.capabilities, ['identify']);
+  assert.equal(card.romRequiresManualReturn, false);
   assert.deepEqual(await card.readRomJedec(), {flash_id: 0x184068, flash_size: 16 * 1024 * 1024});
   await assert.rejects(card.readFlash(0, 3), /Lecture flash indisponible/);
   await card.returnConsole();
@@ -147,9 +149,16 @@ test('ROM is an explicit operation that replaces the stub and permits only JEDEC
   await card.disconnect();
 });
 
-test('ROM can open from a selected disconnected card and preserves manual entry', async () => {
-  const {card, events} = fixture({manual: true});
-  assert.equal((await card.enterRom()).loader, 'rom');
-  assert.deepEqual(events, ['detect:no_reset']);
-  await card.disconnect();
+test('manual ROM sessions keep the loader open when console return is requested', async () => {
+  for (const options of [{manual: true}, {vid: 0x303a}]) {
+    const {card, events} = fixture(options);
+    assert.equal((await card.enterRom()).loader, 'rom');
+    assert.equal(card.romRequiresManualReturn, true);
+    await assert.rejects(card.returnConsole(), /RESET sans maintenir BOOT/);
+    assert.equal(card.mode, 'loader');
+    assert.equal((await card.readRomJedec()).flash_id, 0x184068);
+    assert.deepEqual(events, ['detect:no_reset']);
+    await card.disconnect();
+    assert.equal(card.romRequiresManualReturn, false);
+  }
 });

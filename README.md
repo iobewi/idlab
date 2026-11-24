@@ -49,7 +49,9 @@ Les options avancées règlent le débit UART, l’ouverture en console seule
 et l’entrée BOOT manuelle. **Opérations → ROM seule** ouvre une session
 sans stub sur la carte sélectionnée, affiche son identité et permet une
 lecture du JEDEC. Une boîte de dialogue demande confirmation du reset automatique ou
-guide l’entrée manuelle avec BOOT et RESET.
+guide l’entrée manuelle avec BOOT et RESET. En ROM avec entrée manuelle,
+le retour console passe par une déconnexion et un RESET sans maintenir
+BOOT, puis une reconnexion.
 
 ## Piloter depuis Python
 
