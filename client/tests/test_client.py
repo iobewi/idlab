@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 import socket
 import sys
@@ -42,6 +43,21 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await socket.receive_json(timeout=2)
         return socket
 
+    @asynccontextmanager
+    async def control(self, socket):
+        async with self.browser.post(self.origin + "/api/v1/devices/test-board/control/token",
+                                     headers={"Origin": self.origin}) as response:
+            self.assertEqual(response.status, 200)
+            token = (await response.json())["token"]
+        self.assertEqual((await socket.receive_json(timeout=2))["control"], "available")
+        context = self.client.control("test-board", token)
+        board = await asyncio.to_thread(context.__enter__)
+        self.assertEqual((await socket.receive_json(timeout=2))["control"], "external")
+        try:
+            yield board
+        finally:
+            await asyncio.to_thread(context.__exit__, None, None, None)
+
     async def test_list_identify_and_read(self):
         socket = await self.connect()
         devices = await asyncio.to_thread(self.client.devices)
@@ -49,12 +65,13 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(devices, {"test-board": board})
         self.assertIn("flash.read", board.capabilities)
 
-        task = asyncio.create_task(asyncio.to_thread(board.read_flash, 4096, 4))
-        command = await socket.receive_json(timeout=2)
-        self.assertEqual((command["command"], command["address"], command["size"]),
-                         ("flash.read", 4096, 4))
-        await socket.send_bytes(b"abcd")
-        self.assertEqual(await task, b"abcd")
+        async with self.control(socket) as controller:
+            task = asyncio.create_task(asyncio.to_thread(controller.read_flash, 4096, 4))
+            command = await socket.receive_json(timeout=2)
+            self.assertEqual((command["command"], command["address"], command["size"]),
+                             ("flash.read", 4096, 4))
+            await socket.send_bytes(b"abcd")
+            self.assertEqual(await task, b"abcd")
 
     async def test_old_handle_refused_after_reconnection(self):
         socket = await self.connect()
@@ -69,11 +86,11 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_truncated_read_is_an_error(self):
         socket = await self.connect()
-        board = await asyncio.to_thread(self.client.identify, "test-board")
-        task = asyncio.create_task(asyncio.to_thread(board.read_flash, 0, 4))
-        await socket.receive_json(timeout=2)
-        await socket.send_bytes(b"abc")
-        with self.assertRaises(IDLabHTTPError) as caught:
-            await task
-        self.assertEqual((caught.exception.status, caught.exception.code),
-                         (502, "read_incomplete_reconnect_required"))
+        async with self.control(socket) as board:
+            task = asyncio.create_task(asyncio.to_thread(board.read_flash, 0, 4))
+            await socket.receive_json(timeout=2)
+            await socket.send_bytes(b"abc")
+            with self.assertRaises(IDLabHTTPError) as caught:
+                await task
+            self.assertEqual((caught.exception.status, caught.exception.code),
+                             (502, "read_incomplete_reconnect_required"))

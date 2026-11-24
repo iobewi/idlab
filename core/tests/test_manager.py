@@ -77,6 +77,18 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await response.read(), b"data")
         first = self.service.process
 
+        issued = await self.client.post("/api/v1/devices/board/control/token", headers=browser_headers)
+        self.assertEqual(issued.status, 200)
+        token = (await issued.json())["token"]
+        self.assertTrue((await agent.receive_json(timeout=2))["has_token"])
+        async with self.client.ws_connect(
+            "/api/v1/devices/board/control/connect",
+            headers=self.web | {"Authorization": "Bearer " + token},
+        ) as control:
+            self.assertTrue((await control.receive_json(timeout=2))["session"])
+            self.assertEqual((await agent.receive_json(timeout=2))["control"], "external")
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
+
         self.assertEqual((await self.request("POST", "start")).status, 200)
         self.assertIs(first, self.service.process)
         self.assertEqual((await self.request("POST", "restart")).status, 200)

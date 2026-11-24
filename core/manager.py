@@ -167,7 +167,7 @@ def create_app(*, token, port=8080, service=None):
 
         upstream = f"http://127.0.0.1:{service.port}{request.raw_path}"
         headers = proxy_headers(request.headers)
-        if request.path == "/agent" and request.headers.get("Upgrade", "").lower() == "websocket":
+        if (request.path == "/agent" or request.path.endswith("/control/connect")) and request.headers.get("Upgrade", "").lower() == "websocket":
             try:
                 async with request.app[UPSTREAM].ws_connect(
                     upstream, headers=headers, max_msg_size=WS_LIMIT, heartbeat=20,

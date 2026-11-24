@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 import unittest
 
-from aiohttp import CookieJar
+from aiohttp import CookieJar, WSServerHandshakeError
 from aiohttp.test_utils import TestClient, TestServer
 
 from server import create_app, validate_identity
@@ -48,7 +48,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
 
     def read(self, name, generation, *, address=0, size=4, headers=None):
         return self.browser.post(
-            f"/api/v1/devices/{name}/flash/read", headers=headers or self.script,
+            f"/api/v1/devices/{name}/flash/read", headers=headers or self.local,
             json={"generation": generation, "address": address, "size": size},
         )
 
@@ -63,11 +63,13 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.status, 304)
                     self.assertEqual(response.headers["Cache-Control"], "no-cache")
 
-    async def test_web_and_script_use_same_read(self):
+    async def test_web_read_and_script_observation(self):
         ws, generation = await self.board("board")
         response = await self.browser.get("/api/v1/devices/board", headers=self.script)
         self.assertEqual((await response.json())["capabilities"], ["identify", "flash.read"])
-        for headers, data in ((self.script, b"abcd"), (self.local, b"efgh")):
+        denied = await self.read("board", generation, headers=self.script)
+        self.assertEqual((denied.status, await denied.json()), (403, {"error": "control_session_required"}))
+        for headers, data in ((self.local, b"abcd"), (self.local, b"efgh")):
             read = asyncio.create_task(self.read("board", generation, headers=headers))
             command = await ws.receive_json()
             self.assertEqual((command["command"], command["address"], command["size"]), ("flash.read", 0, 4))
@@ -98,6 +100,45 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await stub.receive_json(timeout=2))["command"], "flash.read")
         await stub.send_bytes(b"data")
         self.assertEqual(await (await read).read(), b"data")
+
+    async def test_exclusive_control_stops_and_reuses_token_then_revokes(self):
+        agent, generation = await self.board("board")
+        base = "/api/v1/devices/board/control/"
+        issued = await self.browser.post(base + "token", headers=self.local)
+        token = (await issued.json())["token"]
+        self.assertTrue((await agent.receive_json(timeout=2))["has_token"])
+        headers = self.script | {"Authorization": "Bearer " + token}
+        ws = await self.browser.ws_connect(base + "connect", headers=headers)
+        session = (await ws.receive_json(timeout=2))["session"]
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "external")
+        with self.assertRaises(WSServerHandshakeError) as busy:
+            await self.browser.ws_connect(base + "connect", headers=headers)
+        self.assertEqual(busy.exception.status, 409)
+        self.assertEqual((await self.read("board", generation)).status, 409)
+        response = await self.browser.get("/api/v1/devices/board", headers=self.script)
+        self.assertEqual((await response.json())["control"], "external")
+        read = asyncio.create_task(self.read(
+            "board", generation, headers=self.script | {"Authorization": "Bearer " + session},
+        ))
+        command = await agent.receive_json(timeout=2)
+        stopping = asyncio.create_task(self.browser.post(base + "stop", headers=self.local))
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "stopping")
+        self.assertEqual((await agent.receive_json(timeout=2))["cancel"], command["id"])
+        self.assertEqual((await self.read("board", generation)).status, 409)
+        await ws.receive(timeout=2)
+        await stopping
+        await agent.send_bytes(b"abcd")
+        response = await read
+        self.assertEqual((response.status, await response.json()), (403, {"error": "control_stopped"}))
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
+        ws = await self.browser.ws_connect(base + "connect", headers=headers)
+        self.assertNotEqual((await ws.receive_json(timeout=2))["session"], session)
+        revoked = asyncio.create_task(self.browser.post(base + "revoke", headers=self.local))
+        await ws.receive(timeout=2)
+        self.assertEqual((await revoked).status, 200)
+        with self.assertRaises(WSServerHandshakeError) as caught:
+            await self.browser.ws_connect(base + "connect", headers=headers)
+        self.assertEqual(caught.exception.status, 403)
 
     async def test_two_boards_stay_independent(self):
         a, ga = await self.board("a")
@@ -159,7 +200,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
 
         def read(name, generation):
             return self.browser.post(
-                f"/api/v1/devices/{name}/flash/read", headers=self.script,
+                f"/api/v1/devices/{name}/flash/read", headers=self.local,
                 json={"generation": generation, "address": 0, "size": 4, "campaign_id": campaign_id},
             )
 

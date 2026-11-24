@@ -146,11 +146,20 @@ export class BoardConnector {
         }
       };
       socket.onmessage = async event => {
+        if (this.socket !== socket) return;
         try {
           const command = JSON.parse(event.data);
-          if (command.generation) {
+          if (command.control) {
+            this.control = command.control;
+            this.hasControlToken = command.has_token;
+            this.onChange();
+          } else if (command.cancel) {
+            if (command.cancel === this.activeRead) this.cancelRead = true;
+          } else if (command.generation) {
             const identity = await this.request('/devices/' + this.name).then(reply => reply.json());
             if (socket.readyState !== 1) throw interrupted;
+            this.control = identity.control;
+            this.hasControlToken = command.has_token;
             registered(identity);
           } else {
             await this.#serveRead(socket, driver, command);
@@ -166,8 +175,10 @@ export class BoardConnector {
   async #serveRead(socket, driver, command) {
     if (this.busy || this.socket !== socket) return;
     this.busy = true;
+    this.activeRead = command.id;
     this.onChange();
     const check = () => {
+      if (this.cancelRead) throw new Error('Lecture interrompue par l’opérateur.');
       if (socket.readyState !== 1 || this.socket !== socket || this.lost) throw new Error('device_session_changed');
     };
     try {
@@ -194,6 +205,8 @@ export class BoardConnector {
       this.onJournal(error.message);
     } finally {
       this.flashProgress = null;
+      this.activeRead = null;
+      this.cancelRead = false;
       this.onProgress();
       this.busy = false;
       if (!this.requesting && (this.lost || socket.readyState !== 1)) await this.disconnect();
@@ -220,6 +233,7 @@ export class BoardConnector {
       await this.#closeSession();
     } finally {
       this.lastIdentity = this.romJedec = null;
+      this.control = null;
       this.boot = new BootIdentity();
       this.#setMode('disconnected');
     }
@@ -239,7 +253,7 @@ export class BoardConnector {
 
   async #exclusive(action, allowDisconnected = false) {
     const available = ['console', 'loader'].includes(this.mode) || (allowDisconnected && this.mode === 'disconnected');
-    if (this.requesting || this.busy || !available) {
+    if (this.control === 'external' || this.control === 'stopping' || this.requesting || this.busy || !available) {
       throw new Error('Carte indisponible.');
     }
     this.requesting = true;

@@ -10,6 +10,38 @@ const say = message => { $('client-state').textContent = message; };
 const clock = new Intl.DateTimeFormat('fr', { timeStyle: 'medium' });
 const number = new Intl.NumberFormat('fr', {maximumFractionDigits: 1});
 const manualConsoleReturn = 'Pour retrouver la console, déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.';
+const externallyControlled = card => ['external', 'stopping'].includes(card?.control);
+let wakeLock;
+let requestingWakeLock = false;
+
+async function updateWakeLock() {
+  const needed = [...cards.values()].some(externallyControlled);
+  if (!needed && wakeLock) await wakeLock.release();
+  if (needed && !document.hidden && navigator.wakeLock && !wakeLock && !requestingWakeLock) {
+    requestingWakeLock = true;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => {
+        wakeLock = null;
+        renderWakeState();
+      }, {once: true});
+      if (![...cards.values()].some(externallyControlled)) await wakeLock.release();
+    } catch {
+      wakeLock = null;
+    } finally {
+      requestingWakeLock = false;
+    }
+  }
+  renderWakeState();
+}
+
+function renderWakeState() {
+  const state = wakeLock ? 'Maintien éveillé'
+    : [...cards.values()].some(externallyControlled) ? 'Maintien éveillé indisponible' : 'Veille normale';
+  $('status-label-wake').textContent = state;
+  $('wake-state').textContent = state;
+}
+document.addEventListener('visibilitychange', updateWakeLock);
 
 function wireTabs(attribute) {
   const tabs = [...document.querySelectorAll('[' + attribute + ']')];
@@ -258,7 +290,7 @@ function renderIdentification() {
 function renderRom(available) {
   const card = selected;
   const active = card?.mode === 'loader' && card.identity?.loader === 'rom';
-  const canOpen = card && !card.busy && !card.requesting && !['connecting', 'closing'].includes(card.mode);
+  const canOpen = available && !['connecting', 'closing'].includes(card.mode);
   $('open-rom').disabled = !canOpen || active;
   $('rom-jedec').disabled = !available || !active;
   $('rom-help').textContent = !card ? 'Ajoute et sélectionne une carte.'
@@ -314,7 +346,8 @@ function render() {
     tab.title = romActive ? 'Indisponible pendant la session ROM seule.' : '';
   }
   renderIdentification();
-  const available = selected && !selected.busy && !selected.requesting;
+  const external = externallyControlled(selected);
+  const available = selected && !external && !selected.busy && !selected.requesting;
   const loader = available && selected.mode === 'loader';
   renderRom(available);
   const autoLoader = available && selected.mode === 'console' && selected.canEnterLoader;
@@ -347,7 +380,13 @@ function render() {
   $('status-label-agent').textContent = [...cards.values()].some(c => c.mode === 'loader')
     ? 'Agent connecté' : 'Agent hors ligne';
   $('server-state').textContent = $('status-label-agent').textContent;
-  $('control-state').textContent = selected?.busy ? 'Opération en cours' : 'Disponible';
+  $('control-state').textContent = selected?.control === 'stopping' ? 'Arrêt en cours'
+    : selected?.busy || selected?.requesting ? 'Opération en cours' : external ? 'Pilotage externe' : 'Disponible';
+  $('grant').disabled = !selected?.identity?.capabilities.includes('flash.read') || selected.hasControlToken;
+  $('revoke').disabled = !selected?.hasControlToken;
+  $('release-control').disabled = !external || selected.control === 'stopping';
+  $('grant-state').textContent = selected?.hasControlToken ? 'Jeton émis' : 'Aucun jeton';
+  void updateWakeLock();
   $('status-label-control').textContent = $('control-state').textContent;
   renderConsole();
   renderOperations();
@@ -394,6 +433,27 @@ async function run(action) {
     say(error.message);
   }
 }
+
+async function controlAction(action) {
+  const card = selected;
+  if (!card) return;
+  const response = await fetch('/api/v1/devices/' + card.name + '/control/' + action, {method: 'POST'});
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error ?? ('HTTP ' + response.status));
+  if (result.token) {
+    const input = $('control-token');
+    input.value = result.token;
+    $('control-token-dialog').showModal();
+    input.select();
+  } else if (action === 'revoke' && card.mode === 'disconnected') {
+    card.hasControlToken = false;
+    render();
+  }
+}
+$('grant').onclick = () => run(() => controlAction('token'));
+$('revoke').onclick = () => run(() => controlAction('revoke'));
+$('release-control').onclick = () => run(() => controlAction('stop'));
+$('control-token-dialog').onclose = () => { $('control-token').value = ''; };
 
 async function connectCard(card) {
   await card.connect();

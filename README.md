@@ -82,13 +82,14 @@ carte dans le navigateur.
 from idlab_client import IDLabClient
 
 lab = IDLabClient()
-print(lab.devices())
-board = lab.identify("ma-carte")
-data = board.read_flash(address=0x10000, size=4096)
+with lab.control("ma-carte", token_de_pilotage) as board:
+    data = board.read_flash(address=0x10000, size=4096)
 ```
 
-Chaque objet `Board` est lié à une génération. Après une reconnexion,
-appeler de nouveau `identify`. Le client transmet les refus du serveur
+Dans l’interface, **Get token** crée le jeton de pilotage de la carte
+connectée en mode stub. Le bloc `with` tient la session exclusive et rend
+la main en sortant. Utiliser `IDLAB_TOKEN` pour `devices()` et
+`identify()` en observation. Le client transmet les refus du serveur
 avec `IDLabHTTPError.status` et `IDLabHTTPError.code`.
 
 ## Appeler l'API HTTP

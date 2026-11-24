@@ -1,6 +1,7 @@
 """Python connector for the IDLab HTTP API."""
 
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 import http.client
 import json
 import os
@@ -8,6 +9,9 @@ import re
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
+from websockets.sync.client import connect
 
 __all__ = ["Board", "IDLabClient", "IDLabError", "IDLabHTTPError"]
 
@@ -54,10 +58,16 @@ class Board:
         """Read exactly size bytes using this board's current session."""
         if type(address) is not int or address < 0 or type(size) is not int or size <= 0:
             raise ValueError("Flash address and size must be integers within a valid range")
-        return self._client._request(
-            _board_path(self.name) + "/flash/read",
-            {"generation": self.generation, "address": address, "size": size},
-            expected_bytes=size,
+        maximum = 4 * 1024 * 1024
+        if self.flash_size is not None and size > self.flash_size - address:
+            raise ValueError("Flash range exceeds the detected capacity")
+        return b"".join(
+            self._client._request(
+                _board_path(self.name) + "/flash/read",
+                {"generation": self.generation, "address": address + offset, "size": min(maximum, size - offset)},
+                expected_bytes=min(maximum, size - offset),
+            )
+            for offset in range(0, size, maximum)
         )
 
 
@@ -74,8 +84,6 @@ class IDLabClient:
             raise ValueError("Expected a nonzero server port")
         self._base = base_url.rstrip("/") + "/api/v1"
         self._token = os.environ.get("IDLAB_TOKEN") if token is None else token
-        if not self._token:
-            raise ValueError("IDLab requires a token. Set IDLAB_TOKEN or pass token explicitly.")
         self._timeout = timeout
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
 
@@ -90,6 +98,31 @@ class IDLabClient:
         """Retrieve the agent's registered identity for a named board."""
         return self._board(name, self._request(_board_path(name)))
 
+    @contextmanager
+    def control(self, name: str, token: str):
+        """Hold exclusive control of a board while this context is open."""
+        path = _board_path(name)
+        url = "ws" + self._base[4:] + path + "/control/connect"
+        try:
+            socket = connect(url, additional_headers={"Authorization": f"Bearer {token}"},
+                             open_timeout=self._timeout, close_timeout=3, proxy=None)
+        except InvalidStatus as error:
+            raise IDLabHTTPError(error.response.status_code, "control_connection_refused") from None
+        except (OSError, WebSocketException) as error:
+            raise IDLabError("Unable to open an IDLab control session") from error
+        with socket:
+            try:
+                session = json.loads(socket.recv(timeout=self._timeout))
+                credential = session["session"]
+                generation = session["generation"]
+            except (KeyError, TypeError, ValueError, TimeoutError, ConnectionClosed) as error:
+                raise IDLabError("Invalid IDLab control session") from error
+            client = IDLabClient(self._base.removesuffix("/api/v1"), token=credential, timeout=self._timeout)
+            board = client.identify(name)
+            if board.generation != generation:
+                raise IDLabHTTPError(409, "device_session_changed")
+            yield board
+
     def _board(self, name, payload):
         try:
             generation = payload["generation"]
@@ -102,7 +135,7 @@ class IDLabClient:
             raise IDLabError("Invalid board identity") from error
 
     def _request(self, path, arguments=None, *, expected_bytes=None):
-        headers = {"Authorization": f"Bearer {self._token}"}
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
         body = None
         if arguments is not None:
             headers["Content-Type"] = "application/json"

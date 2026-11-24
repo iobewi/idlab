@@ -63,6 +63,27 @@ avec un stub. Pour quitter le mode téléchargement, déconnecter la carte
 dans IDLab, appuyer physiquement sur RESET sans maintenir BOOT, puis
 reconnecter la carte. `POST /api/v1/httpd/restart` redémarre le processus HTTP.
 
+### Pilotage exclusif
+
+Pour une carte en session stub, le web peut créer un jeton avec **Get token**.
+Le jeton est réutilisable pour cette carte et sa MAC, y compris après
+reconnexion. Les jetons sont conservés en mémoire jusqu’à leur révocation
+ou au redémarrage du serveur.
+
+| Méthode et chemin sous `/api/v1/devices/{name}` | Accès et effet |
+|---|---|
+| `POST /control/token` | Session navigateur locale. Renvoie le jeton une fois. |
+| `GET /control/connect` (WebSocket) | Le jeton de pilotage est envoyé en Bearer. Renvoie un identifiant secret de session et la génération. La connexion ouverte réserve la carte. |
+| `POST /control/stop` | Session navigateur locale. Arrête le pilotage externe. Le jeton peut resservir. |
+| `POST /control/revoke` | Session navigateur locale. Supprime le jeton et arrête le pilotage externe. |
+
+Pendant le pilotage externe, la lecture flash exige l’identifiant secret
+de la session en Bearer. Le jeton général `IDLAB_TOKEN` permet de consulter
+l’état de la carte et de piloter les campagnes. Une deuxième session de
+pilotage est refusée avec `409`. Une lecture interrompue par le web renvoie
+`403 control_stopped` ou `403 control_revoked`. Si l’arrêt coupe un
+transfert série, reconnecter la carte pour reprendre les commandes.
+
 Un nom de carte contient de 1 à 48 caractères ASCII parmi les lettres,
 chiffres, tirets et underscores. Le premier caractère est alphanumérique.
 Une description de session ressemble à ceci.

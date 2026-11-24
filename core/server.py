@@ -24,6 +24,14 @@ MAC = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", re.IGNORECASE)
 class Operation:
     id: str
     future: asyncio.Future
+    cancelled: bool = False
+
+
+@dataclass
+class Control:
+    credential: str
+    socket: web.WebSocketResponse
+    stopped: str | None = None
 
 
 @dataclass
@@ -32,9 +40,12 @@ class Board:
     socket: web.WebSocketResponse
     identity: dict
     pending: Operation | None = None
+    control: Control | None = None
 
     def describe(self):
-        return {"generation": self.generation, **self.identity}
+        state = ("stopping" if self.control and self.control.stopped else
+                 "busy" if self.pending else "external" if self.control else "available")
+        return {"generation": self.generation, **self.identity, "control": state}
 
 
 def problem(status, code):
@@ -93,8 +104,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     session = secrets.token_urlsafe(32)
     boards = {}
+    tokens = {}
     sockets = set()
     CAMPAIGNS = web.AppKey("campaigns", Campaigns)
+    LOCAL_OPERATOR = web.RequestKey("local_operator", bool)
 
     @web.middleware
     async def local_access(request, handler):
@@ -110,11 +123,20 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             browser = hmac.compare_digest(cookie.encode(), session.encode())
             bearer = request.headers.get("Authorization", "")
             script = token and hmac.compare_digest(bearer.encode(), f"Bearer {token}".encode())
+            scoped = re.fullmatch(r"/api/v1/devices/([\w-]+)(/flash/read)?", request.path)
+            board = boards.get(scoped[1]) if scoped else None
+            control = board.control if board else None
+            control_request = control and hmac.compare_digest(
+                bearer.encode(), f"Bearer {control.credential}".encode(),
+            )
             if request.path == "/agent":
                 if not browser or origin is None:
                     return problem(403, "browser_session_required")
-            elif not script and (not browser or (request.method == "POST" and origin is None)):
+            elif request.path.endswith("/control/connect") and request.headers.get("Upgrade", "").lower() == "websocket":
+                pass  # This handshake authenticates with the per-card token.
+            elif not control_request and not script and (not browser or (request.method == "POST" and origin is None)):
                 return problem(401, "authentication_required")
+            request[LOCAL_OPERATOR] = browser and origin is not None and not bearer
         try:
             return await handler(request)
         except CampaignError as error:
@@ -166,6 +188,90 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     async def devices(request):
         return web.json_response({name: board.describe() for name, board in boards.items()})
 
+    async def publish_control(board, name):
+        if not board.socket.closed:
+            try:
+                await board.socket.send_json({
+                    "control": board.describe()["control"], "has_token": name in tokens,
+                })
+            except ConnectionError:
+                pass
+
+    async def stop_control(name, board, control, reason):
+        if board.control is not control or control.stopped:
+            return
+        control.stopped = reason
+        pending = board.pending
+        cancelled = pending and not pending.future.done() and not pending.cancelled
+        if cancelled:
+            pending.cancelled = True
+        if not pending:
+            board.control = None
+        await publish_control(board, name)
+        if cancelled and not board.socket.closed:
+            try:
+                await board.socket.send_json({"cancel": pending.id})
+            except ConnectionError:
+                pass
+        if not control.socket.closed:
+            await control.socket.close(code=1008, message=control.stopped.encode())
+
+    async def manage_control(request):
+        if not request[LOCAL_OPERATOR]:
+            return problem(403, "local_operator_required")
+        name = request.match_info["name"]
+        action = request.match_info["action"]
+        board = boards.get(name)
+        if action == "token":
+            if not board or board.socket.closed:
+                return problem(404, "device_disconnected")
+            if "flash.read" not in board.identity["capabilities"]:
+                return problem(409, "operation_unsupported")
+            if name in tokens:
+                return problem(409, "control_token_exists")
+            credential = secrets.token_urlsafe(32)
+            tokens[name] = (credential, board.identity["mac"])
+            await publish_control(board, name)
+            return web.json_response({"token": credential}, headers={"Cache-Control": "no-store"})
+        if action == "revoke":
+            tokens.pop(name, None)
+        if board and board.control:
+            await stop_control(name, board, board.control,
+                               "control_revoked" if action == "revoke" else "control_stopped")
+        elif board:
+            await publish_control(board, name)
+        return web.json_response({"control": board.describe()["control"] if board else "disconnected"})
+
+    async def connect_control(request):
+        name = request.match_info["name"]
+        grant = tokens.get(name)
+        supplied = request.headers.get("Authorization", "")
+        if not grant or not hmac.compare_digest(supplied.encode(), f"Bearer {grant[0]}".encode()):
+            return problem(403, "invalid_control_token")
+        board = boards.get(name)
+        if not board or board.socket.closed:
+            return problem(404, "device_disconnected")
+        if board.identity["mac"] != grant[1]:
+            return problem(403, "control_token_device_mismatch")
+        if "flash.read" not in board.identity["capabilities"]:
+            return problem(409, "operation_unsupported")
+        if board.control or board.pending:
+            return problem(409, "device_busy")
+        socket = web.WebSocketResponse(heartbeat=20)
+        control = Control(secrets.token_urlsafe(32), socket)
+        board.control = control
+        sockets.add(socket)
+        try:
+            await socket.prepare(request)
+            await publish_control(board, name)
+            await socket.send_json({"session": control.credential, "generation": board.generation})
+            async for _ in socket:
+                break  # The connection holds control. Commands use the HTTP API.
+        finally:
+            await stop_control(name, board, control, "control_stopped")
+            sockets.discard(socket)
+        return socket
+
     async def agent(request):
         name = request.query.get("device", "")
         if not BOARD_NAME.fullmatch(name):
@@ -182,7 +288,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 raise ValueError("device_already_connected")
             board = Board(uuid.uuid4().hex, socket, validate_identity(message))
             boards[name] = board
-            await socket.send_json({"generation": board.generation})
+            await socket.send_json({"generation": board.generation, "has_token": name in tokens})
             async for message in socket:
                 pending = board.pending
                 if not pending or pending.future.done():
@@ -200,6 +306,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 del boards[name]
                 if board.pending and not board.pending.future.done():
                     board.pending.future.set_result(None)
+                if board.control:
+                    await stop_control(name, board, board.control, "device_session_changed")
             await socket.close()
             sockets.discard(socket)
         return socket
@@ -219,6 +327,16 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         board = boards.get(request.match_info["name"])
         if not board or board.socket.closed or params["generation"] != board.generation:
             return problem(409, "device_session_changed")
+        control = board.control
+        if request[LOCAL_OPERATOR]:
+            if control:
+                return problem(409, "externally_controlled")
+        elif not control or not hmac.compare_digest(
+            request.headers.get("Authorization", "").encode(), f"Bearer {control.credential}".encode(),
+        ):
+            return problem(403, "control_session_required")
+        elif control.stopped:
+            return problem(403, control.stopped)
         if "flash.read" not in board.identity["capabilities"]:
             return problem(409, "operation_unsupported")
         address, size = params["address"], params["size"]
@@ -238,6 +356,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             await board.socket.send_json({"id": operation.id, "command": "flash.read", "address": address, "size": size})
             data = await asyncio.wait_for(operation.future, timeout=read_timeout)
             complete = data is not None and len(data) == size
+            if control and control.stopped:
+                return problem(403, control.stopped)
             if complete:
                 return web.Response(body=data, content_type="application/octet-stream")
         except (ConnectionError, TimeoutError):
@@ -248,8 +368,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                     await board.socket.close(code=1011)
             finally:
                 board.pending = None
+                if control and control.stopped and board.control is control:
+                    board.control = None
+                    await publish_control(board, request.match_info["name"])
                 if campaign_id is not None:
                     campaigns.leave(campaign_id)
+        if control and control.stopped in {"control_stopped", "control_revoked"}:
+            return problem(403, control.stopped)
         return problem(502, "read_incomplete_reconnect_required")
 
     async def identify(request):
@@ -277,6 +402,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         web.post("/api/v1/campaigns/{id}/abort", abort_campaign),
         web.get("/api/v1/devices", devices),
         web.get("/api/v1/devices/{name}", identify),
+        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke}", manage_control),
+        web.get("/api/v1/devices/{name}/control/connect", connect_control),
         web.post("/api/v1/devices/{name}/flash/read", read_flash),
         web.get("/agent", agent),
         web.static("/web", ROOT / "web"),
