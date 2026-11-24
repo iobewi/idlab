@@ -6,6 +6,7 @@ import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
 const $ = id => document.getElementById(id);
 const cards = new Map();
+let nextBoardNumber = 1;
 let selected = null;
 let adding = false;
 const say = message => { $('client-state').textContent = message; };
@@ -566,13 +567,20 @@ async function connectCard(card) {
   if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
 }
 
+function suggestBoardName() {
+  while (cards.has('board_' + nextBoardNumber)) nextBoardNumber++;
+  return 'board_' + nextBoardNumber;
+}
+
 async function addFromPicker() {
   if (adding) return;
   function feedback(message) {
     $('add-card-feedback').textContent = message;
     say(message);
   }
-  const name = $('add-device-id').value.trim();
+  const input = $('add-device-id');
+  const enteredName = input.value;
+  const name = enteredName.trim();
   const flashBaud = Number($('flash-baud').value);
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(name)) return feedback('Saisis un nom de carte valide.');
   if (cards.has(name)) return feedback('Ce nom est déjà utilisé.');
@@ -584,7 +592,9 @@ async function addFromPicker() {
     const port = await navigator.serial.requestPort();
     if ([...cards.values()].some(card => card.port === port)) return feedback('Ce port est déjà associé à une carte.');
     feedback('Détection de la carte…');
-    await connectCard(addCard(name, port, flashBaud));
+    const card = addCard(name, port, flashBaud);
+    if (input.value === enteredName) input.value = suggestBoardName();
+    await connectCard(card);
     $('add-card-feedback').textContent = '';
   } catch (error) {
     feedback(error.name === 'NotFoundError' ? 'Aucun port sélectionné.' : error.message);
@@ -818,6 +828,7 @@ $('agent-log-clear').onclick = () => {
 const emptyCards = element('p', 'Aucune carte connectée dans cette fenêtre.', 'hint');
 emptyCards.id = 'empty-cards';
 $('active-cards').replaceChildren(emptyCards);
+$('add-device-id').value = suggestBoardName();
 $('server-origin').textContent = location.origin;
 say('Ajoute une carte pour ouvrir une console ou une session chargeur.');
 render();
