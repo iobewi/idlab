@@ -9,6 +9,17 @@
   button { margin: .25rem }
   input[type=text] { width: 9rem }
   output { display: block; min-height: 1.5em }
+  #campaigns { margin-top: 2rem; border-top: 1px solid #bbb }
+  #campaigns h3 { margin-bottom: .5rem }
+  #campaigns form { display: flex; flex-wrap: wrap; align-items: end; gap: .5rem }
+  #campaigns form label { display: grid; gap: .25rem }
+  .campaign-table { overflow-x: auto }
+  .campaign-table table { border-collapse: collapse; width: 100%; font-size: .9rem }
+  .campaign-table th, .campaign-table td { padding: .5rem; border-bottom: 1px solid #bbb; text-align: left; vertical-align: top }
+  .campaign-table td:first-child { min-width: 9rem; overflow-wrap: anywhere }
+  .campaign-table time { white-space: nowrap }
+  .campaign-table details { margin-top: .25rem }
+  .campaign-pages:not([hidden]) { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin: .5rem 0 1rem }
 </style>
 <h1>IDLab</h1>
 <form id="connect">
@@ -19,6 +30,48 @@
 </form>
 <output id="status" role="status"></output>
 <section id="boards" aria-label="Cartes connectées"></section>
+<section id="campaigns" aria-labelledby="campaigns-title">
+  <h2 id="campaigns-title">Campagnes</h2>
+  <section id="campaign-live" aria-labelledby="campaign-live-title">
+    <h3 id="campaign-live-title">En cours</h3>
+    <p id="campaign-counts"></p>
+  </section>
+  <section id="campaign-history" aria-labelledby="campaign-history-title">
+    <h3 id="campaign-history-title">Historique</h3>
+    <form id="campaign-search">
+      <label>Nom ou identifiant <input name="q" type="search" maxlength="120"></label>
+      <label>État
+        <select name="state">
+          <option value="">Tous</option>
+          <option value="active">Active</option>
+          <option value="abort_requested">Avortement demandé</option>
+          <option value="aborted">Avortée</option>
+          <option value="finished">Terminée</option>
+        </select>
+      </label>
+      <label>Verdict <input name="verdict" type="text" maxlength="80"></label>
+      <label>Du (UTC) <input name="from" type="date"></label>
+      <label>Au (UTC) <input name="to" type="date"></label>
+      <button>Rechercher</button>
+    </form>
+  </section>
+</section>
+<template id="campaign-list">
+  <output role="status"></output>
+  <div class="campaign-table" hidden>
+    <table>
+      <thead><tr>
+        <th scope="col">Campagne</th><th scope="col">État</th><th scope="col">Début</th>
+        <th scope="col">Durée</th><th scope="col">Lectures en cours</th><th scope="col">Verdict</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="campaign-pages" hidden>
+    <button type="button" data-page="previous">Précédent</button>
+    <button type="button" data-page="next">Suivant</button>
+  </div>
+</template>
 <template id="board">
   <article>
     <h2></h2>
@@ -33,3 +86,4 @@
   </article>
 </template>
 <script type="module" src="/web/app.js"></script>
+<script type="module" src="/web/campaign-view.js"></script>

@@ -11,7 +11,7 @@ import uuid
 
 from aiohttp import WSMsgType, web
 
-from campaigns import CampaignError, Campaigns
+from campaigns import CampaignError, Campaigns, search_parameters
 
 ROOT = Path(__file__).resolve().parent
 BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
@@ -114,6 +114,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             yield
         finally:
             campaigns.close()
+
+    async def list_campaigns(request):
+        result = request.app[CAMPAIGNS].search(**search_parameters(request.query))
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def start_campaign(request):
         name = await text_field(request, "name", 120)
@@ -248,6 +252,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     app.add_routes([
         web.get("/", index),
         web.get("/health", health),
+        web.get("/api/v1/campaigns", list_campaigns),
         web.post("/api/v1/campaigns", start_campaign),
         web.get("/api/v1/campaigns/{id}", get_campaign),
         web.post("/api/v1/campaigns/{id}/finish", finish_campaign),

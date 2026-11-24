@@ -1,14 +1,54 @@
 """Persistent campaign records. Operation execution stays in the board broker."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+import re
 import sqlite3
 import uuid
+
+
+STATES = ("active", "abort_requested", "aborted", "finished")
 
 
 class CampaignError(Exception):
     def __init__(self, status, code):
         self.status = status
         self.code = code
+
+
+def search_parameters(query):
+    allowed = {"q", "state", "verdict", "from", "to", "limit", "offset"}
+    if set(query) - allowed or any(len(query.getall(key, [])) > 1 for key in allowed - {"state"}):
+        raise CampaignError(400, "invalid_campaign_filters")
+
+    q = query.get("q", "").strip()
+    verdict = query.get("verdict", "").strip()
+    states = tuple(dict.fromkeys(query.getall("state", [])))
+    if len(q) > 120 or len(verdict) > 80 or any(state not in STATES for state in states):
+        raise CampaignError(400, "invalid_campaign_filters")
+
+    def day(key):
+        if key not in query:
+            return None
+        value = query[key]
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise ValueError
+        return date.fromisoformat(value)
+
+    def integer(key, default, minimum, maximum):
+        value = query.get(key, str(default))
+        if not re.fullmatch(r"[0-9]{1,10}", value) or not minimum <= int(value) <= maximum:
+            raise ValueError
+        return int(value)
+
+    try:
+        start, end = day("from"), day("to")
+        if start is not None and end is not None and start > end:
+            raise ValueError
+        limit = integer("limit", 25, 1, 100)
+        offset = integer("offset", 0, 0, 1_000_000_000)
+    except ValueError as error:
+        raise CampaignError(400, "invalid_campaign_filters") from error
+    return dict(q=q, states=states, verdict=verdict, start=start, end=end, limit=limit, offset=offset)
 
 
 def timestamp():
@@ -19,6 +59,7 @@ class Campaigns:
     def __init__(self, path):
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
+        self.db.create_function("casefold", 1, str.casefold, deterministic=True)
         self.db.execute("""
             CREATE TABLE IF NOT EXISTS campaigns (
                 id TEXT PRIMARY KEY,
@@ -41,6 +82,42 @@ class Campaigns:
         if row is None:
             raise CampaignError(404, "campaign_not_found")
         return dict(row) | {"in_flight": self.in_flight.get(campaign_id, 0)}
+
+    def search(self, *, q, states, verdict, start, end, limit, offset):
+        filters, parameters = [], []
+        if q:
+            filters.append("(instr(casefold(name), ?) > 0 OR instr(id, ?) > 0)")
+            parameters.extend((q.casefold(), q.casefold()))
+        if states:
+            filters.append(f"state IN ({', '.join('?' for _ in states)})")
+            parameters.extend(states)
+        if verdict:
+            filters.append("verdict = ?")
+            parameters.append(verdict)
+        if start is not None:
+            filters.append("started_at >= ?")
+            parameters.append(f"{start}T00:00:00.000+00:00")
+        if end is not None:
+            filters.append("started_at <= ?")
+            parameters.append(f"{end}T23:59:59.999+00:00")
+
+        where = " WHERE " + " AND ".join(filters) if filters else ""
+        counts = dict.fromkeys(STATES, 0)
+        # Keep the counts and page on the same SQLite snapshot.
+        self.db.execute("BEGIN")
+        with self.db:
+            for row in self.db.execute(
+                f"SELECT state, COUNT(*) AS count FROM campaigns{where} GROUP BY state", parameters,
+            ):
+                counts[row["state"]] = row["count"]
+            rows = self.db.execute(
+                f"SELECT * FROM campaigns{where} ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?",
+                [*parameters, limit, offset],
+            ).fetchall()
+        return {
+            "items": [dict(row) | {"in_flight": self.in_flight.get(row["id"], 0)} for row in rows],
+            "counts": counts, "total": sum(counts.values()), "limit": limit, "offset": offset,
+        }
 
     def start(self, name):
         campaign_id = uuid.uuid4().hex
