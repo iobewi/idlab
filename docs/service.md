@@ -35,6 +35,13 @@ ouverte, recrée le conteneur `core`, puis démarre le serveur HTTP et attend
 sont fermées pendant la recréation. Une fois la tâche terminée, recharger la
 page Firefox et reconnecter les cartes au besoin.
 
+Pour un accès direct, installer l’extension recommandée
+[Tasks](https://marketplace.visualstudio.com/items?itemName=actboy168.tasks)
+dans la fenêtre VS Code locale sur Windows. La barre d’état affiche les
+icônes **Démarrer**, **Arrêter**, **Rechargement complet** et **État du
+serveur**. Survoler une icône pour lire son action. **Préparer le conteneur**
+et **Redémarrer le serveur HTTP** restent accessibles depuis la palette.
+
 Les tâches utilisent `IDLAB_MANAGER_TOKEN` dans l’environnement de VS Code
 ou une ligne `IDLAB_MANAGER_TOKEN=valeur` sans guillemets dans `.env`.
 Pour un conteneur déjà lancé, reprendre le jeton utilisé au démarrage. Un

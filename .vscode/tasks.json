@@ -17,7 +17,13 @@
         "${workspaceFolder}/.vscode/idlab.ps1",
         "-Action",
         "reload"
-      ]
+      ],
+      "options": {
+        "statusbar": {
+          "label": "$(refresh) IDLab",
+          "detail": "IDLab : reconstruire et recharger le serveur"
+        }
+      }
     },
     {
       "label": "IDLab : Préparer le conteneur",
@@ -29,7 +35,12 @@
         "${workspaceFolder}/.vscode/idlab.ps1",
         "-Action",
         "prepare"
-      ]
+      ],
+      "options": {
+        "statusbar": {
+          "hide": true
+        }
+      }
     },
     {
       "label": "IDLab : Démarrer le serveur HTTP",
@@ -41,7 +52,13 @@
         "${workspaceFolder}/.vscode/idlab.ps1",
         "-Action",
         "start"
-      ]
+      ],
+      "options": {
+        "statusbar": {
+          "label": "$(play) IDLab",
+          "detail": "IDLab : démarrer le serveur HTTP"
+        }
+      }
     },
     {
       "label": "IDLab : Arrêter le serveur HTTP",
@@ -53,7 +70,13 @@
         "${workspaceFolder}/.vscode/idlab.ps1",
         "-Action",
         "stop"
-      ]
+      ],
+      "options": {
+        "statusbar": {
+          "label": "$(debug-stop) IDLab",
+          "detail": "IDLab : arrêter le serveur HTTP"
+        }
+      }
     },
     {
       "label": "IDLab : Redémarrer le serveur HTTP",
@@ -65,7 +88,12 @@
         "${workspaceFolder}/.vscode/idlab.ps1",
         "-Action",
         "restart"
-      ]
+      ],
+      "options": {
+        "statusbar": {
+          "hide": true
+        }
+      }
     },
     {
       "label": "IDLab : État du serveur HTTP",
@@ -77,7 +105,13 @@
         "${workspaceFolder}/.vscode/idlab.ps1",
         "-Action",
         "status"
-      ]
+      ],
+      "options": {
+        "statusbar": {
+          "label": "$(pulse) IDLab",
+          "detail": "IDLab : consulter l’état du serveur HTTP"
+        }
+      }
     }
   ]
 }
