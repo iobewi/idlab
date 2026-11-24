@@ -126,7 +126,7 @@ def create_app(*, token, port=8080, service=None):
     async def authenticate(request, handler):
         if request.host not in hosts:
             return problem(403, "local_host_required")
-        if not request.path.startswith("/v1/httpd/"):
+        if not request.path.startswith("/api/v1/httpd/"):
             return await handler(request)
         if "Origin" in request.headers:
             return problem(403, "local_script_required")
@@ -160,7 +160,7 @@ def create_app(*, token, port=8080, service=None):
         return web.json_response({"action": action})
 
     async def relay(request):
-        if request.path.startswith("/v1/httpd/"):
+        if request.path.startswith("/api/v1/httpd/"):
             raise web.HTTPNotFound()
         if stopping or service.process is None or service.process.returncode is not None:
             return problem(503, "idlab_http_unavailable")
@@ -210,7 +210,7 @@ def create_app(*, token, port=8080, service=None):
     UPSTREAM = web.AppKey("upstream", ClientSession)
     app = web.Application(middlewares=[authenticate], client_max_size=4096)
     # Reserve the management namespace. Ordinary IDLab HTTP and WebSocket stay on this port.
-    app.router.add_route("*", "/v1/httpd/{action:status|start|stop|restart}", dispatch)
+    app.router.add_route("*", "/api/v1/httpd/{action:status|start|stop|restart}", dispatch)
     app.router.add_route("*", "/{path:.*}", relay)
     app.on_shutdown.append(stop_service)
     app.cleanup_ctx.append(upstream_session)

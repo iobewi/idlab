@@ -20,19 +20,19 @@ Chaque requête de gestion doit porter
 
 | Requête | Effet |
 |---|---|
-| `GET /v1/httpd/status` | Renvoie `state` (`stopped`, `running` ou `exited`) et `ready`. En cas de sortie du processus, donne aussi `exit_code`. |
-| `POST /v1/httpd/start` | Lance le serveur HTTP. Si le processus tourne déjà, le laisse en place. |
-| `POST /v1/httpd/stop` | Arrête le serveur HTTP et attend la fin du processus. |
-| `POST /v1/httpd/restart` | Arrête le serveur HTTP, puis démarre un nouveau processus. |
+| `GET /api/v1/httpd/status` | Renvoie `state` (`stopped`, `running` ou `exited`) et `ready`. En cas de sortie du processus, donne aussi `exit_code`. |
+| `POST /api/v1/httpd/start` | Lance le serveur HTTP. Si le processus tourne déjà, le laisse en place. |
+| `POST /api/v1/httpd/stop` | Arrête le serveur HTTP et attend la fin du processus. |
+| `POST /api/v1/httpd/restart` | Arrête le serveur HTTP, puis démarre un nouveau processus. |
 
 ```sh
 curl --fail-with-body -X POST \
   -H "Authorization: Bearer ${IDLAB_MANAGER_TOKEN}" \
-  http://127.0.0.1:8080/v1/httpd/start
+  http://127.0.0.1:8080/api/v1/httpd/start
 
 curl --fail-with-body \
   -H "Authorization: Bearer ${IDLAB_MANAGER_TOKEN}" \
-  http://127.0.0.1:8080/v1/httpd/status
+  http://127.0.0.1:8080/api/v1/httpd/status
 ```
 
 Après `start` ou `restart`, attendre `ready: true`. Ce champ indique

@@ -26,7 +26,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
 
     def request(self, method, action, **kwargs):
         headers = self.headers | kwargs.pop("headers", {})
-        return self.client.request(method, f"/v1/httpd/{action}", headers=headers, **kwargs)
+        return self.client.request(method, f"/api/v1/httpd/{action}", headers=headers, **kwargs)
 
     async def wait_ready(self):
         async with asyncio.timeout(5):
