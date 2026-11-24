@@ -7,7 +7,7 @@
 .uart-pane>.pane-title span{color:inherit}
 .console{height:55dvh;min-height:min(190px,40dvh);max-height:85dvh;resize:vertical;background:light-dark(#10202e,#0d141c);color:#e3edf5;border-bottom:3px solid var(--accent)}
 .console-row time,.console-row .seq{color:#93a8bb}.console-row .kind{color:#8cc9ff}.console-row.mark{background:#29415a}.console-empty{color:#a5b9c9}
-.agent-pane{margin:10px;border:1px solid var(--line)}.agent-log{height:145px;resize:vertical;overflow:auto;min-height:70px;max-height:60vh;background:var(--surface);font:12px/1.7 ui-monospace,Consolas,monospace}
+.agent-pane{border-top:1px solid var(--line);background:var(--panel)}.agent-log{height:145px;resize:vertical;overflow:auto;min-height:min(70px,25dvh);max-height:40dvh;background:var(--surface);font:12px/1.7 ui-monospace,Consolas,monospace}
 .agent-log .journal-row{padding:2px 10px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.journal-row time{color:var(--muted);margin-right:12px}
 #follow-state{font-size:12px;color:var(--muted)}
 
@@ -21,8 +21,12 @@
 @media(max-width:760px){.help-popup{max-width:calc(100vw - 140px)}}
 @media(pointer:coarse){.help-trigger{min-width:32px;min-height:32px}}
 
-/* Status details stay in document flow and push the workspace down. */
-.app-header{position:sticky;top:0;z-index:10}
+/* The work area scrolls between the header and the shared agent journal. */
+.application{height:100dvh;display:flex;flex-direction:column}
+.application > :not(.workspace){flex:none}
+.workspace{flex:1;min-height:0;grid-template-rows:minmax(0,1fr)}
+.work-area,.device-panel{overflow:auto;min-height:0}
+.app-header{position:relative;z-index:10}
 .icon-definitions{position:absolute;width:0;height:0;overflow:hidden}
 .status-bar{display:flex;align-items:center;justify-content:flex-end;gap:5px;flex-wrap:wrap;min-width:0}
 .status-button{min-height:36px;padding:6px 9px;gap:7px;background:transparent;border-color:transparent;font-size:12px}
@@ -34,7 +38,7 @@
 .status-icon{width:20px;height:20px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 .status-item .help-popup{pointer-events:none;left:auto;right:0;max-width:min(280px,calc(100vw - 24px))}
 .status-item:has([aria-expanded=true]) .help-popup{display:none}
-.status-panel{margin:0;padding:0;border:0;border-bottom:1px solid var(--line);background:var(--panel);color:var(--ink);min-width:0}
+.status-panel{margin:0;padding:0;border:0;border-bottom:1px solid var(--line);background:var(--panel);color:var(--ink);min-width:0;max-height:35dvh;overflow:auto}
 .status-panel .pane-title{padding:6px 12px}.status-content{padding:12px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 24px;align-items:start}.status-content>.hint,.status-content>.access-panel{grid-column:1/-1}.status-content>p{margin:0}.status-content>hr{grid-column:1/-1;width:100%;border:0;border-top:1px solid var(--line)}.status-content p{overflow-wrap:anywhere}
 .status-content>.row{margin:0}.status-content label{flex-wrap:wrap}.status-content select{max-width:100%}
 .status-content #io0-duration{width:85px}.status-content details{padding-block:10px}.status-content details button{margin-top:8px}
@@ -51,13 +55,17 @@
 
 /* The target and its hardware controls are always part of the workspace. */
 .device-panel{min-width:0;background:var(--toolbar);border-right:1px solid var(--line)}
-.sidebar-stack{position:sticky;top:calc(var(--header-height,60px) + 8px);max-height:calc(100dvh - var(--header-height,60px) - 16px);overflow:auto}
 .card-heading{display:flex;align-items:center;gap:8px;min-width:0}.card-heading span{overflow-wrap:anywhere;color:var(--ink)}
 .card-heading[data-tone=warning]{color:var(--warning)}.card-heading[data-tone=warning] span{color:inherit}
 .card-content{display:flex;flex-direction:column;gap:12px}.card-content>label{width:100%}.card-content>label select{flex:1;min-width:0}
 .card-content .card-identity{grid-column:auto;grid-row:auto;width:100%;grid-template-columns:65px minmax(0,1fr);margin:0;font-size:12px}
 .card-content #refresh{width:100%}.card-content>.row{gap:6px}.card-content .hint{margin:0}.card-content .card-safety{width:100%}
-@media(max-width:760px){.device-panel{border-right:0;border-bottom:1px solid var(--line)}.sidebar-stack{position:static;max-height:none;overflow:visible}.card-content{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){
+  .workspace{grid-template-rows:auto auto;overflow:auto}
+  .work-area,.device-panel{overflow:visible}
+  .device-panel{border-right:0;border-bottom:1px solid var(--line)}
+  .card-content{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+}
 @media(max-width:480px){.card-content{grid-template-columns:1fr}.card-content .card-identity{grid-column:auto;grid-row:auto}}
 
 .card-group{min-width:0;width:100%;border-top:1px solid var(--line);padding-top:10px}
