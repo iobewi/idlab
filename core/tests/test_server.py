@@ -65,6 +65,29 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(await response.read(), data)
 
+    async def test_device_api_does_not_expose_hardware_reset(self):
+        _, rom_generation = await self.board("rom", loader="rom")
+        stub, stub_generation = await self.board("stub")
+        for name, generation in (("rom", rom_generation), ("stub", stub_generation)):
+            path = f"/api/v1/devices/{name}"
+            for action in ("reset", "restart"):
+                response = await self.browser.post(
+                    f"{path}/{action}", headers=self.script, json={"generation": generation},
+                )
+                self.assertEqual(response.status, 404)
+            response = await self.browser.post(
+                f"{path}/flash/read", headers=self.script,
+                json={"generation": generation, "address": 0, "size": 4, "command": "reset"},
+            )
+            self.assertEqual((response.status, await response.json()), (400, {"error": "invalid_arguments"}))
+            session = await self.browser.get(path, headers=self.script)
+            self.assertEqual((await session.json())["generation"], generation)
+
+        read = asyncio.create_task(self.read("stub", stub_generation))
+        self.assertEqual((await stub.receive_json(timeout=2))["command"], "flash.read")
+        await stub.send_bytes(b"data")
+        self.assertEqual(await (await read).read(), b"data")
+
     async def test_two_boards_stay_independent(self):
         a, ga = await self.board("a")
         b, gb = await self.board("b")

@@ -58,6 +58,11 @@ curl --fail-with-body \
 | `GET /api/v1/devices/{name}` | `200`, description de la session |
 | `POST /api/v1/devices/{name}/flash/read` | `200`, octets bruts en `application/octet-stream` |
 
+Le reset matériel est indisponible via l’API des cartes, en ROM comme
+avec un stub. Pour quitter le mode téléchargement, déconnecter la carte
+dans IDLab, appuyer physiquement sur RESET sans maintenir BOOT, puis
+reconnecter la carte. `POST /api/v1/httpd/restart` redémarre le processus HTTP.
+
 Un nom de carte contient de 1 à 48 caractères ASCII parmi les lettres,
 chiffres, tirets et underscores. Le premier caractère est alphanumérique.
 Une description de session ressemble à ceci.

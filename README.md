@@ -24,9 +24,9 @@ python core/server.py
 Ouvrir <http://127.0.0.1:8080>. Choisir un nom et le port de la carte.
 En mode stub standard, le pilote peut faire entrer automatiquement la carte
 en mode téléchargement sur un pont UART reconnu ou sur USB Serial/JTAG.
-Si le câblage ne permet pas le reset automatique, cocher l'option de mode
-téléchargement manuel. Pour un transport inconnu ou USB-OTG, placer d'abord
-la carte en mode téléchargement. Le stub standard s'exécute en RAM.
+Si le câblage ou le transport exige une entrée manuelle, placer d’abord
+la carte en mode téléchargement avec BOOT et RESET. Le stub standard
+s’exécute en RAM.
 Le mode ROM seule donne l'identité sans charger de stub.
 
 ## Console série
@@ -37,7 +37,8 @@ reset. Si le chargeur répond, IDLab identifie la puce et prépare la lecture
 flash. Si le chargeur ne répond pas, IDLab ouvre la console au débit UART
 choisi dans les options avancées (115 200 bauds par défaut).
 Quand la carte est connectée en téléchargement, le reset depuis IDLab et
-l’onglet **Consoles** sont indisponibles. Pour retrouver la console,
+l’onglet **Consoles** sont indisponibles. L’API des cartes n’expose aucune
+commande de reset matériel. Pour retrouver la console,
 déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT,
 puis reconnecte-la depuis la liste des cartes.
 Le panneau Identification reprend les indices du démarrage ESP-IDF visibles
