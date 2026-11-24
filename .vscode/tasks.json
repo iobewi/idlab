@@ -8,6 +8,18 @@
   "problemMatcher": [],
   "tasks": [
     {
+      "label": "IDLab : Rechargement complet",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "RemoteSigned",
+        "-File",
+        "${workspaceFolder}/.vscode/idlab.ps1",
+        "-Action",
+        "reload"
+      ]
+    },
+    {
       "label": "IDLab : Préparer le conteneur",
       "args": [
         "-NoProfile",

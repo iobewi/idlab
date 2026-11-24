@@ -1,12 +1,13 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('prepare', 'start', 'stop', 'restart', 'status')]
+    [ValidateSet('prepare', 'reload', 'start', 'stop', 'restart', 'status')]
     [string]$Action
 )
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
+$deploy = $Action -in @('prepare', 'reload')
 $token = $env:IDLAB_MANAGER_TOKEN
 if (-not $token -and (Test-Path -LiteralPath '.env')) {
     $entries = @(Get-Content -LiteralPath '.env' | Select-String '^\s*IDLAB_MANAGER_TOKEN\s*=')
@@ -15,7 +16,7 @@ if (-not $token -and (Test-Path -LiteralPath '.env')) {
     }
 }
 
-if (-not $token -and $Action -eq 'prepare' -and -not (Test-Path -LiteralPath '.env')) {
+if (-not $token -and $deploy -and -not (Test-Path -LiteralPath '.env')) {
     $token = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
     New-Item -Path '.env' -ItemType File -Value "IDLAB_MANAGER_TOKEN=$token`r`n" | Out-Null
 }
@@ -24,40 +25,61 @@ if (-not $token) {
     throw 'Set IDLAB_MANAGER_TOKEN in the VS Code environment or add IDLAB_MANAGER_TOKEN=<token> without quotes to the local .env file.'
 }
 
-if ($Action -eq 'prepare') {
+if ($deploy) {
     $env:IDLAB_MANAGER_TOKEN = $token
-    & docker compose up -d --build core
+    $composeArgs = @('compose', 'up', '-d', '--build')
+    if ($Action -eq 'reload') { $composeArgs += '--force-recreate' }
+    $composeArgs += 'core'
+    & docker @composeArgs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
 $base = 'http://127.0.0.1:8080/api/v1/httpd'
 $headers = @{ Authorization = "Bearer $token" }
 
+function Get-IdlabStatus {
+    Invoke-RestMethod -UseBasicParsing -MaximumRedirection 0 -Method Get -Uri "$base/status" -Headers $headers -TimeoutSec 3
+}
+
+function Wait-IdlabStatus([bool]$RequireReady) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        try {
+            $status = Get-IdlabStatus
+            if (-not $RequireReady -or $status.ready -or $status.state -eq 'exited') {
+                return $status
+            }
+        } catch [System.Net.WebException] {
+            if ($_.Exception.Status -ne [System.Net.WebExceptionStatus]::ConnectFailure -or
+                [DateTime]::UtcNow -ge $deadline) { throw }
+        }
+        Start-Sleep -Milliseconds 300
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    if (-not $status) {
+        throw 'The IDLab manager did not respond on 127.0.0.1:8080. Check the port mapping and core logs in Docker Desktop.'
+    }
+    return $status
+}
+
 try {
-    if ($Action -in @('start', 'stop', 'restart')) {
-        Invoke-RestMethod -UseBasicParsing -MaximumRedirection 0 -Method Post -Uri "$base/$Action" -Headers $headers -TimeoutSec 15 | Out-Null
+    if ($deploy) {
+        $status = Wait-IdlabStatus $false
+    }
+    $command = $Action
+    if ($Action -eq 'reload') { $command = 'start' }
+
+    if ($command -in @('start', 'stop', 'restart')) {
+        Invoke-RestMethod -UseBasicParsing -MaximumRedirection 0 -Method Post -Uri "$base/$command" -Headers $headers -TimeoutSec 15 | Out-Null
     }
 
-    # Docker publishing and child readiness can lag behind a successful start.
-    if ($Action -in @('start', 'restart', 'prepare')) {
-        $deadline = [DateTime]::UtcNow.AddSeconds(15)
-        do {
-            try {
-                $status = Invoke-RestMethod -UseBasicParsing -MaximumRedirection 0 -Method Get -Uri "$base/status" -Headers $headers -TimeoutSec 3
-            } catch [System.Net.WebException] {
-                if ($Action -ne 'prepare' -or $_.Exception.Status -ne [System.Net.WebExceptionStatus]::ConnectFailure) { throw }
-                if ([DateTime]::UtcNow -ge $deadline) { throw }
-                Start-Sleep -Milliseconds 300
-                continue
-            }
-            if ($Action -eq 'prepare' -or $status.ready -or $status.state -eq 'exited') { break }
-            Start-Sleep -Milliseconds 300
-        } while ([DateTime]::UtcNow -lt $deadline)
-    } else {
-        $status = Invoke-RestMethod -UseBasicParsing -MaximumRedirection 0 -Method Get -Uri "$base/status" -Headers $headers -TimeoutSec 3
+    if ($command -in @('start', 'restart')) {
+        $status = Wait-IdlabStatus $true
+    } elseif (-not $deploy) {
+        $status = Get-IdlabStatus
     }
     $status | ConvertTo-Json -Compress
-    if ($Action -in @('start', 'restart') -and -not $status.ready) {
+    if ($command -in @('start', 'restart') -and -not $status.ready) {
         throw 'The HTTP service did not become ready. Check the core container logs in Docker Desktop.'
     }
 } catch [System.Net.WebException] {
