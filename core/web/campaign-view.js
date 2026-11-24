@@ -6,6 +6,7 @@ const labels = {
 };
 const dateFormat = new Intl.DateTimeFormat('fr', { dateStyle: 'short', timeStyle: 'short' });
 const pageSize = 10;
+const actionHeaders = {'X-IDLab-Action': '1'};
 export let activeCampaignId = null;
 
 function selectCampaign(campaign) {
@@ -52,7 +53,9 @@ function row(campaign) {
   details.ontoggle = async () => {
     if (!details.open) return;
     try {
-      const response = await fetch('/api/v1/campaigns/' + campaign.id + '/operations?limit=25');
+      const response = await fetch('/api/v1/campaigns/' + campaign.id + '/operations?limit=25', {
+        headers: actionHeaders,
+      });
       if (!response.ok) throw new Error('Opérations indisponibles.');
       const data = await response.json();
       operationsTitle.textContent = data.items.length + ' / ' + data.total + ' opérations récentes';
@@ -85,7 +88,7 @@ function campaignList(section, emptyMessage, onResult = () => {}) {
   let offset = 0;
   let pending;
 
-  async function load() {
+  async function load(userAction = false) {
     pending?.abort();
     const controller = new AbortController();
     pending = controller;
@@ -93,13 +96,15 @@ function campaignList(section, emptyMessage, onResult = () => {}) {
     query.set('limit', pageSize);
     query.set('offset', offset);
     try {
-      const response = await fetch('/api/v1/campaigns?' + query, { signal: controller.signal });
+      const response = await fetch('/api/v1/campaigns?' + query, {
+        signal: controller.signal, headers: userAction ? actionHeaders : undefined,
+      });
       if (!response.ok) throw new Error('Campagnes indisponibles (' + response.status + ').');
       const data = await response.json();
       if (controller.signal.aborted) return;
       if (offset > 0 && offset >= data.total) {
         offset = Math.floor(Math.max(0, data.total - 1) / pageSize) * pageSize;
-        return load();
+        return load(userAction);
       }
       onResult(data);
       body.replaceChildren(...data.items.map(row));
@@ -121,14 +126,14 @@ function campaignList(section, emptyMessage, onResult = () => {}) {
     }
   }
 
-  previous.onclick = () => { offset = Math.max(0, offset - pageSize); load(); };
-  next.onclick = () => { offset += pageSize; load(); };
+  previous.onclick = () => { offset = Math.max(0, offset - pageSize); load(true); };
+  next.onclick = () => { offset += pageSize; load(true); };
   return {
     reload() { if (!pending) load(); },
-    search(params) {
+    search(params, userAction = false) {
       filters = params;
       offset = 0;
-      load();
+      load(userAction);
     },
   };
 }
@@ -153,7 +158,7 @@ form.onsubmit = event => {
   for (const [name, value] of new FormData(form)) {
     if (value.trim()) query.set(name, value.trim());
   }
-  history.search(query);
+  history.search(query, true);
   live.reload();
 };
 form.oninput = () => form.elements.to.setCustomValidity('');

@@ -227,6 +227,40 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             await self.browser.ws_connect(base + "connect", headers=headers)
         self.assertEqual(caught.exception.status, 403)
 
+    async def test_api_activity_tracks_concurrent_clients_and_explicit_reads(self):
+        a, ga = await self.board("a")
+        b, gb = await self.board("b")
+        issued = await self.browser.post("/api/v1/devices/b/control/token", headers=self.local)
+        token = (await issued.json())["token"]
+        await b.receive_json(timeout=2)
+        control = await self.browser.ws_connect("/api/v1/devices/b/control/connect",
+                                                headers=self.script | {"Authorization": f"Bearer {token}"})
+        session = (await control.receive_json(timeout=2))["session"]
+        await b.receive_json(timeout=2)
+        stream = await self.browser.ws_connect("/api/v1/activity", headers=self.local)
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": False})
+        read_a = asyncio.create_task(self.read("a", ga))
+        await a.receive_json(timeout=2)
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": True})
+        read_b = asyncio.create_task(self.read("b", gb, headers=self.script | {"Authorization": f"Bearer {session}"}))
+        await b.receive_json(timeout=2)
+        await a.send_bytes(b"aaaa")
+        self.assertEqual(await (await read_a).read(), b"aaaa")
+        # The oldest request completed while the other board is still busy.
+        async with self.browser.ws_connect("/api/v1/activity", headers=self.local) as late_observer:
+            self.assertEqual(await late_observer.receive_json(timeout=2), {"active": True})
+        await b.send_bytes(b"bbbb")
+        self.assertEqual(await (await read_b).read(), b"bbbb")
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": False})
+
+        self.assertEqual((await self.browser.get("/api/v1/devices", headers=self.script)).status, 200)
+        response = await self.browser.get("/api/v1/campaigns", headers=self.script | {"X-IDLab-Action": "1"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": True})
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": False})
+        await stream.close()
+        await control.close()
+
     async def test_two_boards_stay_independent(self):
         a, ga = await self.board("a")
         b, gb = await self.board("b")

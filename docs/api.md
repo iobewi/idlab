@@ -18,6 +18,13 @@ doivent porter un en-tête `Origin` correspondant à l’hôte IDLab. Les routes
 `httpd` sont réservées aux scripts authentifiés et refusent les requêtes
 avec `Origin`.
 
+Le WebSocket `/api/v1/activity` indique à l’interface si une action API est
+en cours. Il envoie `{"active": true}` à la première action et
+`{"active": false}` à la fin de la dernière. Le maintien de l’écran suit
+cet état pour tous les clients. Les requêtes de consultation restent
+passives par défaut. Un client peut signaler une lecture ponctuelle avec
+`X-IDLab-Action: 1`.
+
 ## Processus HTTP
 
 Ces routes sont disponibles lorsque le gestionnaire est démarré, y compris

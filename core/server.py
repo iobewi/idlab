@@ -14,6 +14,7 @@ import uuid
 
 from aiohttp import WSMsgType, web
 
+from api_activity import ApiActivity
 from campaigns import CampaignError, Campaigns, search_parameters
 
 ROOT = Path(__file__).resolve().parent
@@ -653,13 +654,16 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if request.path in {"/", "/esptool.js"} or request.path.startswith("/web/"):
             response.headers["Cache-Control"] = "no-cache"
 
-    app = web.Application(middlewares=[local_access], client_max_size=4096)
+    activity = ApiActivity()
+    app = web.Application(middlewares=[local_access, activity.track], client_max_size=4096)
     app.cleanup_ctx.append(campaign_storage)
     app.on_shutdown.append(close_agents)
+    app.on_shutdown.append(activity.close)
     app.on_response_prepare.append(revalidate_browser_files)
     app.add_routes([
         web.get("/", index),
         web.get("/health", health),
+        web.get("/api/v1/activity", activity.observe),
         web.get("/api/v1/campaigns", list_campaigns),
         web.post("/api/v1/campaigns", start_campaign),
         web.get("/api/v1/campaigns/{id}", get_campaign),

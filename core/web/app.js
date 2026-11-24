@@ -13,7 +13,8 @@ const clock = new Intl.DateTimeFormat('fr', { timeStyle: 'medium' });
 const number = new Intl.NumberFormat('fr', {maximumFractionDigits: 1});
 const manualConsoleReturn = 'Pour retrouver la console, déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.';
 const externallyControlled = card => Boolean(card?.identity && card.observation?.external_control);
-const needsWakeLock = () => [...cards.values()].some(card =>
+let apiActive = false;
+const needsWakeLock = () => apiActive || [...cards.values()].some(card =>
   card.requesting || card.busy || card.mode === 'connecting' || card.mode === 'closing' ||
   (card.identity && (['busy', 'stopping'].includes(card.observation?.device.control) || externallyControlled(card))));
 let wakeLock;
@@ -42,13 +43,34 @@ async function updateWakeLock() {
 }
 
 function renderWakeState() {
-  const state = !needsWakeLock() ? 'Veille normale'
+  const active = needsWakeLock();
+  const label = $('status-label-control');
+  const controlState = active ? 'Opération en cours' : 'Disponible';
+  if (label.textContent !== controlState) {
+    label.textContent = controlState;
+    $('status-icon-control').setAttribute('href', active ? '#icon-busy' : '#icon-check');
+  }
+  const state = !active ? 'Veille normale'
     : wakeLock && !wakeLock.released ? 'Maintien éveillé'
     : requestingWakeLock ? 'Activation du maintien éveillé…' : 'Maintien éveillé indisponible';
-  $('status-label-wake').textContent = state;
   $('wake-state').textContent = state;
 }
 document.addEventListener('visibilitychange', updateWakeLock);
+
+function watchApiActivity() {
+  const url = new URL('/api/v1/activity', location.href);
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const socket = new WebSocket(url);
+  socket.onmessage = event => {
+    apiActive = JSON.parse(event.data).active === true;
+    void updateWakeLock();
+  };
+  socket.onclose = () => {
+    apiActive = false;
+    void updateWakeLock();
+    setTimeout(watchApiActivity, 2000);
+  };
+}
 
 function wireTabs(attribute) {
   const tabs = [...document.querySelectorAll('[' + attribute + ']')];
@@ -451,7 +473,6 @@ function render() {
   $('release-control').disabled = !external || selected?.observation?.device.control === 'stopping';
   $('grant-state').textContent = selected?.hasControlToken ? 'Jeton émis' : 'Aucun jeton';
   void updateWakeLock();
-  $('status-label-control').textContent = $('control-state').textContent;
   renderConsole();
   renderOperations();
   renderJournal();
@@ -801,3 +822,4 @@ $('server-origin').textContent = location.origin;
 say('Ajoute une carte pour ouvrir une console ou une session chargeur.');
 render();
 void checkServer();
+watchApiActivity();

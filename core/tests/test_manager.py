@@ -62,6 +62,8 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(created.status, 201)
         campaign = await created.json()
+        activity = await self.client.ws_connect("/api/v1/activity", headers=browser_headers)
+        self.assertEqual(await activity.receive_json(timeout=2), {"active": False})
         agent = await self.client.ws_connect("/agent?device=board", headers=browser_headers)
         await agent.send_json({
             "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
@@ -75,6 +77,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
             json={"generation": generation, "address": 0, "size": len(chunk) + 4, "campaign_id": campaign["id"]},
         ))
         command = await agent.receive_json(timeout=2)
+        self.assertEqual(await activity.receive_json(timeout=2), {"active": True})
         self.assertEqual(command["command"], "flash.read")
         self.assertTrue(command["stream"])
         await agent.send_bytes(chunk)
@@ -82,6 +85,8 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         await agent.send_json({"result": command["id"], "value": 16 * 1024 * 1024})
         response = await asyncio.wait_for(read, timeout=2)
         self.assertEqual(await response.read(), chunk + b"data")
+        self.assertEqual(await activity.receive_json(timeout=2), {"active": False})
+        await activity.close()
         first = self.service.process
 
         issued = await self.client.post("/api/v1/devices/board/control/token", headers=browser_headers)

@@ -46,7 +46,7 @@
 .status-content .access-panel{padding:10px 0;border-bottom:0}.status-content .fields label,.status-content .fields input{width:100%}
 .card-identity{display:grid;grid-template-columns:90px minmax(0,1fr);gap:7px;margin:14px 0}.card-identity dt{color:var(--muted)}.card-identity dd{margin:0;overflow-wrap:anywhere;font-family:ui-monospace,Consolas,monospace}
 @media(max-width:760px){.status-bar{width:100%;justify-content:flex-start}.status-button span{max-width:120px}.status-item .help-popup{position:fixed;top:145px;left:12px;right:auto}.status-content{grid-template-columns:1fr}.card-identity{grid-column:auto;grid-row:auto}}
-@media(max-width:400px){.status-bar{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}.status-button{width:100%;padding-inline:4px;justify-content:flex-start}.status-button span{max-width:80px}}
+@media(max-width:400px){.status-bar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.status-button{width:100%;padding-inline:4px;justify-content:flex-start}.status-button span{max-width:80px}}
 
 #console-auto-size{min-height:26px;padding:2px 7px;font-size:11px}.uart-pane>.pane-title #console-auto-size{background:transparent;color:inherit;border-color:currentColor}
 

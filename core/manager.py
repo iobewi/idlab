@@ -8,6 +8,8 @@ import sys
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, WSMsgType, web
 
+from api_activity import ApiActivity
+
 SERVER = Path(__file__).resolve().with_name("server.py")
 WS_LIMIT = 4 * 1024 * 1024 + 1
 HOP_HEADERS = {
@@ -209,11 +211,14 @@ def create_app(*, token, port=8080, service=None):
             await service.stop()
 
     UPSTREAM = web.AppKey("upstream", ClientSession)
-    app = web.Application(middlewares=[authenticate], client_max_size=4096)
+    activity = ApiActivity()
+    app = web.Application(middlewares=[authenticate, activity.track], client_max_size=4096)
     # Reserve the management namespace. Ordinary IDLab HTTP and WebSocket stay on this port.
     app.router.add_route("*", "/api/v1/httpd/{action:status|start|stop|restart}", dispatch)
+    app.router.add_get("/api/v1/activity", activity.observe)
     app.router.add_route("*", "/{path:.*}", relay)
     app.on_shutdown.append(stop_service)
+    app.on_shutdown.append(activity.close)
     app.cleanup_ctx.append(upstream_session)
     return app
 
