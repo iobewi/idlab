@@ -259,9 +259,14 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     async def close_agents(app):
         await asyncio.gather(*(socket.close(code=1001) for socket in tuple(sockets)))
 
+    async def revalidate_browser_files(request, response):
+        if request.path in {"/", "/esptool.js"} or request.path.startswith("/web/"):
+            response.headers["Cache-Control"] = "no-cache"
+
     app = web.Application(middlewares=[local_access], client_max_size=4096)
     app.cleanup_ctx.append(campaign_storage)
     app.on_shutdown.append(close_agents)
+    app.on_response_prepare.append(revalidate_browser_files)
     app.add_routes([
         web.get("/", index),
         web.get("/health", health),

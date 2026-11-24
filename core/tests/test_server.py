@@ -52,6 +52,17 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             json={"generation": generation, "address": address, "size": size},
         )
 
+    async def test_workbench_files_are_revalidated_after_deploy(self):
+        for path in ("/", "/web/app.js", "/web/board-connector.js", "/web/style.css"):
+            with self.subTest(path=path):
+                async with self.browser.get(path, headers=self.local) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.headers["Cache-Control"], "no-cache")
+                    etag = response.headers["ETag"]
+                async with self.browser.get(path, headers=self.local | {"If-None-Match": etag}) as response:
+                    self.assertEqual(response.status, 304)
+                    self.assertEqual(response.headers["Cache-Control"], "no-cache")
+
     async def test_web_and_script_use_same_read(self):
         ws, generation = await self.board("board")
         response = await self.browser.get("/api/v1/devices/board", headers=self.script)

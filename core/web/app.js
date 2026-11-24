@@ -381,19 +381,29 @@ async function connectCard(card) {
 
 async function addFromPicker() {
   if (adding) return;
+  function feedback(message) {
+    $('add-card-feedback').textContent = message;
+    say(message);
+  }
   const name = $('add-device-id').value.trim();
   const baud = Number($('connect-baud').value);
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(name)) return say('Saisis un nom de carte valide.');
-  if (cards.has(name)) return say('Ce nom est déjà utilisé.');
-  if (!baud) return say('Choisis un débit UART.');
-  if (!navigator.serial) return say('Web Serial est indisponible dans ce navigateur.');
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(name)) return feedback('Saisis un nom de carte valide.');
+  if (cards.has(name)) return feedback('Ce nom est déjà utilisé.');
+  if (!baud) return feedback('Choisis un débit UART.');
+  if (!navigator.serial) return feedback('Web Serial est indisponible dans ce navigateur.');
   adding = $('add-device').disabled = true;
   try {
+    feedback('Choisis le port de la carte dans le sélecteur du navigateur.');
     const port = await navigator.serial.requestPort();
-    if ([...cards.values()].some(card => card.port === port)) return say('Ce port est déjà associé à une carte.');
+    if ([...cards.values()].some(card => card.port === port)) return feedback('Ce port est déjà associé à une carte.');
+    feedback('Détection de la carte…');
     await connectCard(addCard(name, port, baud));
-  } catch (error) { say(error.message); }
-  finally { adding = $('add-device').disabled = false; }
+    $('add-card-feedback').textContent = '';
+  } catch (error) {
+    feedback(error.name === 'NotFoundError' ? 'Aucun port sélectionné.' : error.message);
+  } finally {
+    adding = $('add-device').disabled = false;
+  }
 }
 $('add-device').onclick = addFromPicker;
 $('add-device-id').onkeydown = event => { if (event.key === 'Enter') addFromPicker(); };
