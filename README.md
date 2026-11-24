@@ -48,8 +48,8 @@ L’identité mesurée et la capture restent affichées au retour en console.
 Les options avancées règlent le débit UART, l’ouverture en console seule
 et l’entrée BOOT manuelle. **Opérations → ROM seule** ouvre une session
 sans stub sur la carte sélectionnée, affiche son identité et permet une
-lecture du JEDEC. Sur un port sans reset automatique, placer d’abord
-la carte en mode téléchargement.
+lecture du JEDEC. Une boîte de dialogue demande confirmation du reset automatique ou
+guide l’entrée manuelle avec BOOT et RESET.
 
 ## Piloter depuis Python
 

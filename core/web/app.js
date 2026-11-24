@@ -189,8 +189,7 @@ function renderRom(available) {
   $('rom-console').disabled = !available || !active;
   $('rom-help').textContent = !card ? 'Ajoute et sélectionne une carte.'
     : active ? 'Session ROM active. Les lectures du contenu flash utilisent le stub standard.'
-    : card.canEnterLoader ? 'Ouvrir la ROM redémarre la carte et la place en mode téléchargement, sans charger de stub.'
-    : 'Place la carte en téléchargement avec BOOT et RESET, puis ouvre la session ROM.';
+    : 'Ouvre une session ROM pour identifier la carte ou lire son JEDEC.';
   $('rom-identity').textContent = active
     ? (card.identity.model ?? card.identity.chip) + ' · MAC ' + card.identity.mac : '';
   const jedec = active ? card.romJedec : null;
@@ -328,10 +327,28 @@ $('enter-loader').onclick = () => run(async () => {
   $('workspace-tab-operations').click();
   $('tab-memory').click();
 });
-$('open-rom').onclick = () => run(async () => {
-  const identity = await selected?.enterRom();
-  if (identity) say('Session ROM ouverte sur ' + (identity.model ?? identity.chip) + '.');
-});
+const romDialog = $('rom-reset-dialog');
+let romTarget;
+$('open-rom').onclick = () => {
+  if (!selected || romDialog.open) return;
+  romTarget = selected;
+  const automatic = romTarget.canEnterLoader;
+  $('rom-reset-device').textContent = 'Carte : ' + romTarget.name;
+  $('rom-reset-auto').hidden = !automatic;
+  $('rom-reset-steps').hidden = automatic;
+  $('rom-reset-confirm').textContent = automatic ? 'Redémarrer en ROM' : 'Essayer la connexion';
+  romDialog.returnValue = '';
+  romDialog.showModal();
+};
+romDialog.onclose = () => {
+  const card = romTarget;
+  romTarget = null;
+  if (romDialog.returnValue !== 'connect' || !card || cards.get(card.name) !== card) return;
+  run(async () => {
+    const identity = await card.enterRom();
+    if (identity) say('Session ROM ouverte sur ' + (identity.model ?? identity.chip) + '.');
+  });
+};
 $('rom-jedec').onclick = () => run(() => selected?.readRomJedec());
 $('rom-console').onclick = () => $('return-console').click();
 $('identify-live').onclick = () => run(async () => {

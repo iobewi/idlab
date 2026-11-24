@@ -166,3 +166,16 @@
 #campaign-search label { display: grid; gap: 3px; }
 .campaign-table { overflow-x: auto; }
 .campaign-table td:first-child { min-width: 9rem; overflow-wrap: anywhere; }
+
+/* Confirmation d’entrée en ROM. */
+#rom-reset-dialog {
+  box-sizing: border-box;
+  max-width: min(28rem, calc(100% - 2rem));
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--ink);
+}
+#rom-reset-dialog::backdrop { background: rgb(0 0 0 / 50%); }
+.rom-dialog-actions { justify-content: flex-end; }

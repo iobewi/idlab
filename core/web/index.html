@@ -53,6 +53,22 @@
   <button id="rom-jedec">Lire le JEDEC</button>
   <button id="rom-console">Retour console</button>
 </div>
+<dialog id="rom-reset-dialog" aria-labelledby="rom-reset-title">
+  <form method="dialog">
+    <h2 id="rom-reset-title">Entrer en mode téléchargement</h2>
+    <p id="rom-reset-device"></p>
+    <p id="rom-reset-auto">IDLab va redémarrer la carte en mode téléchargement.</p>
+    <ol id="rom-reset-steps" hidden>
+      <li>Maintiens le bouton BOOT enfoncé.</li>
+      <li>Appuie brièvement sur RESET (ou EN), puis relâche-le.</li>
+      <li>Relâche BOOT, puis choisis « Essayer la connexion ».</li>
+    </ol>
+    <div class="row rom-dialog-actions">
+      <button value="cancel" autofocus>Annuler</button>
+      <button id="rom-reset-confirm" class="primary" value="connect">Redémarrer en ROM</button>
+    </div>
+  </form>
+</dialog>
 <p id="rom-help" class="hint padded"></p>
 <p id="rom-identity" class="mono padded"></p>
 <p id="rom-flash-id" class="mono padded" role="status"></p>
