@@ -8,7 +8,7 @@ async function api(path, options) {
   const response = await fetch('/api/v1' + path, options);
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.error ?? ('HTTP ' + response.status));
+    throw new Error(error.detail ?? error.error ?? ('HTTP ' + response.status));
   }
   return response;
 }
@@ -235,7 +235,8 @@ export class BoardConnector {
       if (socket.readyState === 1) {
         socket.send(command.command === 'flash.read' && !command.stream ? command.id
           : JSON.stringify({result: command.id, error: error.message === 'invalid_flash_range'
-            ? 'invalid_flash_range' : 'device_command_failed', console_restored: this.mode === 'console'}));
+            ? 'invalid_flash_range' : 'device_command_failed', console_restored: this.mode === 'console',
+            detail: command.command === 'mode.loader' ? error.message : undefined}));
       }
       this.#log(error.message);
     } finally {
@@ -284,9 +285,7 @@ export class BoardConnector {
 
   async #runCommand({command, hex, reset}) {
     if (command === 'mode.loader' && this.mode === 'console' && this.canEnterLoader) {
-      this.#setMode('connecting');
-      await this.#closeSession(true);
-      await this.#openLoader('stub', {fromConsole: true});
+      await this.#enterLoaderFromConsole();
     } else if (command === 'mode.console' && this.canReturnToConsole) {
       await this.#resumeConsole();
     } else if (command === 'console.reset' && this.mode === 'console' && this.resetWait) {
@@ -374,6 +373,23 @@ export class BoardConnector {
     this.#setMode('connecting');
     await this.#closeSession(true);
     await this.#openConsole(true);
+  }
+
+  async #enterLoaderFromConsole() {
+    this.#setMode('connecting');
+    this.#log('Passage au chargeur…');
+    try {
+      await this.#closeSession(true);
+      await this.#openLoader('stub', {fromConsole: true});
+    } catch (error) {
+      if (this.lost || this.socket?.readyState !== 1 || this.commandCancelled) throw error;
+      try {
+        await this.#resumeConsole();
+      } catch (recoveryError) {
+        throw new Error(error.message + ' · Console indisponible : ' + recoveryError.message);
+      }
+      throw error;
+    }
   }
 
   async #withLoader(operation) {

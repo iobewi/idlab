@@ -512,6 +512,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             if not isinstance(result, dict):
                 return problem(502, "device_session_changed")
             if result.get("error"):
+                detail = result.get("detail")
+                if command == "mode.loader" and isinstance(detail, str) and detail:
+                    record["detail"] = detail[:500]
+                    return web.json_response({"error": "device_command_failed", "detail": record["detail"]}, status=502)
                 return problem(502, "device_command_failed")
             complete = True
             value = result.get("value")

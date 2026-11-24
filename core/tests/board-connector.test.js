@@ -3,8 +3,8 @@ import test from 'node:test';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
-function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud, failBaud = false,
-  readBlock, shortResponseAt, campaignId, onLinkLost } = {}) {
+function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
+  readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -13,7 +13,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
   const uart = [];
   let deviceBaud = 115200;
   const bytes = Uint8Array.of(0, 255, 13);
-  const port = {getInfo: () => ({usbVendorId: vid})};
+  const port = {getInfo: () => ({usbVendorId: vid, usbProductId: pid})};
   class Loader {
     ESP_CHANGE_BAUDRATE = 0x0f;
     chip = {
@@ -30,7 +30,8 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
       port.readable = {};
       port.writable = {};
       this.transport.baudrate = this.initialBaud;
-      if (attempts === 1 && (!inDownload || this.initialBaud !== deviceBaud)) {
+      if ((attempts === 1 && (!inDownload || this.initialBaud !== deviceBaud)) ||
+          (entry === 'default_reset' && failLoader)) {
         throw new Error('Failed to connect with the device');
       }
     }
@@ -113,7 +114,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
         commandResult = null;
         await socket.onmessage({data: JSON.stringify({...payload, id: 'test-command', generation: undefined})});
         assert.equal(commandResult?.result, 'test-command');
-        if (commandResult.error) throw new Error(commandResult.error);
+        if (commandResult.error) throw new Error(commandResult.detail ?? commandResult.error);
         return {json: async () => ({...identity, result: commandResult.value})};
       }
       assert.equal(path, '/devices/board/flash/read');
@@ -227,6 +228,19 @@ test('the explicit loader action can return to console and switch again', async 
   assert.deepEqual(events.slice(-3), ['close-loader', 'console', 'reset']);
   await card.enterLoader();
   assert.equal(card.canReturnToConsole, true);
+  await card.disconnect();
+});
+
+test('a failed USB Serial/JTAG loader entry reports the cause and restores the same console session', async () => {
+  const {card, events} = fixture({vid: 0x303a, pid: 0x1001, failLoader: true});
+  await card.connect();
+  const socket = card.socket;
+  await assert.rejects(card.enterLoader(), /Failed to connect with the device/);
+  assert.equal(card.mode, 'console');
+  assert.equal(card.socket, socket);
+  assert.deepEqual(events.slice(-5), ['close-console', 'detect:default_reset', 'close-loader', 'console', 'reset']);
+  await card.write('status');
+  assert.equal(events.at(-1), 'uart:status');
   await card.disconnect();
 });
 

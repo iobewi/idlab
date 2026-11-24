@@ -137,6 +137,41 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await stub.send_bytes(b"data")
         self.assertEqual(await (await read).read(), b"data")
 
+    async def test_loader_switch_reports_failure_and_can_be_retried_on_the_same_session(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        console = {"mode": "console", "transport": "usb_serial_jtag"}
+        await agent.send_json(console)
+        generation = (await agent.receive_json(timeout=2))["generation"]
+
+        async def command(name):
+            request = asyncio.create_task(self.browser.post(
+                "/api/v1/devices/board/command", headers=self.local,
+                json={"generation": generation, "command": name},
+            ))
+            message = await agent.receive_json(timeout=2)
+            self.assertEqual(message["command"], name)
+            return request, message["id"]
+
+        request, identifier = await command("mode.loader")
+        await agent.send_json({"identity": console})
+        self.assertEqual((await agent.receive_json(timeout=2))["identity"]["generation"], generation)
+        detail = "Failed to connect with the device"
+        await agent.send_json({"result": identifier, "error": "device_command_failed", "detail": detail})
+        response = await request
+        self.assertEqual((response.status, await response.json()),
+                         (502, {"error": "device_command_failed", "detail": detail}))
+
+        request, identifier = await command("mode.loader")
+        await agent.send_json({"identity": {
+            "mode": "loader", "loader": "stub", "chip": "esp32p4", "mac": "10:20:30:40:50:60",
+            "transport": "usb_serial_jtag", "return_to_console": True, "flash_size": 32 * 1024 * 1024,
+        }})
+        self.assertIn("mode.console", (await agent.receive_json(timeout=2))["identity"]["capabilities"])
+        await agent.send_json({"result": identifier})
+        response = await request
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["generation"], generation)
+
     async def test_exclusive_control_stops_and_reuses_token_then_revokes(self):
         agent, generation = await self.board("board")
         base = "/api/v1/devices/board/control/"

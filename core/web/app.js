@@ -581,8 +581,16 @@ $('enter-loader').onclick = () => run(async () => {
     await card.returnConsole();
     if (card === selected) $('workspace-tab-consoles').click();
   } else {
-    await card.enterLoader();
+    say('Ouverture du chargeur flash sur « ' + card.name + ' »…');
+    try {
+      await card.enterLoader();
+    } catch (error) {
+      const detail = error.message === 'Failed to connect with the device'
+        ? 'La carte ne répond pas en mode téléchargement.' : error.message;
+      throw new Error('Impossible d’ouvrir le chargeur sur « ' + card.name + ' ». ' + detail);
+    }
     if (card !== selected) return;
+    say('Chargeur flash ouvert sur « ' + card.name + ' ».');
     $('workspace-tab-operations').click();
     $('tab-memory').click();
   }

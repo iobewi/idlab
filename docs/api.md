@@ -103,6 +103,11 @@ le même canal agent.
 | `rom.jedec` | Lit le JEDEC depuis la ROM. Le résultat est renvoyé dans `result`. |
 | `identify` | Mesure l’identité matérielle. Depuis la console, passe par le chargeur puis revient à la console si le transport le permet. |
 
+En cas d’échec de `mode.loader`, le connecteur tente de rétablir la
+console si le port et la session sont encore actifs. La réponse
+`502 device_command_failed` peut inclure un champ `detail` avec la
+cause de l’échec.
+
 `GET /api/v1/devices/{name}/uart?generation=…&cursor=…` renvoie les octets
 RX en hexadécimal, le prochain curseur et le nombre d’octets perdus avant
 ce curseur (`hex`, `cursor`, `dropped`). Sans curseur, la lecture commence
