@@ -219,20 +219,35 @@ function render() {
   }
   $('empty-cards').hidden = cards.size !== 0;
   $('card-details').hidden = !selected;
+  const info = selected?.identity;
+  const romActive = selected?.mode === 'loader' && info?.loader === 'rom';
+  const romTab = $('tab-rom');
   const consolesTab = $('workspace-tab-consoles');
-  const consoleUnavailable = Boolean(selected?.consoleUnavailable);
-  if (consoleUnavailable && consolesTab.getAttribute('aria-selected') === 'true') {
+  const manualConsoleUnavailable = Boolean(selected?.consoleUnavailable);
+  if ((romActive || manualConsoleUnavailable) && consolesTab.getAttribute('aria-selected') === 'true') {
     const active = document.activeElement;
     const operationsTab = $('workspace-tab-operations');
     const moveFocus = active === consolesTab || $('workspace-consoles').contains(active);
     operationsTab.click();
-    if (selected.identity?.loader === 'rom') $('tab-rom').click();
+    if (romActive) romTab.click();
     if (moveFocus) operationsTab.focus();
   }
-  consolesTab.disabled = consoleUnavailable;
-  consolesTab.title = consoleUnavailable ? 'Console indisponible en BOOT manuel.' : '';
+  consolesTab.disabled = romActive || manualConsoleUnavailable;
+  consolesTab.title = romActive ? 'Console indisponible pendant la session ROM.'
+    : manualConsoleUnavailable ? 'Console indisponible en BOOT manuel.' : '';
+  for (const id of ['tab-partitions', 'tab-flash', 'tab-memory', 'tab-tools']) {
+    const tab = $(id);
+    if (romActive && tab.getAttribute('aria-selected') === 'true') {
+      const active = document.activeElement;
+      const panel = $(tab.getAttribute('aria-controls'));
+      const moveFocus = active === tab || panel.contains(active);
+      romTab.click();
+      if (moveFocus) romTab.focus();
+    }
+    tab.disabled = romActive;
+    tab.title = romActive ? 'Indisponible pendant la session ROM seule.' : '';
+  }
   renderIdentification();
-  const info = selected?.identity;
   const available = selected && !selected.busy && !selected.requesting;
   const loader = available && selected.mode === 'loader';
   renderRom(available);
@@ -253,7 +268,7 @@ function render() {
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
   $('identify-live').disabled = !(loader || autoLoader);
-  $('return-console').hidden = consoleUnavailable;
+  $('return-console').hidden = manualConsoleUnavailable;
   $('return-console').disabled = !loader || $('return-console').hidden;
   $('enter-loader').disabled = !autoLoader;
   $('send').disabled = !(available && selected.mode === 'console');

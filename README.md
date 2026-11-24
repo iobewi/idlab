@@ -49,7 +49,9 @@ L’identité mesurée et la capture restent affichées au retour en console.
 Les options avancées règlent le débit UART, l’ouverture en console seule
 et l’entrée BOOT manuelle. **Opérations → ROM seule** ouvre une session
 sans stub sur la carte sélectionnée, affiche son identité et permet une
-lecture du JEDEC. Une boîte de dialogue demande confirmation du reset automatique ou
+lecture du JEDEC. Pendant cette session, **Consoles**, **Partitions**,
+**Plan flash**, **Lecture mémoire** et **Déclencheurs et outils** sont grisés
+pour la carte sélectionnée. Une boîte de dialogue demande confirmation du reset automatique ou
 guide l’entrée manuelle avec BOOT et RESET. Si le navigateur détecte à
 nouveau le même port, IDLab tente la connexion automatiquement. La boîte
 se ferme une fois la session ROM confirmée. La tentative manuelle reste
