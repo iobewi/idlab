@@ -9,9 +9,9 @@ commande et peut être arrêté ou redémarré indépendamment.
 Sur l'hôte Docker, définir un secret aléatoire `IDLAB_MANAGER_TOKEN` et
 exécuter `docker compose up -d --build core` depuis la racine du dépôt.
 Définir séparément `IDLAB_TOKEN` si des scripts doivent aussi accéder à
-l'API du banc. Le gestionnaire écoute sur le port `8081`. Le serveur web,
-une fois démarré, écoute sur le port `8080`. Compose publie les deux ports
-sur `127.0.0.1` de l'hôte. Utiliser Docker Engine 28 ou plus récent.
+l'API du banc. Le gestionnaire, l’interface, l’API et Web Serial utilisent le même port public `8080`.
+Compose le publie sur `127.0.0.1` de l’hôte. Le serveur HTTP enfant écoute
+sur un port privé du conteneur. Utiliser Docker Engine 28 ou plus récent.
 
 ## Appels HTTP
 
@@ -20,23 +20,25 @@ Chaque requête de gestion doit porter
 
 | Requête | Effet |
 |---|---|
-| `GET /v1/status` | Renvoie `state` (`stopped`, `running` ou `exited`) et `ready`. En cas de sortie du processus, donne aussi `exit_code`. |
-| `POST /v1/start` | Lance le serveur HTTP. Si le processus tourne déjà, le laisse en place. |
-| `POST /v1/stop` | Arrête le serveur HTTP et attend la fin du processus. |
-| `POST /v1/restart` | Arrête le serveur HTTP, puis démarre un nouveau processus. |
+| `GET /v1/httpd/status` | Renvoie `state` (`stopped`, `running` ou `exited`) et `ready`. En cas de sortie du processus, donne aussi `exit_code`. |
+| `POST /v1/httpd/start` | Lance le serveur HTTP. Si le processus tourne déjà, le laisse en place. |
+| `POST /v1/httpd/stop` | Arrête le serveur HTTP et attend la fin du processus. |
+| `POST /v1/httpd/restart` | Arrête le serveur HTTP, puis démarre un nouveau processus. |
 
 ```sh
 curl --fail-with-body -X POST \
   -H "Authorization: Bearer ${IDLAB_MANAGER_TOKEN}" \
-  http://127.0.0.1:8081/v1/start
+  http://127.0.0.1:8080/v1/httpd/start
 
 curl --fail-with-body \
   -H "Authorization: Bearer ${IDLAB_MANAGER_TOKEN}" \
-  http://127.0.0.1:8081/v1/status
+  http://127.0.0.1:8080/v1/httpd/status
 ```
 
 Après `start` ou `restart`, attendre `ready: true`. Ce champ indique
 que le processus HTTP démarré par le gestionnaire répond à `/health`.
+Quand le serveur HTTP est arrêté, les routes de gestion restent accessibles
+et les autres routes renvoient `503 idlab_http_unavailable`.
 Une commande concurrente donne `409 manager_busy`. Un arrêt ou
 redémarrage ferme les sessions de carte. Reconnecter les cartes dans
 le navigateur.
@@ -52,8 +54,7 @@ celui-ci vers l'hôte Docker pour conserver les mêmes URL HTTP.
 
 ```sh
 ssh -N -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:8080:127.0.0.1:8080 \
-  -L 127.0.0.1:8081:127.0.0.1:8081 utilisateur@hote-docker
+  -L 127.0.0.1:8080:127.0.0.1:8080 utilisateur@hote-docker
 ```
 
 Le navigateur reste propriétaire des ports Web Serial. Il ouvre

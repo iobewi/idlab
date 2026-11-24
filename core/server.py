@@ -204,5 +204,6 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
 if __name__ == "__main__":
     port = int(os.environ.get("IDLAB_PORT", "8080"))
     forwarded = os.environ.get("IDLAB_LOOPBACK_FORWARDED") == "1"
-    app = create_app(port=port, token=os.environ.get("IDLAB_TOKEN"), loopback_forwarded=forwarded)
+    public_port = int(os.environ.get("IDLAB_PUBLIC_PORT", str(port)))
+    app = create_app(port=public_port, token=os.environ.get("IDLAB_TOKEN"), loopback_forwarded=forwarded)
     web.run_app(app, host="0.0.0.0" if forwarded else "127.0.0.1", port=port, shutdown_timeout=3)

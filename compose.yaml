@@ -9,5 +9,4 @@ services:
       IDLAB_MANAGER_TOKEN: ${IDLAB_MANAGER_TOKEN:?Set IDLAB_MANAGER_TOKEN}
     ports:
       - "127.0.0.1:8080:8080"
-      - "127.0.0.1:8081:8081"
     stop_grace_period: 10s
