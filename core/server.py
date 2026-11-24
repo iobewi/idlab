@@ -56,9 +56,22 @@ def validate_identity(value):
         raise ValueError("invalid_transport")
     if loader not in ("rom", "stub"):
         raise ValueError("invalid_loader")
+    metadata = {}
+    if "model" in value:
+        model = value["model"]
+        if not isinstance(model, str) or not 1 <= len(model) <= 160:
+            raise ValueError("invalid_model")
+        metadata["model"] = model
+    for key, maximum in (("flash_id", 0xffffff), ("usb_vid", 0xffff), ("usb_pid", 0xffff)):
+        if key in value:
+            field = value[key]
+            if field is not None and (type(field) is not int or not 0 <= field <= maximum):
+                raise ValueError(f"invalid_{key}")
+            metadata[key] = field
     return {
         "chip": chip, "mac": mac.lower(), "flash_size": size, "transport": transport, "loader": loader,
         "capabilities": ["identify", "flash.read"] if loader == "stub" and size else ["identify"],
+        **metadata,
     }
 
 

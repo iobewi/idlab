@@ -26,29 +26,54 @@ export class EspDriver {
   }
 
   async connect(options) {
-    const plan = connectionPlan(this.port.getInfo(), options);
+    const {romOnly, auto} = options;
+    const usb = this.port.getInfo();
+    const plan = connectionPlan(usb, options);
     const loader = this.loader;
-    await loader.detectChip(plan.entry);
-    if (loader.syncStubDetected) throw new Error('Un stub tourne déjà. Remets la carte en mode ROM.');
+    if (auto) {
+      // A short SYNC probe detects an already active downloader without
+      // asserting reset. Only an unanswered probe falls back to UART.
+      let synced = false;
+      const openAndSync = loader.openAndSync;
+      loader.openAndSync = async (...args) => {
+        await openAndSync.apply(loader, args);
+        synced = true;
+      };
+      try {
+        await loader.detectChip('no_reset', 1);
+      } catch (error) {
+        if (!synced && !this.transport.closed && this.port.readable && this.port.writable &&
+            error.message === 'Failed to connect with the device') return null;
+        throw error;
+      } finally {
+        loader.openAndSync = openAndSync;
+      }
+    } else {
+      await loader.detectChip(plan.entry);
+    }
+    if (romOnly && loader.syncStubDetected) throw new Error('Un stub tourne déjà. Remets la carte en mode ROM.');
     if (loader.secureDownloadMode) throw new Error('Identité indisponible en mode téléchargement sécurisé.');
 
     let transport = plan.transport;
     if (transport === 'unknown' && await loader.usesUsbOtg()) transport = 'usb_otg';
-
     const mac = await loader.chip.readMac(loader);
+    const model = await loader.chip.getChipDescription?.(loader) ?? loader.chip.CHIP_NAME;
     if (plan.useStub) {
-      await loader.chip.postConnect?.(loader);
+      if (!loader.syncStubDetected) await loader.chip.postConnect?.(loader);
       await loader.runStub();
     }
-    // ROM identification can work even when its target has no usable flash.
-    let flashSize = null;
+    let flashId = null, flashSize = null;
     if (loader.IS_STUB) {
-      const flashId = await loader.readFlashId();
+      flashId = (await loader.readFlashId()) >>> 0;
       const capacityCode = (flashId >>> 16) & 255;
       if (capacityCode >= 12 && capacityCode <= 26) flashSize = 2 ** capacityCode;
     }
     const chip = loader.chip.CHIP_NAME.toLowerCase().replace(/[^a-z0-9]/g, '');
-    this.identity = { chip, mac, flash_size: flashSize, transport, loader: loader.IS_STUB ? 'stub' : 'rom' };
+    this.identity = {
+      chip, model, mac, flash_size: flashSize, flash_id: flashId, transport,
+      usb_vid: usb.usbVendorId ?? null, usb_pid: usb.usbProductId ?? null,
+      loader: loader.IS_STUB ? 'stub' : 'rom',
+    };
     return this.identity;
   }
 

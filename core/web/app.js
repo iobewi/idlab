@@ -158,8 +158,15 @@ function render() {
   $('card-details').hidden = !selected;
   const info = selected?.identity;
   for (const [id, value] of Object.entries({
-    'status-label-card': selected?.name, 'chip-info': info?.chip, 'flash-info': info?.flash_size ? info.flash_size + ' octets' : null,
-    'interface-info': info?.transport ?? selected?.portLabel, 'console-speed-info': selected?.baud,
+    'status-label-card': selected?.name,
+    'card-mode-info': selected?.mode === 'loader'
+      ? (info?.loader === 'stub' ? 'Téléchargement · stub actif' : 'Téléchargement · ROM seule')
+      : {console: 'Console série', connecting: 'Détection…', disconnected: 'Déconnectée', closing: 'Déconnexion…'}[selected?.mode],
+    'chip-info': info?.model ?? info?.chip, 'mac-info': info?.mac,
+    'flash-info': info?.flash_size ? info.flash_size / (1024 * 1024) + ' Mio' : null,
+    'rdid-info': info?.flash_id == null ? null : '0x' + info.flash_id.toString(16).padStart(6, '0'),
+    'interface-info': [info?.transport, selected?.portLabel].filter(Boolean).join(' · ') || null,
+    'console-speed-info': selected?.baud,
     'loader-speed-info': info ? '115 200' : null, 'footer-target': selected?.name,
   })) $(id).textContent = value ?? '—';
   const available = selected && !selected.busy && !selected.requesting;
@@ -167,10 +174,16 @@ function render() {
   const canRead = loader && info?.capabilities.includes('flash.read');
   $('read').disabled = !canRead;
   renderPartitions(canRead);
+  const flashHint = $('flash-availability');
+  flashHint.textContent = selected?.mode === 'console' ? 'Console active. Ouvre le chargeur flash pour lire la mémoire.'
+    : selected?.mode === 'loader' && info?.loader === 'rom' ? 'ROM active. Le stub requis pour cette lecture est indisponible ou désactivé.'
+    : selected?.mode === 'loader' && !info?.flash_size ? 'Capacité flash inconnue. Vérifie le RDID et la connexion à la flash.'
+    : '';
+  flashHint.hidden = !flashHint.textContent;
   const reset = $('reset-device');
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
-  $('identify-live').disabled = !loader;
+  $('identify-live').disabled = !(loader || (available && selected.mode === 'console'));
   $('return-console').disabled = !loader;
   $('enter-loader').disabled = !(available && selected.mode === 'console');
   $('send').disabled = !(available && selected.mode === 'console');
@@ -275,7 +288,23 @@ async function connect(card) {
   card.mode = 'connecting';
   render();
   try {
-    if (card.use === 'console') {
+    if (card.use !== 'console') {
+      const driver = new EspDriver(card.port, await import('/esptool.js'));
+      card.session = driver;
+      const identity = await driver.connect({
+        auto: card.use === 'auto', romOnly: card.use === 'rom', manualEntry: card.manual,
+      });
+      if (identity) {
+        card.identity = await requestUsbSession(card, driver);
+        card.mode = 'loader';
+        note(card, 'Chargeur détecté · ' + (identity.model ?? identity.chip));
+      } else {
+        await driver.close();
+        card.session = null;
+        note(card, 'Pas de réponse du chargeur sans reset · ouverture console');
+      }
+    }
+    if (card.mode !== 'loader') {
       const session = await openSerialConsole(card.port, card.baud, null, bytes => {
         card.capture.append(bytes);
         scheduleConsole(card);
@@ -289,13 +318,6 @@ async function connect(card) {
         if (card.session === session && card.mode === 'console') disconnect(card);
       });
       note(card, 'Console ouverte à ' + card.baud + ' bauds');
-    } else {
-      const driver = new EspDriver(card.port, await import('/esptool.js'));
-      card.session = driver;
-      await driver.connect({romOnly: card.use === 'rom', manualEntry: card.manual});
-      card.identity = await requestUsbSession(card, driver);
-      card.mode = 'loader';
-      note(card, 'Chargeur connecté');
     }
     say(card.name + ' connectée.');
     render();
@@ -322,7 +344,7 @@ async function disconnect(card) {
     say(error.message);
     return false;
   } finally {
-    card.session = card.socket = null;
+    card.session = card.socket = card.identity = null;
     card.mode = 'disconnected';
     card.busy = false;
     render();
@@ -344,8 +366,8 @@ async function addFromPicker() {
     const use = $('connection-mode').value;
     const card = addCard(name, port, baud, $('manual-download').checked, use);
     if (await connect(card)) {
-      $(use === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
-      if (use === 'stub') $('tab-memory').click();
+      $(card.mode === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
+      if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
     }
   } catch (error) { say(error.message); }
   finally { adding = $('add-device').disabled = false; }
@@ -394,6 +416,7 @@ $('return-console').onclick = () => switchMode('console');
 $('enter-loader').onclick = () => switchMode('stub');
 $('identify-live').onclick = async () => {
   const card = selected;
+  if (card?.mode === 'console') return switchMode('stub');
   try {
     card.identity = await api('/devices/' + card.name).then(response => response.json());
     note(card, 'Identité de la session : ' + card.identity.chip + ' · ' + card.identity.mac);

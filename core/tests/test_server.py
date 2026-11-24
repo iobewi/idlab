@@ -7,7 +7,19 @@ import unittest
 from aiohttp import CookieJar
 from aiohttp.test_utils import TestClient, TestServer
 
-from server import create_app
+from server import create_app, validate_identity
+
+
+class IdentityTests(unittest.TestCase):
+    def test_identification_retains_loader_details_and_read_capability(self):
+        value = {
+            "chip": "esp32s3", "model": "ESP32-S3 (revision v0.2)", "mac": "10:20:30:40:50:60",
+            "flash_size": 16 * 1024 * 1024, "flash_id": 0x184068, "loader": "stub",
+            "transport": "usb_serial_jtag", "usb_vid": 0x303a, "usb_pid": 0x1001,
+        }
+        self.assertEqual(validate_identity(value), value | {"capabilities": ["identify", "flash.read"]})
+        with self.assertRaises(ValueError):
+            validate_identity(value | {"flash_id": -1})
 
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
