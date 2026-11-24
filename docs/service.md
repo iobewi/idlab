@@ -28,6 +28,13 @@ tâche **IDLab**.
 3. **État du serveur HTTP**, **Arrêter le serveur HTTP** et **Redémarrer le
    serveur HTTP** pilotent le même processus par API sur le port 8080.
 
+Après une modification des fichiers web, lancer **IDLab : Rechargement
+complet**. Cette tâche reconstruit l’image avec le code de la branche
+ouverte, recrée le conteneur `core`, puis démarre le serveur HTTP et attend
+`ready: true`. Le volume des campagnes est conservé. Les sessions de carte
+sont fermées pendant la recréation. Une fois la tâche terminée, recharger la
+page Firefox et reconnecter les cartes au besoin.
+
 Les tâches utilisent `IDLAB_MANAGER_TOKEN` dans l’environnement de VS Code
 ou une ligne `IDLAB_MANAGER_TOKEN=valeur` sans guillemets dans `.env`.
 Pour un conteneur déjà lancé, reprendre le jeton utilisé au démarrage. Un
