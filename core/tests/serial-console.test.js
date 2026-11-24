@@ -42,3 +42,24 @@ test('disconnect cancels the pending serial read', async () => {
   await session.close();
   assert.equal(cancelled, true);
 });
+
+test('historical console receives raw UART data and sends literal hex bytes', async () => {
+  const input = Uint8Array.of(0, 255, 13);
+  const captured = [];
+  const writes = [];
+  let inputStream;
+  const port = {
+    readable: new ReadableStream({start(controller) { inputStream = controller; }}),
+    writable: new WritableStream({write(chunk) { writes.push(chunk); }}),
+    async open() {},
+    async close() {},
+  };
+  const session = await openSerialConsole(port, 115200, null, bytes => captured.push(bytes));
+  inputStream.enqueue(input);
+  await session.write(input);
+  inputStream.close();
+  await session.done;
+  assert.deepEqual(captured, [input]);
+  assert.deepEqual(writes, [input]);
+  await session.close();
+});

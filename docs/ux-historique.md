@@ -1,16 +1,17 @@
 # Référence UX historique d’IDLab
 
-Depuis la page d’IDLab, ouvrir **Référence UX historique** dans la barre
-de navigation. Cette page présente la structure complète de l’interface
-historique avec la feuille de style d’origine. Les cartes et la capture UART
-affichées sont simulées. Les commandes matérielles sont désactivées.
+La page d’accueil reprend la navigation, les panneaux et le CSS de
+[l’interface historique](https://github.com/iobewi/rust_dev/tree/79fd7bf943751755de65b4212f08c5bd88a51e7c/bench/web).
+Les cartes connectées sont réelles. La console gère la capture UART, les
+filtres, l’affichage hexadécimal, l’export, l’envoi et les repères. La lecture
+flash utilise la session chargeur et l’API du banc. Les campagnes se
+consultent depuis le nouvel onglet correspondant.
 
-Le point de départ est [rust_dev à la révision 79fd7bf](https://github.com/iobewi/rust_dev/tree/79fd7bf943751755de65b4212f08c5bd88a51e7c/bench/web).
-La [documentation historique de l’interface](https://github.com/iobewi/rust_dev/blob/79fd7bf943751755de65b4212f08c5bd88a51e7c/bench/docs/interface.md)
-décrit le comportement des commandes et leurs conditions d’affichage.
-Dans la référence, on peut parcourir les onglets et les bandes d’état,
-sélectionner une carte simulée, utiliser l’affichage texte ou hexadécimal,
-la recherche et la pause, et réduire le journal de l’agent.
+Les panneaux historiques restent visibles pour la revue. Les commandes
+qui attendent un raccordement au nouveau cœur sont grisées, notamment
+l’écriture, l’effacement, les diagnostics P4, Reset, BOOT et les autorisations
+distantes. La [documentation historique](https://github.com/iobewi/rust_dev/blob/79fd7bf943751755de65b4212f08c5bd88a51e7c/bench/docs/interface.md)
+décrit leurs anciens comportements.
 
 ## Éléments à revoir ensemble
 
@@ -28,8 +29,8 @@ la recherche et la pause, et réduire le journal de l’agent.
 | Opérations › Historique | Opérations, détails, annulation, événements et export. |
 | Opérations › Déclencheurs et outils | Débit de la console, diagnostic et bring-up P4, déclencheur UART et requête HTTP locale. |
 | Journal de l’agent | Journal commun aux deux vues, progression et résultats, réduction et effacement de l’affichage. |
-| Campagnes | Vue ajoutée après la migration, accessible depuis la page actuelle. |
+| Campagnes | Vue ajoutée après la migration, accessible depuis l’onglet Campagnes. |
 
 Pour la revue, commencer par le parcours carte → identification → console,
 puis examiner les autres zones dans leur emplacement d’origine. Cet inventaire
-sert à décider ensuite quels écrans et interactions réintégrer au banc actuel.
+sert à décider ensuite quels écrans et interactions conserver ou raccorder.

@@ -31,11 +31,11 @@ Le mode ROM seule donne l'identité sans charger de stub.
 
 ## Console série
 
-Dans l’interface IDLab, sélectionner **Console série**, renseigner le débit du
-firmware et cliquer sur **Connecter**. La console affiche les octets reçus sous
+Dans **Cartes actives**, saisir un nom, sélectionner **Console série** et
+cliquer sur **Ajouter une carte**. Le débit se règle dans les options avancées. La console affiche les octets reçus sous
 forme de texte UTF-8 et permet d’envoyer une commande. Les échanges restent
-dans le navigateur pour cette session. Pour lire la flash sur le même port,
-déconnecter la console et reconnecter la carte en mode **Flash — stub standard**.
+dans le navigateur pour cette session. Pour lire la flash sur le même port, sélectionner la carte puis **Ouvrir le
+chargeur flash** et utiliser **Opérations → Lecture mémoire**.
 
 ## Piloter depuis Python
 
