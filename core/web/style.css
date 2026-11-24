@@ -169,8 +169,8 @@
 .campaign-table { overflow-x: auto; }
 .campaign-table td:first-child { min-width: 9rem; overflow-wrap: anywhere; }
 
-/* Confirmation d’entrée en ROM. */
-#rom-reset-dialog {
+/* Boîtes de dialogue du banc. */
+#rom-reset-dialog, #control-token-dialog {
   box-sizing: border-box;
   max-width: min(28rem, calc(100% - 2rem));
   padding: 1rem 1.25rem;
@@ -179,5 +179,18 @@
   background: var(--panel);
   color: var(--ink);
 }
-#rom-reset-dialog::backdrop { background: rgb(0 0 0 / 50%); }
+#rom-reset-dialog::backdrop, #control-token-dialog::backdrop { background: rgb(0 0 0 / 50%); }
 .rom-dialog-actions { justify-content: flex-end; }
+#control-token-dialog { width: min(30rem, calc(100% - 2rem)); max-width: none; }
+.control-token-form { display: grid; gap: 0.75rem; }
+.control-token-form h2 { font-size: 1rem; }
+.control-token-form p { margin: 0; }
+.control-token-form .field { display: grid; gap: 0.35rem; }
+#control-token {
+  width: 100%;
+  padding: 0.5rem;
+  background: var(--surface);
+  font: 0.8rem ui-monospace, Consolas, monospace;
+}
+.control-token-actions { justify-content: flex-end; }
+#control-token-feedback:empty { display: none; }

@@ -441,10 +441,10 @@ async function controlAction(action) {
   const result = await response.json();
   if (!response.ok) throw new Error(result.error ?? ('HTTP ' + response.status));
   if (result.token) {
-    const input = $('control-token');
-    input.value = result.token;
+    $('control-token-card').textContent = card.name;
+    $('control-token').value = result.token;
+    $('control-token-feedback').textContent = '';
     $('control-token-dialog').showModal();
-    input.select();
   } else if (action === 'revoke' && card.mode === 'disconnected') {
     card.hasControlToken = false;
     render();
@@ -453,7 +453,25 @@ async function controlAction(action) {
 $('grant').onclick = () => run(() => controlAction('token'));
 $('revoke').onclick = () => run(() => controlAction('revoke'));
 $('release-control').onclick = () => run(() => controlAction('stop'));
-$('control-token-dialog').onclose = () => { $('control-token').value = ''; };
+$('control-token-copy').onclick = async () => {
+  const dialog = $('control-token-dialog');
+  const input = $('control-token');
+  const token = input.value;
+  if (!dialog.open || !token) return;
+  try {
+    await navigator.clipboard.writeText(token);
+    if (dialog.open && input.value === token) $('control-token-feedback').textContent = 'Jeton copié.';
+  } catch {
+    if (!dialog.open || input.value !== token) return;
+    input.focus();
+    input.select();
+    $('control-token-feedback').textContent = 'Copie automatique indisponible. Appuie sur Ctrl+C.';
+  }
+};
+$('control-token-dialog').onclose = () => {
+  $('control-token').value = '';
+  $('control-token-feedback').textContent = '';
+};
 
 async function connectCard(card) {
   await card.connect();
