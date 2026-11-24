@@ -2,6 +2,7 @@ import { serialTransport } from './serial-transport.js';
 
 const UART_BRIDGES = new Set([0x0403, 0x067b, 0x10c4, 0x1a86]);
 const FLASH_BLOCK = 1024 * 1024;
+export const ESP_SYNC_BAUD = 115200;
 
 export function connectionPlan(portInfo, { romOnly, manualEntry, resetToRom }) {
   const { usbVendorId: vid, usbProductId: pid } = portInfo;
@@ -14,19 +15,20 @@ export function connectionPlan(portInfo, { romOnly, manualEntry, resetToRom }) {
 }
 
 export class EspDriver {
-  constructor(port, { ESPLoader, Transport, ESPError }) {
+  constructor(port, { ESPLoader, Transport, ESPError }, initialBaud = ESP_SYNC_BAUD) {
     const SerialTransport = serialTransport(Transport, ESPError);
     this.port = port;
     this.transport = new SerialTransport(port);
     this.loader = new ESPLoader({
       transport: this.transport,
-      baudrate: 115200,
+      baudrate: initialBaud,
+      romBaudrate: initialBaud,
       terminal: { clean() {}, write() {}, writeLine() {} },
     });
   }
 
   async connect(options) {
-    const {romOnly, auto} = options;
+    const {romOnly, auto, flashBaud = ESP_SYNC_BAUD} = options;
     const usb = this.port.getInfo();
     const plan = connectionPlan(usb, options);
     const loader = this.loader;
@@ -61,6 +63,9 @@ export class EspDriver {
     if (plan.useStub) {
       if (!loader.syncStubDetected) await loader.chip.postConnect?.(loader);
       await loader.runStub();
+      if (loader.IS_STUB && transport === 'usb_uart' && flashBaud !== this.transport.baudrate) {
+        await this.#changeFlashBaud(flashBaud);
+      }
     }
     let flashId = null, flashSize = null;
     if (loader.IS_STUB) {
@@ -73,6 +78,23 @@ export class EspDriver {
       loader: loader.IS_STUB ? 'stub' : 'rom',
     };
     return this.identity;
+  }
+
+  async #changeFlashBaud(baud) {
+    const {loader, transport} = this;
+    const packet = new DataView(new ArrayBuffer(8));
+    packet.setUint32(0, baud, true);
+    packet.setUint32(4, transport.baudrate, true);
+    try {
+      await loader.checkCommand('change baud rate', loader.ESP_CHANGE_BAUDRATE, new Uint8Array(packet.buffer));
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await transport.changeBaudrate(baud, loader.serialOptions);
+      await transport.drainInput();
+      if (!await loader.isResponsive()) throw new Error('Le stub ne répond plus.');
+    } catch (cause) {
+      // esptool-js changeBaud() can reset the board on failure. Leave recovery to the operator.
+      throw new Error('Débit flash de ' + baud + ' bauds non confirmé. Redémarre manuellement en téléchargement et essaie un débit plus bas.', {cause});
+    }
   }
 
   async readJedec() {

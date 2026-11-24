@@ -3,25 +3,41 @@ import test from 'node:test';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
-function fixture({ vid = 0x10c4, failRead = false, inDownload = false } = {}) {
+function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud, failBaud = false } = {}) {
   const events = [];
   let identity, socket;
+  let deviceBaud = 115200;
   const bytes = Uint8Array.of(0, 255, 13);
   const port = {getInfo: () => ({usbVendorId: vid})};
   class Loader {
+    ESP_CHANGE_BAUDRATE = 0x0f;
     chip = {
       CHIP_NAME: 'ESP32-S3',
       readMac: async () => '10:20:30:40:50:60',
       getChipDescription: async () => 'ESP32-S3',
     };
-    constructor({transport}) { this.transport = transport; }
+    constructor({transport, romBaudrate}) {
+      this.transport = transport;
+      this.initialBaud = romBaudrate;
+    }
     async detectChip(entry, attempts) {
       events.push('detect:' + entry);
       port.readable = {};
       port.writable = {};
-      if (attempts === 1 && !inDownload) throw new Error('Failed to connect with the device');
+      this.transport.baudrate = this.initialBaud;
+      if (attempts === 1 && (!inDownload || this.initialBaud !== deviceBaud)) {
+        throw new Error('Failed to connect with the device');
+      }
     }
     async runStub() { this.IS_STUB = true; }
+    async checkCommand(_description, opcode, data) {
+      assert.equal(opcode, 0x0f);
+      const payload = new DataView(data.buffer);
+      assert.equal(payload.getUint32(4, true), deviceBaud);
+      deviceBaud = payload.getUint32(0, true);
+      events.push('baud:' + deviceBaud);
+    }
+    async isResponsive() { return !failBaud && this.transport.baudrate === deviceBaud; }
     async readFlashId() { return 0x184068; }
     async readFlash(address, size, check) {
       check();
@@ -33,7 +49,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false } = {}) {
     async usesUsbOtg() { return vid === 0x303a; }
   }
   const card = new BoardConnector('board', port, {
-    baud: 115200, onChange() {}, onCapture() {}, onJournal() {},
+    flashBaud, onChange() {}, onCapture() {}, onJournal() {},
   }, {
     origin: 'http://127.0.0.1:8080/',
     loadTools: async () => ({
@@ -41,10 +57,13 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false } = {}) {
       ESPLoader: Loader,
       Transport: class extends upstream.Transport {
         async disconnect() { events.push('close-loader'); port.readable = port.writable = null; }
+        async changeBaudrate(value) { this.baudrate = value; }
+        async drainInput() {}
       },
     }),
     async openConsole(_port, _baud, _text, onBytes) {
       assert.equal(port.readable, null);
+      assert.equal(_baud, 115200);
       events.push('console');
       onBytes(new TextEncoder().encode('READY\n'));
       const done = Promise.withResolvers();
@@ -72,9 +91,9 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false } = {}) {
         return {json: async () => identity};
       }
       assert.equal(path, '/devices/board/flash/read');
-      const params = JSON.parse(options.body);
-      assert.equal(params.generation, 'generation');
-      await socket.onmessage({data: JSON.stringify({...params, command: 'flash.read', id: 'request'})});
+      const {generation, address, size} = JSON.parse(options.body);
+      assert.equal(generation, 'generation');
+      await socket.onmessage({data: JSON.stringify({address, size, command: 'flash.read', id: 'request'})});
       if (failRead) {
         socket.close();
         throw new Error('read_incomplete_reconnect_required');
@@ -83,7 +102,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false } = {}) {
     },
   });
   port.readable = null;
-  return {card, events, manualReset() { inDownload = false; }};
+  return {card, events, manualReset() { inDownload = false; deviceBaud = 115200; }};
 }
 
 test('identification and flash reads from console restore the same console and retain identity', async () => {
@@ -136,6 +155,43 @@ test('a failed flash read restores console without retrying the read', async () 
   assert.equal(card.mode, 'console');
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console',
     'detect:default_reset', 'close-loader', 'console', 'reset']);
+  await card.disconnect();
+});
+
+test('UART flash uses the selected baud and reconnects to the same stub without reset', async () => {
+  const {card, events, manualReset} = fixture({inDownload: true, flashBaud: 921600});
+  await card.connect();
+  assert.equal(card.activeBaud, 921600);
+  await card.readFlash(0, 3);
+  assert.ok(card.flashReadRate > 0);
+  await card.disconnect();
+  await card.connect();
+  assert.equal(card.activeBaud, 921600);
+  assert.deepEqual(events, ['detect:no_reset', 'baud:921600', 'close-loader',
+    'detect:no_reset', 'close-loader', 'detect:no_reset']);
+  await card.disconnect();
+  manualReset();
+  await card.connect();
+  assert.equal(card.mode, 'console');
+  assert.equal(card.activeBaud, 115200);
+  await card.disconnect();
+});
+
+test('an unconfirmed flash baud fails before registration without resetting the board', async () => {
+  const {card, events} = fixture({inDownload: true, flashBaud: 921600, failBaud: true});
+  await assert.rejects(card.connect(), /921600 bauds non confirmé/);
+  assert.equal(card.mode, 'disconnected');
+  assert.equal(card.identity, null);
+  assert.deepEqual(events, ['detect:no_reset', 'baud:921600', 'close-loader']);
+});
+
+test('native USB flash leaves the port configuration alone at any selected UART speed', async () => {
+  const {card, events} = fixture({vid: 0x303a, inDownload: true, flashBaud: 921600});
+  await card.connect();
+  assert.equal(card.identity.transport, 'usb_otg');
+  await card.readFlash(0, 3);
+  assert.deepEqual(events, ['detect:no_reset']);
+  assert.ok(card.flashReadRate > 0);
   await card.disconnect();
 });
 

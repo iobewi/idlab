@@ -34,8 +34,13 @@ Le mode ROM seule donne l'identité sans charger de stub.
 Dans **Cartes actives**, saisir un nom et cliquer sur **Ajouter une carte**.
 IDLab cherche automatiquement une réponse du chargeur sans demander de
 reset. Si le chargeur répond, IDLab identifie la puce et prépare la lecture
-flash. Si le chargeur ne répond pas, IDLab ouvre la console au débit UART
-choisi dans les options avancées (115 200 bauds par défaut).
+flash. Si le chargeur ne répond pas, IDLab ouvre la console à 115 200 bauds.
+Sur un pont USB–UART, le débit flash choisi dans les options avancées
+s’applique après synchronisation et démarrage du stub. IDLab vérifie
+sa réponse au nouveau débit avant de commencer une lecture. Si le débit
+n’est pas confirmé, redémarrer manuellement en téléchargement et ajouter
+la carte avec un débit inférieur. En USB natif, la vitesse utile se lit
+dans **Dernière lecture flash**, en Kio/s.
 Quand la carte est connectée en téléchargement, le reset depuis IDLab et
 l’onglet **Consoles** sont indisponibles. L’API des cartes n’expose aucune
 commande de reset matériel. Pour retrouver la console,

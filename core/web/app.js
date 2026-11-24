@@ -8,6 +8,7 @@ let adding = false;
 let redrawPending = false;
 const say = message => { $('client-state').textContent = message; };
 const clock = new Intl.DateTimeFormat('fr', { timeStyle: 'medium' });
+const number = new Intl.NumberFormat('fr', {maximumFractionDigits: 1});
 const manualConsoleReturn = 'Pour retrouver la console, déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.';
 
 function wireTabs(attribute) {
@@ -199,6 +200,9 @@ function renderIdentification() {
   const card = selected;
   const current = card?.identity;
   const info = current ?? card?.lastIdentity;
+  const transport = info?.transport ?? card?.transport;
+  const nativeUsb = transport === 'usb_otg' || transport === 'usb_serial_jtag';
+  const activeBaud = card?.activeBaud;
   const boot = card?.boot;
   const chip = boot?.chip?.toUpperCase().replace(/^ESP32(?=[A-Z])/, 'ESP32-');
   const chipHint = [chip, boot?.revision].filter(Boolean).join(' · ');
@@ -215,10 +219,10 @@ function renderIdentification() {
     'mac-info': info?.mac,
     'flash-info': flash,
     'rdid-info': info?.flash_id == null ? null : '0x' + info.flash_id.toString(16).padStart(6, '0'),
-    'interface-info': [info?.transport ?? (card?.transport === 'usb_serial_jtag' ? 'USB Serial/JTAG' :
-      card?.transport === 'usb_uart' ? 'Pont USB–UART' : null), card?.portLabel].filter(Boolean).join(' · ') || null,
-    'console-speed-info': card?.baud,
-    'loader-speed-info': current ? '115 200' : null,
+    'interface-info': [{usb_serial_jtag: 'USB Serial/JTAG', usb_otg: 'USB OTG',
+      usb_uart: 'Pont USB–UART'}[transport], card?.portLabel].filter(Boolean).join(' · ') || null,
+    'serial-speed-info': activeBaud ? (nativeUsb ? 'USB natif' : number.format(activeBaud) + ' bauds') : null,
+    'transfer-rate-info': card?.flashReadRate ? number.format(card.flashReadRate / 1024) + ' Kio/s' : null,
     'footer-target': card?.name,
   })) $(id).textContent = value ?? '—';
 
@@ -331,9 +335,9 @@ function render() {
   renderJournal();
 }
 
-function addCard(name, port, baud) {
+function addCard(name, port, flashBaud) {
   const card = new BoardConnector(name, port, {
-    baud,
+    flashBaud,
     onChange: () => {
       render();
       if (card === romTarget && romPortSeen) queueMicrotask(openRomWhenReady);
@@ -386,10 +390,10 @@ async function addFromPicker() {
     say(message);
   }
   const name = $('add-device-id').value.trim();
-  const baud = Number($('connect-baud').value);
+  const flashBaud = Number($('flash-baud').value);
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(name)) return feedback('Saisis un nom de carte valide.');
   if (cards.has(name)) return feedback('Ce nom est déjà utilisé.');
-  if (!baud) return feedback('Choisis un débit UART.');
+  if (!flashBaud) return feedback('Choisis un débit flash.');
   if (!navigator.serial) return feedback('Web Serial est indisponible dans ce navigateur.');
   adding = $('add-device').disabled = true;
   try {
@@ -397,7 +401,7 @@ async function addFromPicker() {
     const port = await navigator.serial.requestPort();
     if ([...cards.values()].some(card => card.port === port)) return feedback('Ce port est déjà associé à une carte.');
     feedback('Détection de la carte…');
-    await connectCard(addCard(name, port, baud));
+    await connectCard(addCard(name, port, flashBaud));
     $('add-card-feedback').textContent = '';
   } catch (error) {
     feedback(error.name === 'NotFoundError' ? 'Aucun port sélectionné.' : error.message);
