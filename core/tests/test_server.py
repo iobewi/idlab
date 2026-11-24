@@ -149,6 +149,49 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         conflict = await self.browser.post(path, headers=self.script, json={"verdict": "PASS"})
         self.assertEqual(conflict.status, 409)
 
+    async def test_campaign_search_filters_and_paginates(self):
+        path = "/api/v1/campaigns"
+        names = ["Étalonnage flash", "OTA S3", "OTA C6", "Diagnostic UART"]
+        ids = []
+        for name in names:
+            response = await self.browser.post(path, headers=self.script, json={"name": name})
+            self.assertEqual(response.status, 201)
+            ids.append((await response.json())["id"])
+        await self.browser.post(path + "/" + ids[1] + "/finish", headers=self.script, json={"verdict": "PASS"})
+        await self.browser.post(path + "/" + ids[2] + "/finish", headers=self.script, json={"verdict": "FAIL"})
+        await self.browser.post(path + "/" + ids[3] + "/abort", headers=self.script, json={"reason": "operator"})
+
+        async def search(params):
+            response = await self.browser.get(path, headers=self.script, params=params)
+            self.assertEqual(response.status, 200)
+            return await response.json()
+
+        result = await search([("state", "finished"), ("state", "aborted"), ("limit", "2")])
+        self.assertEqual(result["total"], 3)
+        self.assertEqual(result["counts"], {"active": 0, "abort_requested": 0, "aborted": 1, "finished": 2})
+        self.assertEqual(len(result["items"]), 2)
+        tail = await search([("state", "finished"), ("state", "aborted"), ("limit", "2"), ("offset", "2")])
+        combined = result["items"] + tail["items"]
+        self.assertEqual({item["id"] for item in combined}, set(ids[1:]))
+        self.assertEqual(combined, sorted(combined, key=lambda c: (c["started_at"], c["id"]), reverse=True))
+
+        match = await search({"q": "oTa", "verdict": "PASS"})
+        self.assertEqual([item["id"] for item in match["items"]], [ids[1]])
+        match = await search({"q": "ÉTALONNAGE"})
+        self.assertEqual([item["id"] for item in match["items"]], [ids[0]])
+        started = match["items"][0]["started_at"][:10]
+        self.assertEqual((await search({"q": ids[0][:12], "from": started, "to": started}))["total"], 1)
+        self.assertEqual((await search({"to": "2000-01-01"}))["total"], 0)
+
+    async def test_campaign_search_rejects_invalid_filters(self):
+        for filters in (
+            {"state": "unknown"}, {"limit": "0"}, {"limit": "101"}, {"offset": "-1"},
+            {"from": "2026-02-29"}, {"from": "2026-12-01", "to": "2026-11-24"},
+            [("q", "one"), ("q", "two")], {"unknown": "value"},
+        ):
+            response = await self.browser.get("/api/v1/campaigns", headers=self.script, params=filters)
+            self.assertEqual((response.status, await response.json()), (400, {"error": "invalid_campaign_filters"}))
+
     async def test_health_requires_browser_bundle(self):
         with patch("server.BUNDLE", Path(__file__)):
             response = await self.browser.get("/health", headers=self.local)

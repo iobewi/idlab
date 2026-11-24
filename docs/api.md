@@ -94,6 +94,7 @@ indépendantes.
 
 | Méthode et chemin | Corps JSON | Succès |
 |---|---|---|
+| `GET /api/v1/campaigns` | — | `200`, liste filtrée avec totaux et pagination |
 | `POST /api/v1/campaigns` | `{"name":"Lecture de référence"}` | `201`, campagne active et en-tête `Location` |
 | `GET /api/v1/campaigns/{id}` | — | `200`, campagne connue |
 | `POST /api/v1/campaigns/{id}/finish` | `{"verdict":"PASS"}` | `200`, campagne terminée |
@@ -138,6 +139,32 @@ active. Si elle est encore en `abort_requested`, examiner le résultat
 éventuel de l’ancienne lecture puis répéter `abort` pour clôturer l’arrêt.
 Le serveur ne rejoue aucune lecture ni aucun verdict.
 
+### Liste, résumé et recherche
+
+`GET /api/v1/campaigns` trie les campagnes du début le plus récent au plus
+ancien (identifiant décroissant en cas d’égalité). Les filtres se cumulent,
+sauf les valeurs répétées de `state` qui sont alternatives.
+
+| Paramètre | Effet |
+|---|---|
+| `q` | Sous-chaîne du nom ou de l’identifiant, sans distinction de casse. Maximum 120 caractères. |
+| `state` | `active`, `abort_requested`, `aborted` ou `finished`. Répétable. |
+| `verdict` | Verdict exact, sensible à la casse. Maximum 80 caractères. |
+| `from`, `to` | Dates de début incluses, au format `AAAA-MM-JJ` en UTC. |
+| `limit` | De 1 à 100 résultats par page. Par défaut 25. |
+| `offset` | Nombre de résultats à omettre, de 0 à 1 milliard. Par défaut 0. |
+
+La réponse contient `items` (objets campagne), `total` (nombre de
+correspondances avant pagination), `counts` (même total réparti par état,
+y compris les états à zéro), `limit` et `offset`. Un décalage au-delà
+des résultats donne une liste vide. Un filtre invalide donne
+`400 invalid_campaign_filters`.
+
+Pour le résumé des essais en cours, utiliser
+`GET /api/v1/campaigns?state=active&state=abort_requested`.
+Pour chercher un essai terminé, utiliser par exemple
+`GET /api/v1/campaigns?q=ota&state=finished&verdict=PASS`.
+
 ### Exemple de bout en bout
 
 Cet exemple utilise `jq`, une carte déjà connectée nommée `ma-carte` et
@@ -172,7 +199,7 @@ routage ou de taille émises par le serveur HTTP peuvent avoir un autre format.
 
 | HTTP | Codes courants | Action côté script |
 |---|---|---|
-| `400` | `invalid_json`, `invalid_arguments`, `invalid_flash_range`, `unexpected_arguments` | Corriger la requête. |
+| `400` | `invalid_json`, `invalid_arguments`, `invalid_flash_range`, `unexpected_arguments`, `invalid_campaign_filters` | Corriger la requête. |
 | `401` | `authentication_required` | Utiliser le jeton du bon service. |
 | `403` | `local_host_required`, `local_access_required`, `local_script_required`, `origin_mismatch` | Vérifier le point d’entrée et le mode d’accès. |
 | `404` | `device_disconnected`, `campaign_not_found` | Vérifier le nom de carte ou l’identifiant de campagne. |
