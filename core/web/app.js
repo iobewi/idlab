@@ -1,7 +1,4 @@
-import { EspDriver, connectionPlan } from './esp-driver.js';
-import { openSerialConsole, resetConsole } from './serial-console.js';
-import { ConsoleBuffer } from './console-buffer.js';
-import { BootIdentity } from './boot-identity.js';
+import { BoardConnector } from './board-connector.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
 const $ = id => document.getElementById(id);
@@ -95,9 +92,9 @@ function renderConsole() {
 }
 
 function scheduleConsole(card) {
-  if (card !== selected || card.pausedAt !== null || redrawPending) return;
+  if (card !== selected || redrawPending) return;
   redrawPending = true;
-  requestAnimationFrame(() => { redrawPending = false; renderConsole(); });
+  requestAnimationFrame(() => { redrawPending = false; renderIdentification(); renderConsole(); });
 }
 
 function renderOperations() {
@@ -176,10 +173,11 @@ function renderIdentification() {
   const hint = $('identity-source');
   hint.textContent = card?.mode === 'console'
     ? (info ? 'Mesures conservées du dernier passage en chargeur sur ce port.'
-      : 'La console affiche les indices des logs. Utilise Identifier via le chargeur pour mesurer la flash, la MAC et le RDID.')
+      : card.canEnterLoader ? 'Identifier mesure la flash, la MAC et le RDID via le chargeur.'
+      : 'Pour mesurer l’identité complète, place la carte en téléchargement puis reconnecte-la en mode Automatique.')
     : (current ? 'Identité lue par le chargeur.' : '');
   hint.hidden = !hint.textContent;
-  $('identify-live').textContent = card?.mode === 'console' ? 'Identifier via le chargeur' : 'Identifier';
+
 }
 
 function render() {
@@ -197,11 +195,15 @@ function render() {
   const info = selected?.identity;
   const available = selected && !selected.busy && !selected.requesting;
   const loader = available && selected.mode === 'loader';
-  const canRead = loader && info?.capabilities.includes('flash.read');
+  const autoLoader = available && selected.mode === 'console' && selected.canEnterLoader;
+  const canRead = autoLoader || (loader && info?.capabilities.includes('flash.read'));
   $('read').disabled = !canRead;
   renderPartitions(canRead);
   const flashHint = $('flash-availability');
-  flashHint.textContent = selected?.mode === 'console' ? 'Console active. Ouvre le chargeur flash pour lire la mémoire.'
+  flashHint.textContent = selected?.mode === 'connecting' && selected.requesting ? 'Transition console / chargeur…'
+    : selected?.mode === 'console' ? (selected.canEnterLoader
+      ? 'La lecture passe au chargeur puis revient en console. La carte peut redémarrer.'
+      : 'Place la carte en téléchargement, puis reconnecte-la en mode Automatique.')
     : selected?.mode === 'loader' && info?.loader === 'rom' ? 'ROM active. Le stub requis pour cette lecture est indisponible ou désactivé.'
     : selected?.mode === 'loader' && !info?.flash_size ? 'Capacité flash inconnue. Vérifie le RDID et la connexion à la flash.'
     : '';
@@ -209,9 +211,9 @@ function render() {
   const reset = $('reset-device');
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
-  $('identify-live').disabled = !(loader || (available && selected.mode === 'console'));
+  $('identify-live').disabled = !(loader || autoLoader);
   $('return-console').disabled = !loader;
-  $('enter-loader').disabled = !(available && selected.mode === 'console');
+  $('enter-loader').disabled = !autoLoader;
   $('send').disabled = !(available && selected.mode === 'console');
   $('mark').disabled = !selected;
   $('export').disabled = !selected;
@@ -231,26 +233,26 @@ function render() {
 }
 
 function addCard(name, port, baud, manual, use) {
-  const portInfo = port.getInfo();
-  const portLabel = portInfo.usbVendorId == null ? 'Port série' :
-    [portInfo.usbVendorId, portInfo.usbProductId].filter(Number.isInteger)
-      .map(value => value.toString(16).padStart(4, '0')).join(':');
-  const transport = connectionPlan(portInfo, {}).transport;
-  const resetWait = {usb_uart: 100, usb_serial_jtag: 200}[transport];
-  const card = {name, port, baud, manual, use, portLabel, transport, resetWait, mode: 'disconnected', busy: false,
-    follow: true, pausedAt: null, capture: new ConsoleBuffer(), operations: [], journal: []};
+  const card = new BoardConnector(name, port, {
+    baud, manual, use,
+    onChange: render,
+    onCapture: () => scheduleConsole(card),
+    onJournal: message => note(card, message),
+  });
+  Object.assign(card, {follow: true, pausedAt: null, operations: [], journal: []});
   const row = element('div', undefined, 'active-board');
   card.nameButton = element('button', name, 'board-name');
   card.status = element('button', '', 'board-status');
   card.remove = element('button', 'Retirer');
   card.nameButton.onclick = () => { selected = card; render(); };
-  card.status.onclick = () => card.mode === 'disconnected' ? connect(card) : disconnect(card);
-  card.remove.onclick = () => {
+  card.status.onclick = () => run(() => card.mode === 'disconnected' ? card.connect() : card.disconnect());
+  card.remove.onclick = () => run(async () => {
+    await card.disconnect();
     cards.delete(name);
     row.remove();
     if (selected === card) selected = cards.values().next().value ?? null;
     render();
-  };
+  });
   row.append(card.nameButton, card.status, card.remove);
   $('active-cards').append(row);
   cards.set(name, card);
@@ -258,126 +260,11 @@ function addCard(name, port, baud, manual, use) {
   return card;
 }
 
-async function api(path, options) {
-  const response = await fetch('/api/v1' + path, options);
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error ?? ('HTTP ' + response.status));
-  }
-  return response;
-}
-
-function requestUsbSession(card, driver) {
-  return new Promise((resolve, reject) => {
-    const url = new URL('/agent', location.href);
-    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    url.searchParams.set('device', card.name);
-    const socket = new WebSocket(url);
-    card.socket = socket;
-    socket.onopen = () => socket.send(JSON.stringify(driver.identity));
-    socket.onclose = () => {
-      reject(new Error('Liaison au serveur interrompue.'));
-      if (card.mode === 'loader' && card.socket === socket) disconnect(card);
-    };
-    socket.onmessage = async event => {
-      const command = JSON.parse(event.data);
-      if (command.generation) {
-        try {
-          const info = await api('/devices/' + card.name).then(response => response.json());
-          if (socket.readyState !== WebSocket.OPEN) throw new Error('Liaison au serveur interrompue.');
-          resolve(info);
-        } catch (error) { reject(error); }
-        return;
-      }
-      card.busy = true;
-      if (selected === card) render();
-      const check = () => {
-        if (socket.readyState !== WebSocket.OPEN) throw new Error('device_session_changed');
-      };
-      try {
-        if (command.command !== 'flash.read') throw new Error('operation_unsupported');
-        note(card, 'Lecture flash en cours');
-        socket.send(await driver.readFlash(command.address, command.size, check));
-        note(card, 'Lecture flash terminée');
-      } catch {
-        if (socket.readyState === WebSocket.OPEN) socket.send(command.id);
-      } finally {
-        card.busy = false;
-        if (selected === card) render();
-      }
-    };
-  });
-}
-
-async function connect(card) {
-  if (card.mode !== 'disconnected') return false;
-  card.mode = 'connecting';
-  render();
+async function run(action) {
   try {
-    if (card.use !== 'console') {
-      const driver = new EspDriver(card.port, await import('/esptool.js'));
-      card.session = driver;
-      const identity = await driver.connect({
-        auto: card.use === 'auto', romOnly: card.use === 'rom', manualEntry: card.manual,
-      });
-      if (identity) {
-        card.identity = await requestUsbSession(card, driver);
-        card.mode = 'loader';
-        note(card, 'Chargeur détecté · ' + (identity.model ?? identity.chip));
-      } else {
-        await driver.close();
-        card.session = null;
-        note(card, 'Pas de réponse du chargeur sans reset · ouverture console');
-      }
-    }
-    if (card.mode !== 'loader') {
-      const boot = new BootIdentity();
-      card.boot = boot;
-      const session = await openSerialConsole(card.port, card.baud, null, bytes => {
-        const event = card.capture.append(bytes);
-        if (boot.append(event.text) && card === selected) renderIdentification();
-        scheduleConsole(card);
-      });
-      card.session = session;
-      card.mode = 'console';
-      session.done.then(() => {
-        if (card.session === session && card.mode === 'console') disconnect(card);
-      }, error => {
-        note(card, error.message);
-        if (card.session === session && card.mode === 'console') disconnect(card);
-      });
-      note(card, 'Console ouverte à ' + card.baud + ' bauds');
-    }
-    say(card.name + ' connectée.');
-    render();
-    return true;
+    return await action();
   } catch (error) {
-    await disconnect(card);
-    note(card, error.message);
     say(error.message);
-    return false;
-  }
-}
-
-async function disconnect(card) {
-  if (card.mode === 'disconnected' || card.mode === 'closing') return false;
-  card.mode = 'closing';
-  card.socket?.close();
-  render();
-  try {
-    await card.session?.close();
-    note(card, 'Port fermé');
-    return true;
-  } catch (error) {
-    note(card, error.message);
-    say(error.message);
-    return false;
-  } finally {
-    card.session = card.socket = card.identity = null;
-    card.boot = card.lastIdentity = null;
-    card.mode = 'disconnected';
-    card.busy = false;
-    render();
   }
 }
 
@@ -395,10 +282,10 @@ async function addFromPicker() {
     if ([...cards.values()].some(card => card.port === port)) return say('Ce port est déjà associé à une carte.');
     const use = $('connection-mode').value;
     const card = addCard(name, port, baud, $('manual-download').checked, use);
-    if (await connect(card)) {
-      $(card.mode === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
-      if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
-    }
+    await card.connect();
+    say(card.name + ' connectée.');
+    $(card.mode === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
+    if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
   } catch (error) { say(error.message); }
   finally { adding = $('add-device').disabled = false; }
 }
@@ -406,57 +293,24 @@ $('add-device').onclick = addFromPicker;
 $('add-device-id').onkeydown = event => { if (event.key === 'Enter') addFromPicker(); };
 navigator.serial?.addEventListener('disconnect', event => {
   for (const card of cards.values()) {
-    if (card.mode !== 'connecting' && (event.target === card.port || event.port === card.port)) disconnect(card);
+    if (event.target === card.port || event.port === card.port) run(() => card.disconnect(true));
   }
 });
 
-async function restartFirmware(card) {
-  if (!card?.resetWait || card.mode !== 'console' || card.requesting) return;
-  card.requesting = true;
-  render();
-  try {
-    await resetConsole(card.port, card.resetWait);
-    note(card, 'Redémarrage du firmware demandé');
-    say('Redémarrage demandé. La console attend les octets du firmware.');
-  } catch (error) {
-    note(card, error.message);
-    say(error.message);
-  } finally {
-    card.requesting = false;
-    render();
-  }
-}
-$('reset-device').onclick = () => restartFirmware(selected);
-
-async function switchMode(use) {
-  const card = selected;
-  if (!card || card.busy || card.requesting || (card.mode !== 'console' && card.mode !== 'loader')) return;
-  const previous = use === 'console' ? card.identity : null;
-  if (!await disconnect(card)) return;
-  card.use = use;
-  if (await connect(card)) {
-    card.lastIdentity = previous;
-    renderIdentification();
-    $(use === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
-    if (use === 'stub') $('tab-memory').click();
-    if (use === 'console') {
-      if (card.resetWait) await restartFirmware(card);
-      else say('Console ouverte. Redémarre la carte si elle est encore en mode chargeur.');
-    }
-  }
-}
-$('return-console').onclick = () => switchMode('console');
-$('enter-loader').onclick = () => switchMode('stub');
-$('identify-live').onclick = async () => {
-  const card = selected;
-  if (card?.mode === 'console') return switchMode('stub');
-  try {
-    card.identity = await api('/devices/' + card.name).then(response => response.json());
-    note(card, 'Identité de la session : ' + card.identity.chip + ' · ' + card.identity.mac);
-    say(card.identity.chip + ' · MAC ' + card.identity.mac);
-    render();
-  } catch (error) { say(error.message); }
-};
+$('reset-device').onclick = () => run(() => selected?.restart());
+$('return-console').onclick = () => run(async () => {
+  await selected?.returnConsole();
+  $('workspace-tab-consoles').click();
+});
+$('enter-loader').onclick = () => run(async () => {
+  await selected?.enterLoader();
+  $('workspace-tab-operations').click();
+  $('tab-memory').click();
+});
+$('identify-live').onclick = () => run(async () => {
+  const identity = await selected?.identify();
+  if (identity) say((identity.model ?? identity.chip) + ' · MAC ' + identity.mac);
+});
 
 function download(blob, filename) {
   const link = element('a');
@@ -469,17 +323,9 @@ function flashNumber(value) {
   if (!/^(0x[0-9a-f]+|[0-9]+)$/i.test(value)) throw new Error('Adresse ou taille invalide.');
   return Number(value);
 }
-function readFlash(card, address, size) {
-  return api('/devices/' + card.name + '/flash/read', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({generation: card.identity.generation, address, size}),
-  });
-}
-
 async function readPartitions() {
   const card = selected;
-  if (!card || card.busy || card.requesting || card.mode !== 'loader') return;
-  card.requesting = true;
+  if (!card || card.busy || card.requesting || $('read').disabled) return;
   card.partitions = [];
   card.suggestPartition = false;
   card.partitionStatus = 'Lecture de la table…';
@@ -487,14 +333,13 @@ async function readPartitions() {
   let address;
   try {
     address = flashNumber($('partition-address').value.trim());
-    const response = await readFlash(card, address, PARTITION_TABLE_BYTES);
-    card.partitions = decodePartitions(new Uint8Array(await response.arrayBuffer()), card.identity.flash_size);
+    const {blob, capacity} = await card.readFlash(address, PARTITION_TABLE_BYTES);
+    card.partitions = decodePartitions(new Uint8Array(await blob.arrayBuffer()), capacity);
     card.partitionStatus = card.partitions.length + ' partition(s) lue(s).';
   } catch (error) {
     card.suggestPartition = address === 0x8000 && error.message === 'partition_table_invalid';
     card.partitionStatus = error.message === 'partition_table_invalid' ? 'Aucune table valide à cette adresse.' : error.message;
   } finally {
-    card.requesting = false;
     note(card, 'Partitions : ' + card.partitionStatus);
     if (card === selected) render();
   }
@@ -504,8 +349,7 @@ $('try-partition-address').onclick = () => { $('partition-address').value = '0x1
 
 $('read').onclick = async () => {
   const card = selected;
-  if (!card || card.busy || card.requesting || card.mode !== 'loader') return;
-  card.requesting = true;
+  if (!card || card.busy || card.requesting || $('read').disabled) return;
   const started = Date.now();
   const entry = {id: card.operations.length + 1, state: 'En cours'};
   card.operations.unshift(entry);
@@ -514,8 +358,7 @@ $('read').onclick = async () => {
   try {
     const address = flashNumber($('address').value.trim());
     const size = flashNumber($('size').value.trim());
-    const response = await readFlash(card, address, size);
-    const blob = await response.blob();
+    const {blob} = await card.readFlash(address, size);
     const preview = new Uint8Array(await blob.slice(0, 256).arrayBuffer());
     card.dump = {blob, filename: card.name + '-0x' + address.toString(16) + '.bin',
       summary: blob.size + ' octets lus • aperçu des ' + preview.length + ' premiers octets',
@@ -528,7 +371,6 @@ $('read').onclick = async () => {
     entry.detail = error.message;
     say(entry.detail);
   } finally {
-    card.requesting = false;
     entry.duration = (Date.now() - started) + ' ms';
     note(card, 'Lecture flash : ' + entry.detail);
     if (card === selected) render();
@@ -548,7 +390,7 @@ $('send').onclick = async () => {
       if (!/^(?:[\da-f]{2})+$/i.test(compact)) throw new Error('Saisis des octets hexadécimaux complets.');
       payload = Uint8Array.from(compact.match(/../g), byte => parseInt(byte, 16));
     }
-    await card.session.write(payload);
+    await card.write(payload);
     card.capture.note('TX', value);
     $('uart').value = '';
     scheduleConsole(card);

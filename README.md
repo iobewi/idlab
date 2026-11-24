@@ -38,13 +38,14 @@ flash. Si le chargeur ne répond pas, IDLab ouvre la console. Le mode
 **Console série** ouvre directement le port, sans envoyer de trame SYNC.
 Le panneau Identification reprend les indices du démarrage ESP-IDF visibles
 sur l’UART, dont la puce, la révision et la taille flash configurée.
-**Identifier via le chargeur** permet de lire l’identité matérielle, dont
-la MAC et le RDID, avec un redémarrage possible. **Retour console** conserve
-ces mesures tant que la carte reste sur le même port, jusqu’à déconnexion.
-Le débit se règle dans les options avancées. La console affiche les octets reçus sous
-forme de texte UTF-8 et permet d’envoyer une commande. Les échanges restent
-dans le navigateur pour cette session. Pour lire la flash sur le même port, sélectionner la carte puis **Ouvrir le
-chargeur flash** et utiliser **Opérations → Lecture mémoire**.
+**Identifier**, **Relire la table** et **Lire la flash** passent par le
+connecteur de la carte. Sur un pont UART reconnu ou USB Serial/JTAG, elles
+ouvrent le chargeur si nécessaire, puis rétablissent le mode de départ.
+La carte peut redémarrer et la capture UART est suspendue pendant
+l’opération. Pour un port à entrée manuelle, place la carte en mode
+téléchargement et reconnecte-la en **Automatique** avant la lecture.
+L’identité mesurée et la capture restent affichées au retour en console.
+Le débit de la console se règle dans les options avancées.
 
 ## Piloter depuis Python
 
