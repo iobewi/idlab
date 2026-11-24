@@ -1,6 +1,7 @@
 import { EspDriver, connectionPlan } from './esp-driver.js';
 import { openSerialConsole, resetConsole } from './serial-console.js';
 import { ConsoleBuffer } from './console-buffer.js';
+import { BootIdentity } from './boot-identity.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
 const $ = id => document.getElementById(id);
@@ -145,6 +146,42 @@ function renderPartitions(loader) {
   }));
 }
 
+function renderIdentification() {
+  const card = selected;
+  const current = card?.identity;
+  const info = current ?? card?.lastIdentity;
+  const boot = card?.boot;
+  const chip = boot?.chip?.toUpperCase().replace(/^ESP32(?=[A-Z])/, 'ESP32-');
+  const chipHint = [chip, boot?.revision].filter(Boolean).join(' · ');
+  const measuredFlash = info?.flash_size ? info.flash_size / (1024 * 1024) + ' Mio' : null;
+  const configuredFlash = boot?.flashMiB ? boot.flashMiB + ' Mio configurés (logs UART)' : null;
+  const flash = measuredFlash && configuredFlash && info.flash_size !== boot.flashMiB * 1024 * 1024
+    ? measuredFlash + ' mesurés · ' + configuredFlash : measuredFlash ?? configuredFlash;
+  for (const [id, value] of Object.entries({
+    'status-label-card': card?.name,
+    'card-mode-info': card?.mode === 'loader'
+      ? (current?.loader === 'stub' ? 'Téléchargement · stub actif' : 'Téléchargement · ROM seule')
+      : {console: 'Console série', connecting: 'Détection…', disconnected: 'Déconnectée', closing: 'Déconnexion…'}[card?.mode],
+    'chip-info': info?.model ?? info?.chip ?? (chipHint ? chipHint + ' (logs UART)' : null),
+    'mac-info': info?.mac,
+    'flash-info': flash,
+    'rdid-info': info?.flash_id == null ? null : '0x' + info.flash_id.toString(16).padStart(6, '0'),
+    'interface-info': [info?.transport ?? (card?.transport === 'usb_serial_jtag' ? 'USB Serial/JTAG' :
+      card?.transport === 'usb_uart' ? 'Pont USB–UART' : null), card?.portLabel].filter(Boolean).join(' · ') || null,
+    'console-speed-info': card?.baud,
+    'loader-speed-info': current ? '115 200' : null,
+    'footer-target': card?.name,
+  })) $(id).textContent = value ?? '—';
+
+  const hint = $('identity-source');
+  hint.textContent = card?.mode === 'console'
+    ? (info ? 'Mesures conservées du dernier passage en chargeur sur ce port.'
+      : 'La console affiche les indices des logs. Utilise Identifier via le chargeur pour mesurer la flash, la MAC et le RDID.')
+    : (current ? 'Identité lue par le chargeur.' : '');
+  hint.hidden = !hint.textContent;
+  $('identify-live').textContent = card?.mode === 'console' ? 'Identifier via le chargeur' : 'Identifier';
+}
+
 function render() {
   for (const card of cards.values()) {
     card.nameButton.setAttribute('aria-pressed', card === selected);
@@ -156,19 +193,8 @@ function render() {
   }
   $('empty-cards').hidden = cards.size !== 0;
   $('card-details').hidden = !selected;
+  renderIdentification();
   const info = selected?.identity;
-  for (const [id, value] of Object.entries({
-    'status-label-card': selected?.name,
-    'card-mode-info': selected?.mode === 'loader'
-      ? (info?.loader === 'stub' ? 'Téléchargement · stub actif' : 'Téléchargement · ROM seule')
-      : {console: 'Console série', connecting: 'Détection…', disconnected: 'Déconnectée', closing: 'Déconnexion…'}[selected?.mode],
-    'chip-info': info?.model ?? info?.chip, 'mac-info': info?.mac,
-    'flash-info': info?.flash_size ? info.flash_size / (1024 * 1024) + ' Mio' : null,
-    'rdid-info': info?.flash_id == null ? null : '0x' + info.flash_id.toString(16).padStart(6, '0'),
-    'interface-info': [info?.transport, selected?.portLabel].filter(Boolean).join(' · ') || null,
-    'console-speed-info': selected?.baud,
-    'loader-speed-info': info ? '115 200' : null, 'footer-target': selected?.name,
-  })) $(id).textContent = value ?? '—';
   const available = selected && !selected.busy && !selected.requesting;
   const loader = available && selected.mode === 'loader';
   const canRead = loader && info?.capabilities.includes('flash.read');
@@ -211,7 +237,7 @@ function addCard(name, port, baud, manual, use) {
       .map(value => value.toString(16).padStart(4, '0')).join(':');
   const transport = connectionPlan(portInfo, {}).transport;
   const resetWait = {usb_uart: 100, usb_serial_jtag: 200}[transport];
-  const card = {name, port, baud, manual, use, portLabel, resetWait, mode: 'disconnected', busy: false,
+  const card = {name, port, baud, manual, use, portLabel, transport, resetWait, mode: 'disconnected', busy: false,
     follow: true, pausedAt: null, capture: new ConsoleBuffer(), operations: [], journal: []};
   const row = element('div', undefined, 'active-board');
   card.nameButton = element('button', name, 'board-name');
@@ -305,8 +331,11 @@ async function connect(card) {
       }
     }
     if (card.mode !== 'loader') {
+      const boot = new BootIdentity();
+      card.boot = boot;
       const session = await openSerialConsole(card.port, card.baud, null, bytes => {
-        card.capture.append(bytes);
+        const event = card.capture.append(bytes);
+        if (boot.append(event.text) && card === selected) renderIdentification();
         scheduleConsole(card);
       });
       card.session = session;
@@ -345,6 +374,7 @@ async function disconnect(card) {
     return false;
   } finally {
     card.session = card.socket = card.identity = null;
+    card.boot = card.lastIdentity = null;
     card.mode = 'disconnected';
     card.busy = false;
     render();
@@ -401,9 +431,12 @@ $('reset-device').onclick = () => restartFirmware(selected);
 async function switchMode(use) {
   const card = selected;
   if (!card || card.busy || card.requesting || (card.mode !== 'console' && card.mode !== 'loader')) return;
+  const previous = use === 'console' ? card.identity : null;
   if (!await disconnect(card)) return;
   card.use = use;
   if (await connect(card)) {
+    card.lastIdentity = previous;
+    renderIdentification();
     $(use === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
     if (use === 'stub') $('tab-memory').click();
     if (use === 'console') {

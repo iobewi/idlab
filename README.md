@@ -36,6 +36,11 @@ Le mode **Automatique** cherche une réponse du chargeur sans demander de
 reset. Si le chargeur répond, IDLab identifie la puce et prépare la lecture
 flash. Si le chargeur ne répond pas, IDLab ouvre la console. Le mode
 **Console série** ouvre directement le port, sans envoyer de trame SYNC.
+Le panneau Identification reprend les indices du démarrage ESP-IDF visibles
+sur l’UART, dont la puce, la révision et la taille flash configurée.
+**Identifier via le chargeur** permet de lire l’identité matérielle, dont
+la MAC et le RDID, avec un redémarrage possible. **Retour console** conserve
+ces mesures tant que la carte reste sur le même port, jusqu’à déconnexion.
 Le débit se règle dans les options avancées. La console affiche les octets reçus sous
 forme de texte UTF-8 et permet d’envoyer une commande. Les échanges restent
 dans le navigateur pour cette session. Pour lire la flash sur le même port, sélectionner la carte puis **Ouvrir le
