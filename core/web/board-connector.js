@@ -14,12 +14,12 @@ async function api(path, options) {
 }
 
 export class BoardConnector {
-  constructor(name, port, {flashBaud = ESP_SYNC_BAUD, onChange}, {
+  constructor(name, port, {flashBaud = ESP_SYNC_BAUD, onChange, campaignId = () => null}, {
     request = api, loadTools = () => import('/esptool.js'),
     createSocket = url => new WebSocket(url), openConsole = openSerialConsole, reset = resetConsole,
     origin = location.href,
   } = {}) {
-    Object.assign(this, {name, port, flashBaud, onChange,
+    Object.assign(this, {name, port, flashBaud, onChange, campaignId,
       request, loadTools, createSocket, openConsole, reset, origin});
     const info = port.getInfo();
     this.transport = connectionPlan(info, {}).transport;
@@ -401,7 +401,7 @@ export class BoardConnector {
     return this.#exclusive(async () => {
       const response = await this.request('/devices/' + this.name + '/flash/read', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({generation: this.identity.generation, address, size}),
+        body: this.#operationBody({address, size}),
       });
       return {blob: await response.blob(), capacity: Number(response.headers.get('X-IDLab-Flash-Size'))};
     });
@@ -463,7 +463,14 @@ export class BoardConnector {
   #command(command, args = {}) {
     return this.#exclusive(async () => (await this.request('/devices/' + this.name + '/command', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({command, generation: this.identity.generation, ...args}),
+      body: this.#operationBody({command, ...args}),
     })).json());
+  }
+
+  #operationBody(fields) {
+    const campaignId = this.campaignId();
+    const body = {generation: this.identity.generation, ...fields};
+    if (campaignId) body.campaign_id = campaignId;
+    return JSON.stringify(body);
   }
 }

@@ -6,6 +6,15 @@ const labels = {
 };
 const dateFormat = new Intl.DateTimeFormat('fr', { dateStyle: 'short', timeStyle: 'short' });
 const pageSize = 10;
+export let activeCampaignId = null;
+
+function selectCampaign(campaign) {
+  activeCampaignId = campaign?.id ?? null;
+  document.querySelector('#campaign-context').hidden = !campaign;
+  document.querySelector('#campaign-context-name').textContent = campaign ? 'Campagne : ' + campaign.name : '';
+}
+
+document.querySelector('#campaign-context-clear').onclick = () => selectCampaign(null);
 
 function element(tag, text) {
   const node = document.createElement(tag);
@@ -28,6 +37,31 @@ function row(campaign) {
   const details = element('details');
   details.append(element('summary', 'Détails'), element('code', campaign.id));
   if (campaign.reason) details.append(element('p', campaign.reason));
+  if (Object.keys(campaign.metadata ?? {}).length) {
+    details.append(element('pre', JSON.stringify(campaign.metadata, null, 2)));
+  }
+  if (campaign.state === 'active') {
+    const use = element('button', 'Utiliser cette campagne');
+    use.type = 'button';
+    use.onclick = () => selectCampaign(campaign);
+    details.append(use);
+  }
+  const operations = element('ul');
+  const operationsTitle = element('p');
+  details.append(operationsTitle, operations);
+  details.ontoggle = async () => {
+    if (!details.open) return;
+    try {
+      const response = await fetch('/api/v1/campaigns/' + campaign.id + '/operations?limit=25');
+      if (!response.ok) throw new Error('Opérations indisponibles.');
+      const data = await response.json();
+      operationsTitle.textContent = data.items.length + ' / ' + data.total + ' opérations récentes';
+      operations.replaceChildren(...data.items.map(entry =>
+        element('li', entry.device + ' · ' + entry.command + ' · ' + entry.state + (entry.duration ? ' · ' + entry.duration : ''))));
+    } catch (error) {
+      operationsTitle.textContent = error.message;
+    }
+  };
   name.append(details);
   tr.append(name, element('td', labels[campaign.state]));
   const started = element('td');
@@ -124,3 +158,32 @@ form.onsubmit = event => {
 };
 form.oninput = () => form.elements.to.setCustomValidity('');
 history.search(new URLSearchParams());
+
+const create = document.querySelector('#campaign-create');
+create.onsubmit = async event => {
+  event.preventDefault();
+  const status = document.querySelector('#campaign-action-status');
+  const button = create.querySelector('button');
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    const fields = new FormData(create);
+    const payload = {name: fields.get('name').trim()};
+    const metadata = fields.get('metadata').trim();
+    if (metadata) payload.metadata = JSON.parse(metadata);
+    const response = await fetch('/api/v1/campaigns', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+    });
+    const campaign = await response.json();
+    if (!response.ok) throw new Error(campaign.error ?? 'Création impossible.');
+    selectCampaign(campaign);
+    status.value = 'Campagne créée.';
+    create.reset();
+    live.reload();
+    history.reload();
+  } catch (error) {
+    status.value = error instanceof SyntaxError ? 'Métadonnées JSON invalides.' : error.message;
+  } finally {
+    button.disabled = false;
+  }
+};

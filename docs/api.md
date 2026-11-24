@@ -13,7 +13,7 @@ L’interface web, l’API et l’agent WebSocket utilisent le même point d’e
 
 Envoyer le jeton avec `Authorization: Bearer <jeton>`. Les requêtes JSON
 utilisent `Content-Type: application/json`. Le navigateur utilise son
-cookie local pour les opérations des cartes et des campagnes. Ses POST
+cookie local pour les opérations des cartes et des campagnes. Ses requêtes de modification
 doivent porter un en-tête `Origin` correspondant à l’hôte IDLab. Les routes
 `httpd` sont réservées aux scripts authentifiés et refusent les requêtes
 avec `Origin`.
@@ -146,28 +146,33 @@ et ne livre aucun résultat partiel.
 
 ## Campagnes
 
-Une campagne suit un essai composé par un script. Le script choisit les
-opérations et le verdict. Chaque lecture qui doit être suivie par la campagne
-envoie son `campaign_id`. Les lectures qui omettent ce champ restent
-indépendantes.
+Une campagne regroupe les opérations d’un essai et son verdict. Le web
+et les scripts associent une opération en envoyant `campaign_id` dans
+le corps de `/command` ou de `/flash/read`. Ce champ est facultatif et
+s’applique à la requête. Une campagne peut couvrir plusieurs cartes.
 
 | Méthode et chemin | Corps JSON | Succès |
 |---|---|---|
 | `GET /api/v1/campaigns` | — | `200`, liste filtrée avec totaux et pagination |
-| `POST /api/v1/campaigns` | `{"name":"Lecture de référence"}` | `201`, campagne active et en-tête `Location` |
-| `GET /api/v1/campaigns/{id}` | — | `200`, campagne connue |
+| `POST /api/v1/campaigns` | `{"name":"Lecture de référence","metadata":{"scenario":"backup"}}` | `201`, campagne active et en-tête `Location` |
+| `GET /api/v1/campaigns/{id}` | — | `200`, état, métadonnées, verdict et opérations en cours |
+| `PATCH /api/v1/campaigns/{id}` | `{"name":"Nouveau nom"}`, `{"metadata":{…}}` ou les deux | `200`, campagne active mise à jour |
+| `GET /api/v1/campaigns/{id}/operations` | — | `200`, historique paginé des opérations rattachées |
 | `POST /api/v1/campaigns/{id}/finish` | `{"verdict":"PASS"}` | `200`, campagne terminée |
-| `POST /api/v1/campaigns/{id}/abort` | `{"reason":"Arrêt opérateur"}` | `202` pendant une lecture active, `200` une fois arrêtée |
+| `POST /api/v1/campaigns/{id}/abort` | `{"reason":"Arrêt opérateur"}` | `202` pendant une opération active, `200` une fois arrêtée |
 
 Le nom, le verdict et le motif sont des chaînes non vides après suppression
 des espaces aux extrémités, limitées respectivement à 120, 80 et 500
-caractères. Le verdict est libre. Une campagne suit les lectures admises
-par le serveur. Elle peut couvrir plusieurs cartes.
+caractères. Le verdict est libre. Les métadonnées forment un objet JSON
+facultatif, vide par défaut et limité à 3 000 octets sérialisés. Lors d’un
+`PATCH`, fournir `metadata` remplace l’objet entier. Le statut évolue via
+les actions de cycle de vie.
 
 ```json
 {
   "id": "b3caa50230c14c978a8867f1bbbe8de9",
   "name": "Lecture de référence",
+  "metadata": {"scenario": "backup"},
   "state": "active",
   "started_at": "2026-11-24T08:15:00.000+00:00",
   "ended_at": null,
@@ -178,25 +183,30 @@ par le serveur. Elle peut couvrir plusieurs cartes.
 }
 ```
 
-- **`active`** accepte les lectures associées. `finish` réussit lorsqu’il
-  n’y a plus de lecture en cours.
-- **`abort_requested`** bloque les nouvelles lectures associées. Les
-  lectures déjà admises continuent jusqu’à leur résultat ou leur échec.
+- **`active`** accepte les opérations associées. `finish` réussit lorsqu’il
+  n’y a plus d’opération en cours.
+- **`abort_requested`** bloque les nouvelles opérations associées. Les
+  opérations déjà admises continuent jusqu’à leur résultat ou leur échec.
   Interroger la campagne avec `GET` pour suivre l’arrêt.
-- **`aborted`** indique que l’arrêt a été enregistré et qu’aucune lecture
+- **`aborted`** indique que l’arrêt a été enregistré et qu’aucune opération
   associée n’est encore suivie. Le premier motif est conservé. Répéter
   `abort` sur une campagne déjà arrêtée conserve le même enregistrement.
 - **`finished`** conserve le verdict du script. Répéter `finish` avec le
   même verdict conserve le même enregistrement.
 
-Les horodatages sont en UTC. Les campagnes survivent au redémarrage dans
+Les horodatages sont en UTC. Les campagnes et leurs opérations survivent au redémarrage dans
 `campaigns.sqlite3`. Compose conserve le fichier sur son volume `state`.
 Hors conteneur, `IDLAB_STATE_DIR` choisit le dossier, avec
-`~/.local/state/idlab` par défaut. Le nombre de lectures en cours concerne
-le processus courant. Après une coupure brutale, une campagne active reste
-active. Si elle est encore en `abort_requested`, examiner le résultat
-éventuel de l’ancienne lecture puis répéter `abort` pour clôturer l’arrêt.
-Le serveur ne rejoue aucune lecture ni aucun verdict.
+`~/.local/state/idlab` par défaut. Au redémarrage, les opérations
+interrompues apparaissent en échec. Une campagne active reste active.
+Pour une campagne encore en `abort_requested`, répéter `abort` pour
+clôturer l’arrêt.
+
+La liste des opérations accepte `limit` (1 à 100, 25 par défaut) et
+`offset` (0 par défaut). Elle renvoie `items`, `total`, `limit` et
+`offset`. Chaque entrée indique la carte, la génération, la commande,
+l’état et le résultat disponible. Les dumps complets sont retournés
+par la lecture flash.
 
 ### Liste, résumé et recherche
 

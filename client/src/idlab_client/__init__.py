@@ -1,6 +1,6 @@
 """Python connector for the IDLab HTTP API."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from contextlib import contextmanager
 import http.client
 import json
@@ -40,6 +40,12 @@ def _board_path(name: str) -> str:
     return f"/devices/{name}"
 
 
+def _campaign_path(campaign_id: str) -> str:
+    if not isinstance(campaign_id, str) or not re.fullmatch(r"[0-9a-f]{32}", campaign_id):
+        raise ValueError("Invalid IDLab campaign ID")
+    return f"/campaigns/{campaign_id}"
+
+
 @dataclass(frozen=True, slots=True)
 class Board:
     """Snapshot of an identified board, bound to one server generation."""
@@ -53,18 +59,27 @@ class Board:
     loader: str | None
     capabilities: tuple[str, ...]
     _client: "IDLabClient" = field(repr=False, compare=False)
+    campaign_id: str | None = None
 
     @property
     def mode(self) -> str:
         return "console" if self.loader is None else "loader"
 
     def _command(self, command: str, **params) -> "Board":
-        return self._client._board(self.name, self._operate(command, **params))
+        board = self._client._board(self.name, self._operate(command, **params))
+        return replace(board, campaign_id=self.campaign_id)
 
     def _operate(self, command: str, **params) -> dict:
-        return self._client._request(_board_path(self.name) + "/command", {
-            "generation": self.generation, "command": command, **params,
-        })
+        payload = {"generation": self.generation, "command": command, **params}
+        if self.campaign_id is not None:
+            payload["campaign_id"] = self.campaign_id
+        return self._client._request(_board_path(self.name) + "/command", payload)
+
+    def for_campaign(self, campaign_id: str | None) -> "Board":
+        """Return a view that tags hardware operations with this campaign."""
+        if campaign_id is not None:
+            _campaign_path(campaign_id)
+        return replace(self, campaign_id=campaign_id)
 
     def enter_loader(self) -> "Board":
         """Switch from console to the flash loader on a supported transport."""
@@ -84,7 +99,8 @@ class Board:
 
     def identify_live(self) -> "Board":
         """Measure hardware identity, temporarily entering the loader if needed."""
-        return self._client._board(self.name, self._operate("identify")["result"])
+        board = self._client._board(self.name, self._operate("identify")["result"])
+        return replace(board, campaign_id=self.campaign_id)
 
     def activity(self) -> dict:
         """Read the server journal, progress, and recent operations."""
@@ -123,9 +139,12 @@ class Board:
         maximum = 4 * 1024 * 1024
         if self.flash_size is not None and size > self.flash_size - address:
             raise ValueError("Flash range exceeds the detected capacity")
+        payload = {"generation": self.generation, "address": address, "size": size}
+        if self.campaign_id is not None:
+            payload["campaign_id"] = self.campaign_id
         return self._client._request(
             _board_path(self.name) + "/flash/read",
-            {"generation": self.generation, "address": address, "size": size},
+            payload,
             expected_bytes=size, timeout=self._client._timeout * (1 + (size - 1) // maximum),
         )
 
@@ -156,6 +175,36 @@ class IDLabClient:
     def identify(self, name: str) -> Board:
         """Retrieve the agent's registered identity for a named board."""
         return self._board(name, self._request(_board_path(name)))
+
+    def list_campaigns(self, **filters) -> dict:
+        """Search campaigns using the API filter names."""
+        return self._request("/campaigns?" + urlencode(filters, doseq=True))
+
+    def create_campaign(self, name: str, *, metadata: dict | None = None) -> dict:
+        payload = {"name": name}
+        if metadata is not None:
+            payload["metadata"] = metadata
+        return self._request("/campaigns", payload)
+
+    def get_campaign(self, campaign_id: str) -> dict:
+        return self._request(_campaign_path(campaign_id))
+
+    def update_campaign(self, campaign_id: str, *, name: str | None = None, metadata: dict | None = None) -> dict:
+        payload = {}
+        if name is not None:
+            payload["name"] = name
+        if metadata is not None:
+            payload["metadata"] = metadata
+        return self._request(_campaign_path(campaign_id), payload, method="PATCH")
+
+    def finish_campaign(self, campaign_id: str, verdict: str) -> dict:
+        return self._request(_campaign_path(campaign_id) + "/finish", {"verdict": verdict})
+
+    def abort_campaign(self, campaign_id: str, reason: str) -> dict:
+        return self._request(_campaign_path(campaign_id) + "/abort", {"reason": reason})
+
+    def campaign_operations(self, campaign_id: str, *, limit: int = 25, offset: int = 0) -> dict:
+        return self._request(_campaign_path(campaign_id) + "/operations?" + urlencode({"limit": limit, "offset": offset}))
 
     @contextmanager
     def control(self, name: str, token: str):
@@ -193,13 +242,13 @@ class IDLabClient:
         except (KeyError, TypeError, ValueError) as error:
             raise IDLabError("Invalid board identity") from error
 
-    def _request(self, path, arguments=None, *, expected_bytes=None, timeout=None):
+    def _request(self, path, arguments=None, *, expected_bytes=None, timeout=None, method=None):
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
         body = None
         if arguments is not None:
             headers["Content-Type"] = "application/json"
             body = json.dumps(arguments).encode("utf-8")
-        request = Request(self._base + path, data=body, headers=headers)
+        request = Request(self._base + path, data=body, headers=headers, method=method)
         try:
             with self._opener.open(request, timeout=self._timeout if timeout is None else timeout) as response:
                 if expected_bytes is None:

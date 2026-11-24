@@ -1,13 +1,49 @@
 import asyncio
 import os
 from pathlib import Path
+import sqlite3
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import unittest
 
 from aiohttp import CookieJar, WSServerHandshakeError
 from aiohttp.test_utils import TestClient, TestServer
 
+from campaigns import Campaigns
 from server import create_app, validate_identity
+
+
+class CampaignStorageTests(unittest.TestCase):
+    def test_migrates_existing_campaigns_and_recovers_unfinished_operations(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "campaigns.sqlite3"
+            db = sqlite3.connect(path)
+            try:
+                db.execute("""
+                    CREATE TABLE campaigns (
+                        id TEXT PRIMARY KEY, name TEXT NOT NULL, state TEXT NOT NULL,
+                        started_at TEXT NOT NULL, ended_at TEXT, abort_requested_at TEXT,
+                        verdict TEXT, reason TEXT
+                    )
+                """)
+                db.execute("INSERT INTO campaigns (id, name, state, started_at) VALUES (?, ?, 'active', ?)",
+                           ("old", "Existing campaign", "2026-01-01T00:00:00+00:00"))
+                db.commit()
+            finally:
+                db.close()
+            campaigns = Campaigns(path)
+            try:
+                self.assertEqual(campaigns.get("old")["metadata"], {})
+                campaigns.enter("old", {"id": "op", "startedAt": "2026-01-01T00:00:00+00:00", "state": "En cours"})
+            finally:
+                campaigns.close()
+            campaigns = Campaigns(path)
+            try:
+                record = campaigns.operations("old", limit=25, offset=0)["items"][0]
+                self.assertEqual(record["state"], "Échec")
+                self.assertEqual(campaigns.get("old")["in_flight"], 0)
+            finally:
+                campaigns.close()
 
 
 class IdentityTests(unittest.TestCase):

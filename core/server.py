@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hmac
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
@@ -125,6 +126,38 @@ async def text_field(request, field, limit):
     return value.strip()
 
 
+async def campaign_fields(request, *, creating=False):
+    try:
+        payload = await request.json()
+    except (TypeError, ValueError) as error:
+        raise CampaignError(400, "invalid_json") from error
+    if (not isinstance(payload, dict) or not payload or set(payload) - {"name", "metadata"}
+            or (creating and "name" not in payload)):
+        raise CampaignError(400, "invalid_arguments")
+    if "name" in payload:
+        name = payload["name"]
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 120:
+            raise CampaignError(400, "invalid_name")
+        payload["name"] = name.strip()
+    if "metadata" in payload:
+        try:
+            metadata = payload["metadata"]
+            if not isinstance(metadata, dict) or len(json.dumps(metadata, ensure_ascii=False, allow_nan=False).encode()) > 3000:
+                raise ValueError
+        except (TypeError, ValueError, RecursionError) as error:
+            raise CampaignError(400, "invalid_metadata") from error
+    return payload
+
+
+def operation_campaign(payload):
+    if "campaign_id" not in payload:
+        return None
+    campaign_id = payload["campaign_id"]
+    if not isinstance(campaign_id, str) or not re.fullmatch(r"[0-9a-f]{32}", campaign_id):
+        raise CampaignError(400, "invalid_campaign_id")
+    return campaign_id
+
+
 def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=False,
                campaign_db=":memory:"):
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
@@ -160,7 +193,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                     return problem(403, "browser_session_required")
             elif request.path.endswith("/control/connect") and request.headers.get("Upgrade", "").lower() == "websocket":
                 pass  # This handshake authenticates with the per-card token.
-            elif not control_request and not script and (not browser or (request.method == "POST" and origin is None)):
+            elif not control_request and not script and (
+                not browser or (request.method not in ("GET", "HEAD") and origin is None)
+            ):
                 return problem(401, "authentication_required")
             request[LOCAL_OPERATOR] = browser and origin is not None and not bearer
         try:
@@ -181,14 +216,28 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def start_campaign(request):
-        name = await text_field(request, "name", 120)
-        campaign = request.app[CAMPAIGNS].start(name)
+        fields = await campaign_fields(request, creating=True)
+        campaign = request.app[CAMPAIGNS].start(fields["name"], fields.get("metadata", {}))
         return web.json_response(
             campaign, status=201, headers={"Location": f"/api/v1/campaigns/{campaign['id']}"},
         )
 
     async def get_campaign(request):
-        return web.json_response(request.app[CAMPAIGNS].get(request.match_info["id"]))
+        return web.json_response(request.app[CAMPAIGNS].get(request.match_info["id"]),
+                                 headers={"Cache-Control": "no-store"})
+
+    async def update_campaign(request):
+        fields = await campaign_fields(request)
+        return web.json_response(request.app[CAMPAIGNS].update(request.match_info["id"], fields))
+
+    async def get_campaign_operations(request):
+        if set(request.query) - {"limit", "offset"}:
+            return problem(400, "invalid_campaign_filters")
+        pagination = search_parameters(request.query)
+        page = request.app[CAMPAIGNS].operations(
+            request.match_info["id"], limit=pagination["limit"], offset=pagination["offset"],
+        )
+        return web.json_response(page, headers={"Cache-Control": "no-store"})
 
     async def finish_campaign(request):
         verdict = await text_field(request, "verdict", 80)
@@ -389,23 +438,29 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             return problem(403, control.stopped)
         return None
 
-    def start_operation(board, name, command, fields):
+    def start_operation(request, board, name, command, fields, campaign_id):
         operation = Operation(uuid.uuid4().hex, asyncio.get_running_loop().create_future())
-        board.pending = operation
         record = {"id": operation.id, "device": name, "command": command, "state": "En cours",
                   "startedAt": datetime.now(timezone.utc).isoformat(), **fields}
+        if campaign_id:
+            record.update(campaign_id=campaign_id, generation=board.generation)
+            request.app[CAMPAIGNS].enter(campaign_id, record)
+        board.pending = operation
         board.operations.appendleft(record)
         return operation, record, asyncio.get_running_loop().time()
 
-    def finish_operation(board, record, started, result):
+    def finish_operation(request, board, record, started, result):
         record["state"] = "Terminée" if result else "Échec"
         if not result:
             record.setdefault("detail", "Opération interrompue ou en échec.")
         elapsed = asyncio.get_running_loop().time() - started
+        record["finishedAt"] = datetime.now(timezone.utc).isoformat()
         record["duration"] = f"{round(1000 * elapsed)} ms"
         if result and record["command"] == "flash.read" and elapsed > 0:
             record["bytesPerSecond"] = round(record["bytesRead"] / elapsed)
         board.progress = board.pending = None
+        if "campaign_id" in record:
+            request.app[CAMPAIGNS].leave(record["campaign_id"], record)
 
     async def device_command(request):
         try:
@@ -427,8 +482,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 return problem(400, "invalid_arguments")
         elif command not in ("mode.loader", "mode.console", "console.reset", "rom.jedec", "identify"):
             return problem(409, "operation_unsupported")
-        if set(payload) != fields:
+        if not fields <= payload.keys() <= fields | {"campaign_id"}:
             return problem(400, "invalid_arguments")
+        campaign_id = operation_campaign(payload)
         name = request.match_info["name"]
         board = boards.get(name)
         if not board or board.socket.closed or payload["generation"] != board.generation:
@@ -441,7 +497,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if command not in board.identity["capabilities"]:
             return problem(409, "operation_unsupported")
         control = board.control
-        operation, record, started = start_operation(board, name, command, {})
+        operation, record, started = start_operation(request, board, name, command, {}, campaign_id)
         complete = False
         try:
             message = {"id": operation.id, "command": command}
@@ -467,7 +523,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             await board.socket.close(code=1011)
             return problem(502, "device_session_changed")
         finally:
-            finish_operation(board, record, started, complete)
+            finish_operation(request, board, record, started, complete)
             if control and control.stopped and board.control is control:
                 board.control = None
                 await publish_control(board, name)
@@ -508,10 +564,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         required = {"generation", "address", "size"}
         if not isinstance(params, dict) or not required <= params.keys() <= required | {"campaign_id"}:
             return problem(400, "invalid_arguments")
-        campaign_id = params.get("campaign_id")
-        if "campaign_id" in params and (not isinstance(campaign_id, str) or
-                                        not re.fullmatch(r"[0-9a-f]{32}", campaign_id)):
-            return problem(400, "invalid_arguments")
+        campaign_id = operation_campaign(params)
         board = boards.get(request.match_info["name"])
         if not board or board.socket.closed or params["generation"] != board.generation:
             return problem(409, "device_session_changed")
@@ -530,11 +583,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if board.pending:
             return problem(409, "device_busy")
 
-        campaigns = request.app[CAMPAIGNS]
-        if campaign_id is not None:
-            campaigns.enter(campaign_id)
         name = request.match_info["name"]
-        operation, record, started = start_operation(board, name, "flash.read", {"address": address, "size": size})
+        operation, record, started = start_operation(
+            request, board, name, "flash.read", {"address": address, "size": size}, campaign_id,
+        )
         if stream:
             operation.chunks = []
             operation.size = size
@@ -570,12 +622,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 if not complete and (not recoverable or control and control.stopped):
                     await board.socket.close(code=1011)
             finally:
-                finish_operation(board, record, started, complete and not (control and control.stopped))
+                finish_operation(request, board, record, started, complete and not (control and control.stopped))
                 if control and control.stopped and board.control is control:
                     board.control = None
                     await publish_control(board, request.match_info["name"])
-                if campaign_id is not None:
-                    campaigns.leave(campaign_id)
         if control and control.stopped in {"control_stopped", "control_revoked"}:
             return problem(403, control.stopped)
         if isinstance(result, dict) and result.get("error") and not board.socket.closed:
@@ -605,6 +655,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         web.get("/api/v1/campaigns", list_campaigns),
         web.post("/api/v1/campaigns", start_campaign),
         web.get("/api/v1/campaigns/{id}", get_campaign),
+        web.patch("/api/v1/campaigns/{id}", update_campaign),
+        web.get("/api/v1/campaigns/{id}/operations", get_campaign_operations),
         web.post("/api/v1/campaigns/{id}/finish", finish_campaign),
         web.post("/api/v1/campaigns/{id}/abort", abort_campaign),
         web.get("/api/v1/devices", devices),

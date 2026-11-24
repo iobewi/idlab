@@ -4,7 +4,7 @@ import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
 function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud, failBaud = false,
-  readBlock, shortResponseAt } = {}) {
+  readBlock, shortResponseAt, campaignId } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -56,7 +56,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
     async usesUsbOtg() { return vid === 0x303a; }
   }
   const card = new BoardConnector('board', port, {
-    flashBaud, onChange() {},
+    flashBaud, onChange() {}, campaignId,
   }, {
     origin: 'http://127.0.0.1:8080/',
     loadTools: async () => ({
@@ -117,9 +117,10 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
         return {json: async () => ({...identity, result: commandResult.value})};
       }
       assert.equal(path, '/devices/board/flash/read');
-      const {generation, address, size} = JSON.parse(options.body);
+      const fields = JSON.parse(options.body);
+      const {generation, address, size} = fields;
       assert.equal(generation, 'generation');
-      reads.push({generation, address, size});
+      reads.push(fields);
       responseParts.length = 0;
       commandResult = null;
       await socket.onmessage({data: JSON.stringify({address, size, command: 'flash.read', id: 'request', stream: true})});
@@ -176,6 +177,18 @@ test('an automatically detected loader stays in download mode through reads and 
   assert.equal(card.consoleUnavailable, false);
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'detect:no_reset',
     'close-loader', 'detect:no_reset', 'close-loader', 'console']);
+  await card.disconnect();
+});
+
+test('web reads send the selected campaign only while the campaign is selected', async () => {
+  let selected = '0'.repeat(32);
+  const {card, reads} = fixture({inDownload: true, campaignId: () => selected});
+  await card.connect();
+  await card.readFlash(0, 3);
+  assert.equal(reads[0].campaign_id, selected);
+  selected = null;
+  await card.readFlash(0, 3);
+  assert.equal('campaign_id' in reads[1], false);
   await card.disconnect();
 });
 

@@ -57,7 +57,8 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(page.status, 200)
         browser_headers = self.web | {"Origin": "http://127.0.0.1:8080"}
         created = await self.client.post(
-            "/api/v1/campaigns", headers=browser_headers, json={"name": "Readback"},
+            "/api/v1/campaigns", headers=browser_headers,
+            json={"name": "Readback", "metadata": {"scenario": "backup"}},
         )
         self.assertEqual(created.status, 201)
         campaign = await created.json()
@@ -106,6 +107,10 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         await self.client.get("/", headers=self.web)
         retained = await self.client.get("/api/v1/campaigns/" + campaign["id"], headers=browser_headers)
         self.assertEqual(await retained.json(), campaign)
+        operations = await self.client.get("/api/v1/campaigns/" + campaign["id"] + "/operations", headers=browser_headers)
+        history = await operations.json()
+        self.assertEqual(history["total"], 1)
+        self.assertEqual(history["items"][0]["bytesRead"], len(chunk) + 4)
 
         self.assertEqual((await self.request("POST", "stop")).status, 200)
         self.assertEqual((await self.client.get("/health", headers=self.web)).status, 503)

@@ -1,6 +1,7 @@
 """Persistent campaign records. Operation execution stays in the board broker."""
 
 from datetime import UTC, date, datetime
+import json
 import re
 import sqlite3
 import uuid
@@ -69,9 +70,32 @@ class Campaigns:
                 ended_at TEXT,
                 abort_requested_at TEXT,
                 verdict TEXT,
-                reason TEXT
+                reason TEXT,
+                metadata TEXT NOT NULL DEFAULT '{}'
             )
         """)
+        with self.db:
+            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(campaigns)")}
+            if "metadata" not in columns:
+                self.db.execute("ALTER TABLE campaigns ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS campaign_operations (
+                    id TEXT PRIMARY KEY,
+                    campaign_id TEXT NOT NULL REFERENCES campaigns(id),
+                    started_at TEXT NOT NULL,
+                    finished INTEGER NOT NULL DEFAULT 0,
+                    record TEXT NOT NULL
+                )
+            """)
+            self.db.execute("""
+                CREATE INDEX IF NOT EXISTS campaign_operation_order
+                ON campaign_operations(campaign_id, started_at DESC, id DESC)
+            """)
+            for row in self.db.execute("SELECT id, record FROM campaign_operations WHERE finished = 0").fetchall():
+                record = json.loads(row["record"])
+                record.update(state="Échec", detail="Interrompue par le redémarrage du serveur.", finishedAt=timestamp())
+                self.db.execute("UPDATE campaign_operations SET record = ?, finished = 1 WHERE id = ?",
+                                (json.dumps(record), row["id"]))
         self.in_flight = {}
 
     def close(self):
@@ -81,7 +105,10 @@ class Campaigns:
         row = self.db.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
         if row is None:
             raise CampaignError(404, "campaign_not_found")
-        return dict(row) | {"in_flight": self.in_flight.get(campaign_id, 0)}
+        return self._describe(row)
+
+    def _describe(self, row):
+        return dict(row) | {"metadata": json.loads(row["metadata"]), "in_flight": self.in_flight.get(row["id"], 0)}
 
     def search(self, *, q, states, verdict, start, end, limit, offset):
         filters, parameters = [], []
@@ -115,18 +142,37 @@ class Campaigns:
                 [*parameters, limit, offset],
             ).fetchall()
         return {
-            "items": [dict(row) | {"in_flight": self.in_flight.get(row["id"], 0)} for row in rows],
+            "items": [self._describe(row) for row in rows],
             "counts": counts, "total": sum(counts.values()), "limit": limit, "offset": offset,
         }
 
-    def start(self, name):
+    def start(self, name, metadata):
         campaign_id = uuid.uuid4().hex
         with self.db:
             self.db.execute(
-                "INSERT INTO campaigns (id, name, state, started_at) VALUES (?, ?, 'active', ?)",
-                (campaign_id, name, timestamp()),
+                "INSERT INTO campaigns (id, name, state, started_at, metadata) VALUES (?, ?, 'active', ?, ?)",
+                (campaign_id, name, timestamp(), json.dumps(metadata)),
             )
         return self.get(campaign_id)
+
+    def update(self, campaign_id, changes):
+        campaign = self.get(campaign_id)
+        if campaign["state"] != "active":
+            raise CampaignError(409, "campaign_not_active")
+        values = campaign | changes
+        with self.db:
+            self.db.execute("UPDATE campaigns SET name = ?, metadata = ? WHERE id = ?",
+                            (values["name"], json.dumps(values["metadata"]), campaign_id))
+        return self.get(campaign_id)
+
+    def operations(self, campaign_id, *, limit, offset):
+        self.get(campaign_id)
+        total = self.db.execute("SELECT COUNT(*) FROM campaign_operations WHERE campaign_id = ?", (campaign_id,)).fetchone()[0]
+        rows = self.db.execute("""
+            SELECT record FROM campaign_operations WHERE campaign_id = ?
+            ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?
+        """, (campaign_id, limit, offset))
+        return {"items": [json.loads(row["record"]) for row in rows], "total": total, "limit": limit, "offset": offset}
 
     def finish(self, campaign_id, verdict):
         campaign = self.get(campaign_id)
@@ -159,13 +205,24 @@ class Campaigns:
             self._complete_abort(campaign_id)
         return self.get(campaign_id)
 
-    def enter(self, campaign_id):
+    def enter(self, campaign_id, record):
         campaign = self.get(campaign_id)
         if campaign["state"] != "active":
             raise CampaignError(409, "campaign_not_active")
+        with self.db:
+            self.db.execute("INSERT INTO campaign_operations (id, campaign_id, started_at, record) VALUES (?, ?, ?, ?)",
+                            (record["id"], campaign_id, record["startedAt"], json.dumps(record)))
         self.in_flight[campaign_id] = campaign["in_flight"] + 1
 
-    def leave(self, campaign_id):
+    def leave(self, campaign_id, record):
+        try:
+            with self.db:
+                self.db.execute("UPDATE campaign_operations SET record = ?, finished = 1 WHERE id = ?",
+                                (json.dumps(record), record["id"]))
+        finally:
+            self._release(campaign_id)
+
+    def _release(self, campaign_id):
         remaining = self.in_flight[campaign_id] - 1
         if remaining:
             self.in_flight[campaign_id] = remaining

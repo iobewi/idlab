@@ -101,6 +101,14 @@ la main en sortant. Utiliser `IDLAB_TOKEN` pour `devices()` et
 `identify()` en observation. Le client transmet les refus du serveur
 avec `IDLabHTTPError.status` et `IDLabHTTPError.code`.
 
+Pour rattacher des opérations à une campagne, crée-la avec
+`lab.create_campaign("Lecture de référence", metadata={"scenario": "backup"})`
+puis utilise `board.for_campaign(campaign["id"])` dans la session de
+pilotage. `lab.campaign_operations(campaign["id"])` consulte le suivi,
+et `lab.finish_campaign(campaign["id"], "PASS")` enregistre le verdict.
+Dans le web, **Utiliser cette campagne** applique ce même rattachement
+aux opérations lancées dans la page.
+
 ## Appeler l'API HTTP
 
 La [référence API v1](docs/api.md) décrit les commandes HTTP, les opérations

@@ -1,6 +1,7 @@
 import { BoardConnector } from './board-connector.js';
 import { ConsoleBuffer } from './console-buffer.js';
 import { BootIdentity } from './boot-identity.js';
+import { activeCampaignId } from './campaign-view.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
 const $ = id => document.getElementById(id);
@@ -448,6 +449,7 @@ function render() {
 function addCard(name, port, flashBaud) {
   const card = new BoardConnector(name, port, {
     flashBaud,
+    campaignId: () => activeCampaignId,
     onChange: () => {
       if (!card.identity) card.observation = null;
       render();

@@ -147,6 +147,44 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(activity["operations"][0]["detail"], jedec)
             self.assertEqual(activity["device"]["jedec"], jedec)
 
+    async def test_campaign_api_keeps_status_and_tags_commands(self):
+        campaign = await asyncio.to_thread(self.client.create_campaign, "Console QA", metadata={"scenario": "boot"})
+        campaign_id = campaign["id"]
+        self.assertEqual((campaign["state"], campaign["metadata"]), ("active", {"scenario": "boot"}))
+        updated = await asyncio.to_thread(self.client.update_campaign, campaign_id, metadata={"scenario": "uart"})
+        self.assertEqual(updated["metadata"], {"scenario": "uart"})
+        matches = await asyncio.to_thread(self.client.list_campaigns, state=["active"], q="Console QA")
+        self.assertEqual(matches["total"], 1)
+
+        socket = await self.connect(console=True)
+        async with self.control(socket) as board:
+            tracked = board.for_campaign(campaign_id)
+            task = asyncio.create_task(asyncio.to_thread(tracked.write_uart, b"status\n"))
+            command = await socket.receive_json(timeout=2)
+            self.assertEqual(command["command"], "uart.write")
+            operations = await asyncio.to_thread(self.client.campaign_operations, campaign_id)
+            active = operations["items"][0]
+            self.assertEqual((active["id"], active["state"], active["campaign_id"]),
+                             (command["id"], "En cours", campaign_id))
+            self.assertNotIn("hex", active)
+            with self.assertRaises(IDLabHTTPError) as busy:
+                await asyncio.to_thread(self.client.finish_campaign, campaign_id, "PASS")
+            self.assertEqual(busy.exception.code, "campaign_busy")
+            await socket.send_json({"result": command["id"]})
+            await task
+            finished = await asyncio.to_thread(self.client.finish_campaign, campaign_id, "PASS")
+            self.assertEqual((finished["state"], finished["verdict"]), ("finished", "PASS"))
+            with self.assertRaises(IDLabHTTPError) as closed:
+                await asyncio.to_thread(tracked.write_uart, b"status\n")
+            self.assertEqual(closed.exception.code, "campaign_not_active")
+
+        operations = await asyncio.to_thread(self.client.campaign_operations, campaign_id)
+        self.assertEqual(operations["items"][0]["state"], "Terminée")
+        self.assertEqual(await asyncio.to_thread(self.client.get_campaign, campaign_id), finished)
+        with self.assertRaises(IDLabHTTPError) as closed:
+            await asyncio.to_thread(self.client.update_campaign, campaign_id, name="Other")
+        self.assertEqual(closed.exception.code, "campaign_not_active")
+
     async def test_truncated_read_is_an_error(self):
         socket = await self.connect()
         async with self.control(socket) as board:
