@@ -33,6 +33,7 @@ export class EspDriver {
     const usb = this.port.getInfo();
     const plan = connectionPlan(usb, options);
     const loader = this.loader;
+    this.connectionStage = 'Détection du chargeur ROM';
     if (auto) {
       // A short SYNC probe detects an already active downloader without
       // asserting reset. Only an unanswered probe falls back to UART.
@@ -57,12 +58,15 @@ export class EspDriver {
     if (romOnly && loader.syncStubDetected) throw new Error('Un stub tourne déjà. Remets la carte en mode ROM.');
     if (loader.secureDownloadMode) throw new Error('Identité indisponible en mode téléchargement sécurisé.');
 
+    this.connectionStage = 'Lecture de l’identité matérielle';
     let transport = plan.transport;
     if (transport === 'unknown' && await loader.usesUsbOtg()) transport = 'usb_otg';
     const mac = await loader.chip.readMac(loader);
     const model = await loader.chip.getChipDescription?.(loader) ?? loader.chip.CHIP_NAME;
     if (plan.useStub) {
+      this.connectionStage = 'Préparation du chargeur';
       if (!loader.syncStubDetected) await loader.chip.postConnect?.(loader);
+      this.connectionStage = 'Chargement et démarrage du stub';
       await loader.runStub();
       if (loader.IS_STUB && transport === 'usb_uart' && flashBaud !== this.transport.baudrate) {
         await this.#changeFlashBaud(flashBaud);
@@ -70,6 +74,7 @@ export class EspDriver {
     }
     let flashId = null, flashSize = null;
     if (loader.IS_STUB) {
+      this.connectionStage = 'Lecture du JEDEC';
       ({flash_id: flashId, flash_size: flashSize} = await this.readJedec());
     }
     const chip = loader.chip.CHIP_NAME.toLowerCase().replace(/[^a-z0-9]/g, '');

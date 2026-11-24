@@ -24,6 +24,19 @@ test('packs split serial chunks without dropping a buffered packet', async () =>
   assert.deepEqual(await transport.read(100), Uint8Array.of(26));
 });
 
+test('a ROM boot banner does not discard the first synchronization response', async () => {
+  const Transport = serialTransport(upstream.Transport, upstream.ESPError);
+  const transport = new Transport({ getInfo: () => ({}) });
+  const loader = new upstream.ESPLoader({ transport, baudrate: 115200 });
+  const banner = new TextEncoder().encode('ESP-ROM:esp32\r\nwaiting for download\r\n');
+  transport.buffer = Uint8Array.of(...banner, 0xc0, 0xc0, 1, 8, 0, 0, 7, 0, 0, 0, 0xc0);
+  const [value, data] = await loader.readPacket(8, 100);
+  assert.equal(value, 7);
+  assert.equal(data.length, 0);
+  transport.buffer = banner;
+  await assert.rejects(transport.read(5), /serial_timeout/);
+});
+
 test('ROM identifies without launching a stub; production reads use one reader', async () => {
   const port = { getInfo: () => ({ usbVendorId: 0x303a, usbProductId: 18 }) };
   class FakeLoader {

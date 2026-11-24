@@ -60,7 +60,7 @@ class IdentityTests(unittest.TestCase):
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.server = TestServer(create_app(port=0, token="test-token", read_timeout=0.2))
+        self.server = TestServer(create_app(port=0, token="test-token", read_timeout=0.2, command_timeout=0.5))
         # Use a nominated Host for origin validation while connecting to an
         # ephemeral test port, so parallel test runs never share a socket.
         self.browser = TestClient(self.server, cookie_jar=CookieJar(unsafe=True))
@@ -171,6 +171,19 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         response = await request
         self.assertEqual(response.status, 200)
         self.assertEqual((await response.json())["generation"], generation)
+
+    async def test_loader_command_timeout_has_a_distinct_error(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await agent.send_json({"mode": "console", "transport": "usb_serial_jtag"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        request = asyncio.create_task(self.browser.post(
+            "/api/v1/devices/board/command", headers=self.local,
+            json={"generation": generation, "command": "mode.loader"},
+        ))
+        self.assertEqual((await agent.receive_json(timeout=2))["command"], "mode.loader")
+        await agent.receive(timeout=2)
+        response = await request
+        self.assertEqual((response.status, await response.json()), (504, {"error": "device_command_timeout"}))
 
     async def test_exclusive_control_stops_and_reuses_token_then_revokes(self):
         agent, generation = await self.board("board")

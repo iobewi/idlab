@@ -135,6 +135,7 @@ async function observeCard(card) {
     const historyChanged = JSON.stringify(previous?.operations) !== JSON.stringify(activity.operations);
     const journalChanged = previous?.journal.at(-1)?.at !== activity.journal.at(-1)?.at;
     card.observation = activity;
+    card.lastJournal = activity.journal;
     if (uart) {
       card.uartCursor = uart.cursor;
       if (uart.dropped) card.capture.note('MARK', uart.dropped + ' octets perdus');
@@ -165,7 +166,7 @@ setInterval(() => { for (const card of cards.values()) void observeCard(card); }
 function renderJournal() {
   const log = $('agent-log');
   const follow = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
-  const journal = selected?.observation?.journal ?? [];
+  const journal = selected?.lastJournal ?? [];
   $('agent-log-entries').replaceChildren(...journal.filter(entry => entry.at > (selected.journalAfter ?? ''))
     .map(entry => element('p', clock.format(new Date(entry.at)) + ' · ' + entry.message, 'journal-row')));
   renderFlashProgress();
@@ -585,8 +586,13 @@ $('enter-loader').onclick = () => run(async () => {
     try {
       await card.enterLoader();
     } catch (error) {
-      const detail = error.message === 'Failed to connect with the device'
-        ? 'La carte ne répond pas en mode téléchargement.' : error.message;
+      const messages = {
+        'Failed to connect with the device': 'La carte ne répond pas en mode téléchargement.',
+        device_command_timeout: 'Le connecteur série n’a pas répondu à temps.',
+        device_session_changed: card.lost ? 'Le port USB s’est déconnecté pendant la bascule.'
+          : 'La session de la carte a été interrompue.',
+      };
+      const detail = messages[error.message] ?? error.message;
       throw new Error('Impossible d’ouvrir le chargeur sur « ' + card.name + ' ». ' + detail);
     }
     if (card !== selected) return;
@@ -780,7 +786,7 @@ $('agent-log-toggle').onclick = event => {
   event.currentTarget.textContent = log.hidden ? 'Développer' : 'Réduire';
 };
 $('agent-log-clear').onclick = () => {
-  if (selected) selected.journalAfter = selected.observation?.journal.at(-1)?.at;
+  if (selected) selected.journalAfter = selected.lastJournal?.at(-1)?.at;
   renderJournal();
 };
 const emptyCards = element('p', 'Aucune carte connectée dans cette fenêtre.', 'hint');

@@ -159,7 +159,7 @@ def operation_campaign(payload):
 
 
 def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=False,
-               campaign_db=":memory:"):
+               campaign_db=":memory:", command_timeout=30):
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     session = secrets.token_urlsafe(32)
     boards = {}
@@ -506,7 +506,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             elif command == "mode.rom":
                 message["reset"] = payload["reset"]
             await board.socket.send_json(message)
-            result = await asyncio.wait_for(operation.future, timeout=30)
+            result = await asyncio.wait_for(operation.future, timeout=command_timeout)
             if control and control.stopped:
                 return problem(403, control.stopped)
             if not isinstance(result, dict):
@@ -523,7 +523,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 record["detail"] = value
                 board.identity["jedec"] = value
             return web.json_response(board.describe() | {"result": value})
-        except (ConnectionError, TimeoutError):
+        except TimeoutError:
+            record["detail"] = "Le connecteur n’a pas répondu à temps."
+            await board.socket.close(code=1011)
+            return problem(504, "device_command_timeout")
+        except ConnectionError:
             await board.socket.close(code=1011)
             return problem(502, "device_session_changed")
         finally:

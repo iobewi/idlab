@@ -125,6 +125,11 @@ export class BoardConnector {
     this.session = driver;
     const identity = await driver.connect({
       auto: use === 'auto', romOnly: use === 'rom', resetToRom, flashBaud: this.flashBaud,
+    }).catch(error => {
+      if (error.message === 'serial_timeout' || error.message === 'serial_partial_packet') {
+        throw new Error(driver.connectionStage + ' · délai série dépassé (' + error.message + ')', {cause: error});
+      }
+      throw error;
     });
     if (this.lost) throw new Error('Port USB déconnecté.');
     if (!identity) {

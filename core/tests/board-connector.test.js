@@ -4,7 +4,7 @@ import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
-  readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false } = {}) {
+  readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -35,7 +35,10 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
         throw new Error('Failed to connect with the device');
       }
     }
-    async runStub() { this.IS_STUB = true; }
+    async runStub() {
+      if (stubTimeout) throw new Error('serial_timeout');
+      this.IS_STUB = true;
+    }
     async checkCommand(_description, opcode, data) {
       assert.equal(opcode, 0x0f);
       const payload = new DataView(data.buffer);
@@ -241,6 +244,14 @@ test('a failed USB Serial/JTAG loader entry reports the cause and restores the s
   assert.deepEqual(events.slice(-5), ['close-console', 'detect:default_reset', 'close-loader', 'console', 'reset']);
   await card.write('status');
   assert.equal(events.at(-1), 'uart:status');
+  await card.disconnect();
+});
+
+test('a serial timeout during stub startup identifies the stage and restores UART', async () => {
+  const {card} = fixture({vid: 0x303a, pid: 0x1001, stubTimeout: true});
+  await card.connect();
+  await assert.rejects(card.enterLoader(), /Chargement et démarrage du stub.*serial_timeout/);
+  assert.equal(card.mode, 'console');
   await card.disconnect();
 });
 
