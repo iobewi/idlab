@@ -75,6 +75,19 @@ IDLab peut tourner dans un conteneur Docker indépendant du devcontainer.
 L'[API de gestion du service](docs/service.md) permet de le démarrer,
 de l'arrêter, de le redémarrer et de vérifier son état depuis un script.
 
+## Développer dans VS Code
+
+Avec l’extension **Dev Containers**, ouvrir le dépôt dans VS Code puis choisir
+**Dev Containers: Reopen in Container**. Le conteneur de développement installe
+Python 3.12, Node.js 22, le connecteur Python en mode éditable et les dépendances
+du cœur. VS Code sélectionne l’environnement Python dédié. Dans un terminal,
+l’activer avec `. "$HOME/.venv/idlab/bin/activate"`.
+
+Le serveur IDLab déployé reste dans son conteneur Compose. Pour l’utiliser depuis
+un conteneur de développement isolé, suivre le
+[transfert du port 8080](docs/service.md#depuis-le-devcontainer). Le navigateur
+du poste opérateur conserve l’accès aux cartes via Web Serial.
+
 ## Tests sans matériel
 
 ```sh
