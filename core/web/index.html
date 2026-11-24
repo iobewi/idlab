@@ -61,10 +61,11 @@
     <ol id="rom-reset-steps" hidden>
       <li>Maintiens le bouton BOOT enfoncé.</li>
       <li>Appuie brièvement sur RESET (ou EN), puis relâche-le.</li>
-      <li>Relâche BOOT, puis choisis « Essayer la connexion ».</li>
+      <li>Relâche BOOT. Si le port ne se réannonce pas, choisis « Essayer la connexion ».</li>
     </ol>
+    <p id="rom-reset-progress" role="status"></p>
     <div class="row rom-dialog-actions">
-      <button value="cancel" autofocus>Annuler</button>
+      <button id="rom-reset-cancel" value="cancel" autofocus>Annuler</button>
       <button id="rom-reset-confirm" class="primary" value="connect">Redémarrer en ROM</button>
     </div>
   </form>

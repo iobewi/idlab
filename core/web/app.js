@@ -258,7 +258,10 @@ function render() {
 function addCard(name, port, baud, manual, use) {
   const card = new BoardConnector(name, port, {
     baud, manual, use,
-    onChange: render,
+    onChange: () => {
+      render();
+      if (card === romTarget && romPortSeen) queueMicrotask(openRomWhenReady);
+    },
     onCapture: () => scheduleConsole(card),
     onJournal: message => note(card, message),
   });
@@ -331,7 +334,13 @@ $('enter-loader').onclick = () => run(async () => {
   $('tab-memory').click();
 });
 const romDialog = $('rom-reset-dialog');
+const romProgress = $('rom-reset-progress');
+const romConfirm = $('rom-reset-confirm');
+const romCancel = $('rom-reset-cancel');
 let romTarget;
+let romConnecting = false;
+let romPortSeen = false;
+
 $('open-rom').onclick = () => {
   if (!selected || romDialog.open) return;
   romTarget = selected;
@@ -339,18 +348,57 @@ $('open-rom').onclick = () => {
   $('rom-reset-device').textContent = 'Carte : ' + romTarget.name;
   $('rom-reset-auto').hidden = !automatic;
   $('rom-reset-steps').hidden = automatic;
-  $('rom-reset-confirm').textContent = automatic ? 'Redémarrer en ROM' : 'Essayer la connexion';
-  romDialog.returnValue = '';
+  romConfirm.textContent = automatic ? 'Redémarrer en ROM' : 'Essayer la connexion';
+  romProgress.textContent = '';
   romDialog.showModal();
 };
-romDialog.onclose = () => {
+
+function matchRomPort(event) {
+  return romTarget && (event.target === romTarget.port || event.port === romTarget.port);
+}
+
+function openRomWhenReady() {
+  if (!romPortSeen || !romTarget || romTarget.mode === 'closing' || romTarget.mode === 'connecting' ||
+      romTarget.busy || romTarget.requesting || romConnecting) return;
+  romPortSeen = false;
+  tryOpenRom();
+}
+
+navigator.serial?.addEventListener('connect', event => {
+  if (!romDialog.open || !matchRomPort(event) || romTarget.canEnterLoader || romConnecting) return;
+  romPortSeen = true;
+  openRomWhenReady();
+});
+
+async function tryOpenRom() {
   const card = romTarget;
-  romTarget = null;
-  if (romDialog.returnValue !== 'connect' || !card || cards.get(card.name) !== card) return;
-  run(async () => {
+  if (!romDialog.open || romConnecting || !card || cards.get(card.name) !== card) return;
+  romPortSeen = false;
+  romConnecting = romConfirm.disabled = romCancel.disabled = true;
+  romProgress.textContent = 'Connexion à la ROM…';
+  try {
     const identity = await card.enterRom();
-    if (identity) say('Session ROM ouverte sur ' + (identity.model ?? identity.chip) + '.');
-  });
+    if (identity?.loader !== 'rom') throw new Error('La session ROM n’a pas été confirmée.');
+    romDialog.close('connected');
+    say('Session ROM ouverte sur ' + (identity.model ?? identity.chip) + '.');
+  } catch (error) {
+    romProgress.textContent = 'Connexion ROM impossible : ' + error.message;
+  } finally {
+    romConnecting = romConfirm.disabled = romCancel.disabled = false;
+  }
+}
+
+romDialog.querySelector('form').onsubmit = event => {
+  if (event.submitter === romCancel) return;
+  event.preventDefault();
+  tryOpenRom();
+};
+romDialog.oncancel = event => {
+  if (romConnecting) event.preventDefault();
+};
+romDialog.onclose = () => {
+  romTarget = null;
+  romPortSeen = false;
 };
 $('rom-jedec').onclick = () => run(() => selected?.readRomJedec());
 $('rom-console').onclick = () => $('return-console').click();
