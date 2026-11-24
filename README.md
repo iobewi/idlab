@@ -55,6 +55,8 @@ La carte peut redémarrer et la capture UART est suspendue pendant
 l’opération. Si le port exige une entrée manuelle, place la carte en mode
 téléchargement et reconnecte-la avant la lecture.
 L’identité mesurée et la capture restent affichées au retour en console.
+Si une plage dépasse 4 Mio, l’interface découpe la lecture en requêtes
+successives et assemble un seul dump. L’API accepte 4 Mio par requête.
 Dans **Opérations → Historique des opérations**, le bouton **Inspecter**
 rouvre le résultat d’une lecture flash de la carte sélectionnée. Le détail
 peut être copié ou téléchargé en JSON. L’historique est conservé tant que

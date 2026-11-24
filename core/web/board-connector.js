@@ -1,4 +1,4 @@
-import { ESP_SYNC_BAUD, EspDriver, connectionPlan } from './esp-driver.js';
+import { ESP_SYNC_BAUD, MAX_FLASH_READ, EspDriver, connectionPlan } from './esp-driver.js';
 import { openSerialConsole, resetConsole } from './serial-console.js';
 import { ConsoleBuffer } from './console-buffer.js';
 import { BootIdentity } from './boot-identity.js';
@@ -299,11 +299,28 @@ export class BoardConnector {
     return this.#withLoader(async () => {
       const identity = this.identity;
       if (!identity.capabilities.includes('flash.read')) throw new Error('Lecture flash indisponible pour ce chargeur.');
-      const response = await this.request('/devices/' + this.name + '/flash/read', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({generation: identity.generation, address, size}),
-      });
-      return {blob: await response.blob(), capacity: identity.flash_size};
+      const capacity = identity.flash_size;
+      if (!Number.isSafeInteger(address) || !Number.isSafeInteger(size) ||
+          address < 0 || size <= 0 || size > capacity - address) {
+        throw new Error('La plage demandée dépasse la flash ou contient une adresse ou une taille invalide.');
+      }
+      const socket = this.socket;
+      const parts = [];
+      for (let offset = 0; offset < size; offset += MAX_FLASH_READ) {
+        if (this.lost || this.socket !== socket || socket.readyState !== 1) {
+          throw new Error('device_session_changed');
+        }
+        const length = Math.min(MAX_FLASH_READ, size - offset);
+        const response = await this.request('/devices/' + this.name + '/flash/read', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({generation: identity.generation, address: address + offset, size: length}),
+        });
+        const part = await response.blob();
+        if (part.size !== length) throw new Error('incomplete_flash_read');
+        parts.push(part);
+        if (size > MAX_FLASH_READ) this.onJournal('Lecture flash · ' + (offset + length) + ' / ' + size + ' octets');
+      }
+      return {blob: new Blob(parts, {type: 'application/octet-stream'}), capacity};
     });
   }
 

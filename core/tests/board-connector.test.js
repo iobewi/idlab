@@ -3,9 +3,11 @@ import test from 'node:test';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
-function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud, failBaud = false } = {}) {
+function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud, failBaud = false,
+  readBlock, shortResponseAt } = {}) {
   const events = [];
-  let identity, socket;
+  const reads = [];
+  let identity, socket, responseBytes;
   let deviceBaud = 115200;
   const bytes = Uint8Array.of(0, 255, 13);
   const port = {getInfo: () => ({usbVendorId: vid})};
@@ -41,8 +43,9 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
     async readFlashId() { return 0x184068; }
     async readFlash(address, size, check) {
       check();
-      assert.equal(size, bytes.length);
       if (failRead) throw new Error('error during read');
+      if (readBlock) return readBlock(address, size);
+      assert.equal(size, bytes.length);
       return bytes;
     }
     async openAndSync() {}
@@ -75,7 +78,10 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
         readyState: 1,
         send(message) {
           if (message === 'request') return;
-          if (typeof message !== 'string') return;
+          if (typeof message !== 'string') {
+            responseBytes = message;
+            return;
+          }
           identity = {...JSON.parse(message), generation: 'generation', capabilities: ['identify', 'flash.read']};
           if (identity.loader === 'rom') identity.capabilities = ['identify'];
           queueMicrotask(() => socket.onmessage({data: '{"generation":"generation"}'}));
@@ -93,16 +99,20 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
       assert.equal(path, '/devices/board/flash/read');
       const {generation, address, size} = JSON.parse(options.body);
       assert.equal(generation, 'generation');
+      reads.push({generation, address, size});
+      responseBytes = null;
       await socket.onmessage({data: JSON.stringify({address, size, command: 'flash.read', id: 'request'})});
       if (failRead) {
         socket.close();
         throw new Error('read_incomplete_reconnect_required');
       }
-      return {blob: async () => new Blob([bytes])};
+      assert.equal(responseBytes?.byteLength, size);
+      const data = address === shortResponseAt ? responseBytes.subarray(0, 1) : responseBytes;
+      return {blob: async () => new Blob([data])};
     },
   });
   port.readable = null;
-  return {card, events, manualReset() { inDownload = false; deviceBaud = 115200; }};
+  return {card, events, reads, manualReset() { inDownload = false; deviceBaud = 115200; }};
 }
 
 test('identification and flash reads from console restore the same console and retain identity', async () => {
@@ -155,6 +165,42 @@ test('a failed flash read restores console without retrying the read', async () 
   assert.equal(card.mode, 'console');
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console',
     'detect:default_reset', 'close-loader', 'console', 'reset']);
+  await card.disconnect();
+});
+
+test('reads the complete factory partition in ordered chunks on one loader session', async () => {
+  const mib = 1024 * 1024;
+  const factory = 0x10000;
+  const size = 0xfa0000;
+  const {card, events, reads} = fixture({
+    readBlock: (address, length) => new Uint8Array(length).fill((address - factory) / mib + 1),
+  });
+  await card.connect();
+  const {blob} = await card.readFlash(factory, size);
+  assert.equal(blob.size, size);
+  assert.deepEqual(reads, [0, 4, 8, 12].map(offset => ({
+    generation: 'generation', address: factory + offset * mib, size: Math.min(4 * mib, size - offset * mib),
+  })));
+  for (let offset = 0; offset < size; offset += mib) {
+    const byte = new Uint8Array(await blob.slice(offset, offset + 1).arrayBuffer());
+    assert.equal(byte[0], offset / mib + 1);
+  }
+  assert.equal(events.filter(e => e === 'detect:default_reset').length, 1);
+  assert.equal(events.filter(e => e === 'reset').length, 1);
+  assert.equal(card.mode, 'console');
+  await card.disconnect();
+});
+
+test('a short chunk aborts the dump and an invalid full range sends no read', async () => {
+  const mib = 1024 * 1024;
+  const {card, reads} = fixture({
+    inDownload: true, shortResponseAt: 4 * mib, readBlock: (_, length) => new Uint8Array(length),
+  });
+  await card.connect();
+  await assert.rejects(card.readFlash(15 * mib, 2 * mib), /plage demandée/);
+  assert.equal(reads.length, 0);
+  await assert.rejects(card.readFlash(0, 9 * mib), /incomplete_flash_read/);
+  assert.deepEqual(reads.map(read => read.address), [0, 4 * mib]);
   await card.disconnect();
 });
 

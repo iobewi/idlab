@@ -3,6 +3,7 @@ import { serialTransport } from './serial-transport.js';
 const UART_BRIDGES = new Set([0x0403, 0x067b, 0x10c4, 0x1a86]);
 const FLASH_BLOCK = 1024 * 1024;
 export const ESP_SYNC_BAUD = 115200;
+export const MAX_FLASH_READ = 4 * FLASH_BLOCK;
 
 export function connectionPlan(portInfo, { romOnly, manualEntry, resetToRom }) {
   const { usbVendorId: vid, usbProductId: pid } = portInfo;
@@ -110,7 +111,7 @@ export class EspDriver {
     const capacity = this.identity?.flash_size;
     if (!capacity || !this.loader.IS_STUB) throw new Error('operation_unsupported');
     if (!Number.isSafeInteger(address) || !Number.isSafeInteger(size) ||
-        address < 0 || size <= 0 || size > 4 * FLASH_BLOCK || address + size > capacity) {
+        address < 0 || size <= 0 || size > MAX_FLASH_READ || address + size > capacity) {
       throw new Error('invalid_flash_range');
     }
     const data = new Uint8Array(size);

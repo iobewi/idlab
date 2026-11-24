@@ -541,6 +541,7 @@ $('read').onclick = async () => {
     state: 'En cours', startedAt: new Date(started).toISOString(),
   };
   card.operations.unshift(entry);
+  card.dump = null;
   $('read').disabled = true;
   renderOperations();
   try {
