@@ -58,8 +58,9 @@ La carte peut redémarrer et la capture UART est suspendue pendant
 l’opération. Si le port exige une entrée manuelle, place la carte en mode
 téléchargement et reconnecte-la avant la lecture.
 L’identité mesurée et la capture restent affichées au retour en console.
-Si une plage dépasse 4 Mio, l’interface découpe la lecture en requêtes
-successives et assemble un seul dump. L’API accepte 4 Mio par requête.
+Une lecture couvrant une grande plage reste une seule requête API et une
+seule opération dans l’historique. Le connecteur transmet les données au
+serveur par blocs de 4 Mio maximum.
 Dans **Opérations → Historique des opérations**, le bouton **Inspecter**
 rouvre le résultat d’une lecture flash de la carte sélectionnée. Le détail
 peut être copié ou téléchargé en JSON. L’historique est conservé tant que
@@ -113,13 +114,19 @@ cookie de session. Le serveur écoute uniquement sur la boucle locale.
 |---|---|
 | `GET /api/v1/devices` | Cartes présentes et capacités de chaque session |
 | `GET /api/v1/devices/{name}` | Identité, transport, chargeur et génération |
-| `POST /api/v1/devices/{name}/flash/read` | Octets bruts demandés, de 1 octet à 4 Mio |
+| `POST /api/v1/devices/{name}/flash/read` | Octets bruts demandés, jusqu’à la capacité détectée et 64 Mio maximum |
+| `GET /api/v1/devices/{name}/uart` | Capture UART, avec génération et curseur |
+| `GET /api/v1/devices/{name}/activity` | Journal, progression et opérations récentes de la génération |
 
 Pour lire, envoyer `{"generation":"…","address":0,"size":4096}` avec le
 type `application/json`. La génération de l'identification empêche
 d'exécuter la demande sur une autre session. Une seule lecture est active
 par carte. Une lecture incomplète ferme la session sans rendre de
 résultat partiel. Pour lire de nouveau, reconnecter la carte et l'identifier.
+Le navigateur autorise et ouvre le port Web Serial. Une fois la carte
+connectée, le web et Python utilisent les mêmes commandes et les mêmes
+routes de consultation. Les données UART reçues passent du connecteur au
+serveur par le WebSocket de la carte.
 
 ## Service web dédié
 

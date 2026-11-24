@@ -183,8 +183,9 @@ def create_app(*, token, port=8080, service=None):
 
         try:
             body = await request.read() if request.can_read_body else None
+            timeout = {"timeout": ClientTimeout(total=None, connect=2)} if request.path.endswith("/flash/read") else {}
             async with request.app[UPSTREAM].request(
-                request.method, upstream, headers=headers, data=body, allow_redirects=False,
+                request.method, upstream, headers=headers, data=body, allow_redirects=False, **timeout,
             ) as response:
                 return web.Response(
                     status=response.status, headers=proxy_headers(response.headers),

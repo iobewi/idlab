@@ -1,6 +1,8 @@
 """Loopback HTTP API and WebSocket broker for browser-owned serial ports."""
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import hmac
 import ipaddress
 import os
@@ -16,6 +18,7 @@ from campaigns import CampaignError, Campaigns, search_parameters
 ROOT = Path(__file__).resolve().parent
 BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
 MAX_READ = 4 * 1024 * 1024
+MAX_FLASH = 64 * 1024 * 1024
 UART_BUFFER = 1024 * 1024
 UART_PAGE = 64 * 1024
 BOARD_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}")
@@ -27,6 +30,9 @@ class Operation:
     id: str
     future: asyncio.Future
     cancelled: bool = False
+    chunks: list | None = None
+    size: int = 0
+    received: int = 0
 
 
 @dataclass
@@ -44,13 +50,15 @@ class Board:
     pending: Operation | None = None
     control: Control | None = None
     port_key: str | None = None
-    local_transition: bool = False
     uart: bytearray = field(default_factory=bytearray)
     uart_end: int = 0
+    journal: deque = field(default_factory=lambda: deque(maxlen=300))
+    operations: deque = field(default_factory=lambda: deque(maxlen=100))
+    progress: dict | None = None
 
     def describe(self):
         state = ("stopping" if self.control and self.control.stopped else
-                 "busy" if self.pending or self.local_transition else "external" if self.control else "available")
+                 "busy" if self.pending else "external" if self.control else "available")
         return {"generation": self.generation, **self.identity, "control": state}
 
 
@@ -66,9 +74,9 @@ def validate_identity(value):
     if transport not in ("usb_uart", "usb_serial_jtag", "usb_otg", "unknown"):
         raise ValueError("invalid_transport")
     if value.get("mode") == "console":
-        capabilities = ["identify", "uart.write"]
+        capabilities = ["identify", "uart.write", "mode.rom"]
         if transport in ("usb_uart", "usb_serial_jtag"):
-            capabilities += ["mode.loader", "console.reset"]
+            capabilities += ["mode.loader", "console.reset", "flash.read"]
         return {"mode": "console", "chip": None, "mac": None, "flash_size": None,
                 "loader": None, "transport": transport, "capabilities": capabilities}
     if not isinstance(chip, str) or not re.fullmatch(r"esp32[a-z0-9]*", chip):
@@ -96,6 +104,7 @@ def validate_identity(value):
         capabilities.append("mode.console")
     if value.get("mode") == "loader":
         metadata["mode"] = "loader"
+        capabilities.append("rom.jedec" if loader == "rom" else "mode.rom")
     return {
         "chip": chip, "mac": mac.lower(), "flash_size": size, "transport": transport, "loader": loader,
         "capabilities": capabilities,
@@ -140,7 +149,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             browser = hmac.compare_digest(cookie.encode(), session.encode())
             bearer = request.headers.get("Authorization", "")
             script = token and hmac.compare_digest(bearer.encode(), f"Bearer {token}".encode())
-            scoped = re.fullmatch(r"/api/v1/devices/([\w-]+)(/flash/read|/command|/uart)?", request.path)
+            scoped = re.fullmatch(r"/api/v1/devices/([\w-]+)(/flash/read|/command|/uart|/activity)?", request.path)
             board = boards.get(scoped[1]) if scoped else None
             control = board.control if board else None
             control_request = control and hmac.compare_digest(
@@ -239,17 +248,6 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         name = request.match_info["name"]
         action = request.match_info["action"]
         board = boards.get(name)
-        if action in ("local-transition", "finish-transition"):
-            generation = await text_field(request, "generation", 32)
-            board = boards.get(name)
-            if not board or board.socket.closed or board.generation != generation:
-                return problem(409, "device_session_changed")
-            if board.control:
-                return problem(409, "externally_controlled")
-            if board.pending or (action == "local-transition" and board.local_transition):
-                return problem(409, "device_busy")
-            board.local_transition = action == "local-transition"
-            return web.json_response({"control": board.describe()["control"]})
         if action == "token":
             if not board or board.socket.closed:
                 return problem(404, "device_disconnected")
@@ -282,7 +280,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             return problem(404, "device_disconnected")
         if (board.port_key or board.identity["mac"]) != grant[1]:
             return problem(403, "control_token_device_mismatch")
-        if board.control or board.pending or board.local_transition:
+        if board.control or board.pending:
             return problem(409, "device_busy")
         socket = web.WebSocketResponse(heartbeat=20)
         control = Control(secrets.token_urlsafe(32), socket)
@@ -326,7 +324,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                     event = message.json()
                     if not isinstance(event, dict):
                         break
-                    if "identity" in event and (pending or board.local_transition):
+                    if "identity" in event and pending:
                         board.identity = validate_identity(event["identity"])
                         await socket.send_json({"identity": board.describe()})
                     elif "uart" in event and board.identity.get("mode") == "console":
@@ -337,6 +335,15 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                         board.uart.extend(data)
                         board.uart_end += len(data)
                         del board.uart[:max(0, len(board.uart) - UART_BUFFER)]
+                    elif isinstance(event.get("journal"), str):
+                        board.journal.append({"at": datetime.now(timezone.utc).isoformat(), "message": event["journal"][:500]})
+                    elif "progress" in event and pending and event.get("id") == pending.id:
+                        progress = event["progress"]
+                        if (not isinstance(progress, dict) or
+                                any(type(progress.get(key)) is not int for key in ("address", "received", "total")) or
+                                not 0 <= progress["received"] <= progress["total"] <= MAX_FLASH):
+                            break
+                        board.progress = progress
                     elif pending and not pending.future.done() and event.get("result") == pending.id:
                         pending.future.set_result(event)
                     else:
@@ -345,7 +352,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 if not pending or pending.future.done():
                     break
                 if message.type == WSMsgType.BINARY:
-                    pending.future.set_result(message.data)
+                    if pending.chunks is None:
+                        pending.future.set_result(message.data)
+                    elif not message.data or pending.received + len(message.data) > pending.size:
+                        pending.future.set_result(None)
+                    else:
+                        pending.chunks.append(message.data)
+                        pending.received += len(message.data)
                 elif message.type == WSMsgType.TEXT and message.data == pending.id:
                     pending.future.set_result(None)
                 else:
@@ -376,6 +389,24 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             return problem(403, control.stopped)
         return None
 
+    def start_operation(board, name, command, fields):
+        operation = Operation(uuid.uuid4().hex, asyncio.get_running_loop().create_future())
+        board.pending = operation
+        record = {"id": operation.id, "device": name, "command": command, "state": "En cours",
+                  "startedAt": datetime.now(timezone.utc).isoformat(), **fields}
+        board.operations.appendleft(record)
+        return operation, record, asyncio.get_running_loop().time()
+
+    def finish_operation(board, record, started, result):
+        record["state"] = "Terminée" if result else "Échec"
+        if not result:
+            record.setdefault("detail", "Opération interrompue ou en échec.")
+        elapsed = asyncio.get_running_loop().time() - started
+        record["duration"] = f"{round(1000 * elapsed)} ms"
+        if result and record["command"] == "flash.read" and elapsed > 0:
+            record["bytesPerSecond"] = round(record["bytesRead"] / elapsed)
+        board.progress = board.pending = None
+
     async def device_command(request):
         try:
             payload = await request.json()
@@ -390,7 +421,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             encoded = payload.get("hex")
             if not isinstance(encoded, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{2}){1,1900}", encoded):
                 return problem(400, "invalid_arguments")
-        elif command not in ("mode.loader", "mode.console", "console.reset"):
+        elif command == "mode.rom":
+            fields.add("reset")
+            if type(payload.get("reset")) is not bool:
+                return problem(400, "invalid_arguments")
+        elif command not in ("mode.loader", "mode.console", "console.reset", "rom.jedec", "identify"):
             return problem(409, "operation_unsupported")
         if set(payload) != fields:
             return problem(400, "invalid_arguments")
@@ -401,17 +436,19 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         refusal = command_refusal(request, board)
         if refusal is not None:
             return refusal
-        if board.pending or board.local_transition:
+        if board.pending:
             return problem(409, "device_busy")
         if command not in board.identity["capabilities"]:
             return problem(409, "operation_unsupported")
         control = board.control
-        operation = Operation(uuid.uuid4().hex, asyncio.get_running_loop().create_future())
-        board.pending = operation
+        operation, record, started = start_operation(board, name, command, {})
+        complete = False
         try:
             message = {"id": operation.id, "command": command}
             if command == "uart.write":
                 message["hex"] = payload["hex"]
+            elif command == "mode.rom":
+                message["reset"] = payload["reset"]
             await board.socket.send_json(message)
             result = await asyncio.wait_for(operation.future, timeout=30)
             if control and control.stopped:
@@ -420,12 +457,17 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 return problem(502, "device_session_changed")
             if result.get("error"):
                 return problem(502, "device_command_failed")
-            return web.json_response(board.describe())
+            complete = True
+            value = result.get("value")
+            if command == "rom.jedec":
+                record["detail"] = value
+                board.identity["jedec"] = value
+            return web.json_response(board.describe() | {"result": value})
         except (ConnectionError, TimeoutError):
             await board.socket.close(code=1011)
             return problem(502, "device_session_changed")
         finally:
-            board.pending = None
+            finish_operation(board, record, started, complete)
             if control and control.stopped and board.control is control:
                 board.control = None
                 await publish_control(board, name)
@@ -447,6 +489,16 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         data = board.uart[offset - start:offset - start + UART_PAGE]
         return web.json_response({"hex": data.hex(), "cursor": offset + len(data), "dropped": offset - cursor},
                                  headers={"Cache-Control": "no-store"})
+
+    async def read_activity(request):
+        board = boards.get(request.match_info["name"])
+        if not board or board.socket.closed:
+            return problem(404, "device_disconnected")
+        if request.query.get("generation") != board.generation:
+            return problem(409, "device_session_changed")
+        return web.json_response({"device": board.describe(), "external_control": bool(board.control),
+                                  "journal": list(board.journal), "progress": board.progress,
+                                  "operations": list(board.operations)}, headers={"Cache-Control": "no-store"})
 
     async def read_flash(request):
         try:
@@ -470,8 +522,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if "flash.read" not in board.identity["capabilities"]:
             return problem(409, "operation_unsupported")
         address, size = params["address"], params["size"]
+        stream = board.port_key is not None
+        capacity = board.identity["flash_size"] or MAX_FLASH
         if (type(address) is not int or type(size) is not int or address < 0
-                or not 0 < size <= MAX_READ or address + size > board.identity["flash_size"]):
+                or not 0 < size <= (MAX_FLASH if stream else MAX_READ) or address + size > capacity):
             return problem(400, "invalid_flash_range")
         if board.pending:
             return problem(409, "device_busy")
@@ -479,25 +533,44 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         campaigns = request.app[CAMPAIGNS]
         if campaign_id is not None:
             campaigns.enter(campaign_id)
-        operation = Operation(uuid.uuid4().hex, asyncio.get_running_loop().create_future())
-        board.pending = operation
+        name = request.match_info["name"]
+        operation, record, started = start_operation(board, name, "flash.read", {"address": address, "size": size})
+        if stream:
+            operation.chunks = []
+            operation.size = size
         complete = False
+        result = None
         try:
-            await board.socket.send_json({"id": operation.id, "command": "flash.read", "address": address, "size": size})
-            data = await asyncio.wait_for(operation.future, timeout=read_timeout)
+            message = {"id": operation.id, "command": "flash.read", "address": address, "size": size}
+            if stream:
+                message["stream"] = True
+            await board.socket.send_json(message)
+            result = await asyncio.wait_for(operation.future, timeout=read_timeout if not stream else read_timeout * (1 + (size - 1) // MAX_READ))
+            data = result if not stream else None
+            capacity = board.identity["flash_size"]
+            if stream and isinstance(result, dict) and not result.get("error") and operation.received == size:
+                capacity = result.get("value")
+                if type(capacity) is int and address + size <= capacity <= MAX_FLASH:
+                    data = b"".join(operation.chunks)
             complete = isinstance(data, bytes) and len(data) == size
             if control and control.stopped:
                 return problem(403, control.stopped)
             if complete:
-                return web.Response(body=data, content_type="application/octet-stream")
+                record.update(bytesRead=size, preview=data[:256].hex(" "), detail=f"{size} octets lus")
+                return web.Response(body=data, content_type="application/octet-stream",
+                                    headers={"X-IDLab-Flash-Size": str(capacity)})
         except (ConnectionError, TimeoutError):
             pass
         finally:
             try:
-                if not complete:
+                recoverable = isinstance(result, dict) and (
+                    result.get("error") == "invalid_flash_range" or
+                    (result.get("console_restored") is True and board.identity.get("mode") == "console")
+                )
+                if not complete and (not recoverable or control and control.stopped):
                     await board.socket.close(code=1011)
             finally:
-                board.pending = None
+                finish_operation(board, record, started, complete and not (control and control.stopped))
                 if control and control.stopped and board.control is control:
                     board.control = None
                     await publish_control(board, request.match_info["name"])
@@ -505,6 +578,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                     campaigns.leave(campaign_id)
         if control and control.stopped in {"control_stopped", "control_revoked"}:
             return problem(403, control.stopped)
+        if isinstance(result, dict) and result.get("error") and not board.socket.closed:
+            if result["error"] == "invalid_flash_range":
+                return problem(400, "invalid_flash_range")
+            return problem(502, "device_command_failed")
         return problem(502, "read_incomplete_reconnect_required")
 
     async def identify(request):
@@ -532,10 +609,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         web.post("/api/v1/campaigns/{id}/abort", abort_campaign),
         web.get("/api/v1/devices", devices),
         web.get("/api/v1/devices/{name}", identify),
-        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke|local-transition|finish-transition}", manage_control),
+        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke}", manage_control),
         web.get("/api/v1/devices/{name}/control/connect", connect_control),
         web.post("/api/v1/devices/{name}/command", device_command),
         web.get("/api/v1/devices/{name}/uart", read_uart),
+        web.get("/api/v1/devices/{name}/activity", read_activity),
         web.post("/api/v1/devices/{name}/flash/read", read_flash),
         web.get("/agent", agent),
         web.static("/web", ROOT / "web"),

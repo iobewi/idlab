@@ -65,16 +65,22 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         await agent.send_json({
             "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
             "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
+            "mode": "loader", "port_key": "00000000-0000-4000-8000-000000000001",
         })
         generation = (await agent.receive_json(timeout=2))["generation"]
+        chunk = b"a" * (4 * 1024 * 1024)
         read = asyncio.create_task(self.client.post(
             "/api/v1/devices/board/flash/read", headers=browser_headers,
-            json={"generation": generation, "address": 0, "size": 4, "campaign_id": campaign["id"]},
+            json={"generation": generation, "address": 0, "size": len(chunk) + 4, "campaign_id": campaign["id"]},
         ))
-        self.assertEqual((await agent.receive_json(timeout=2))["command"], "flash.read")
+        command = await agent.receive_json(timeout=2)
+        self.assertEqual(command["command"], "flash.read")
+        self.assertTrue(command["stream"])
+        await agent.send_bytes(chunk)
         await agent.send_bytes(b"data")
+        await agent.send_json({"result": command["id"], "value": 16 * 1024 * 1024})
         response = await asyncio.wait_for(read, timeout=2)
-        self.assertEqual(await response.read(), b"data")
+        self.assertEqual(await response.read(), chunk + b"data")
         first = self.service.process
 
         issued = await self.client.post("/api/v1/devices/board/control/token", headers=browser_headers)

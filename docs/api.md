@@ -80,7 +80,6 @@ en mémoire jusqu’à leur révocation ou au redémarrage du serveur.
 | `GET /control/connect` (WebSocket) | Le jeton de pilotage est envoyé en Bearer. Renvoie un identifiant secret de session et la génération. La connexion ouverte réserve la carte. |
 | `POST /control/stop` | Session navigateur locale. Arrête le pilotage externe. Le jeton peut resservir. |
 | `POST /control/revoke` | Session navigateur locale. Supprime le jeton et arrête le pilotage externe. |
-| `POST /control/local-transition` et `POST /control/finish-transition` | Le navigateur local réserve puis libère une transition interne pour la génération fournie en JSON. |
 
 Pendant le pilotage externe, la lecture flash exige l’identifiant secret
 de la session en Bearer. Le jeton général `IDLAB_TOKEN` permet de consulter
@@ -100,6 +99,9 @@ le même canal agent.
 | `console.reset` | Redémarre le firmware depuis la console si le transport le permet. |
 | `mode.loader` | Ouvre le chargeur flash depuis la console si le transport le permet. |
 | `mode.console` | Revient en console depuis un chargeur ouvert par IDLab sur cette connexion. |
+| `mode.rom` | Ouvre la ROM sur une carte connectée. Le booléen `reset` demande le reset automatique, autorisé depuis la console sur un transport compatible. |
+| `rom.jedec` | Lit le JEDEC depuis la ROM. Le résultat est renvoyé dans `result`. |
+| `identify` | Mesure l’identité matérielle. Depuis la console, passe par le chargeur puis revient à la console si le transport le permet. |
 
 `GET /api/v1/devices/{name}/uart?generation=…&cursor=…` renvoie les octets
 RX en hexadécimal, le prochain curseur et le nombre d’octets perdus avant
@@ -107,6 +109,12 @@ ce curseur (`hex`, `cursor`, `dropped`). Sans curseur, la lecture commence
 au plus ancien octet conservé. Le serveur conserve au plus 1 Mio par carte
 et renvoie jusqu’à 64 Kio par appel. L’observation utilise le jeton général
 ou celui de la session de pilotage. En Python, utiliser `board.read_uart()`.
+L’interface web lit la capture sur cette même route.
+
+`GET /api/v1/devices/{name}/activity?generation=…` renvoie l’état de la
+carte, la progression en cours, jusqu’à 300 messages du journal et les
+100 dernières opérations de cette génération. La consultation utilise
+les mêmes droits que la lecture UART. En Python, utiliser `board.activity()`.
 
 Un nom de carte contient de 1 à 48 caractères ASCII parmi les lettres,
 chiffres, tirets et underscores. Le premier caractère est alphanumérique.
@@ -130,8 +138,9 @@ Une description de session ressemble à ceci.
 une lecture. `generation` change lorsque la carte se reconnecte.
 
 Le corps d’une lecture contient la génération actuelle, une adresse entière
-positive ou nulle et une taille entière de 1 octet à 4 Mio. La plage doit tenir
-dans la flash. Le champ `campaign_id` est facultatif. Une carte accepte une
+positive ou nulle et une taille entière de 1 octet jusqu’à la capacité de
+la flash, avec un maximum de 64 Mio. Le connecteur transmet les octets
+au serveur par blocs de 4 Mio maximum. Le champ `campaign_id` est facultatif. Une carte accepte une
 lecture à la fois. Une lecture incomplète renvoie une erreur, ferme la session
 et ne livre aucun résultat partiel.
 

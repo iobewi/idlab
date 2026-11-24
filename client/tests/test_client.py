@@ -106,7 +106,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.to_thread(observer.write_uart, b"blocked")
             self.assertEqual(refused.exception.code, "control_session_required")
 
-            async def command(method, expected, *, data=None, identity=None):
+            async def command(method, expected, *, data=None, identity=None, value=None):
                 args = (data,) if data is not None else ()
                 task = asyncio.create_task(asyncio.to_thread(method, *args))
                 request = await socket.receive_json(timeout=2)
@@ -118,7 +118,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                     await socket.send_json({"identity": identity})
                     updated = await socket.receive_json(timeout=2)
                     self.assertEqual(updated["identity"]["generation"], console.generation)
-                await socket.send_json({"result": request["id"]})
+                await socket.send_json({"result": request["id"], "value": value})
                 return await task
 
             await command(console.write_uart, "uart.write", data=b"status\r\n")
@@ -136,6 +136,16 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                                   identity={"mode": "console", "transport": "usb_uart"})
             self.assertEqual((again.mode, again.generation), ("console", console.generation))
             await command(again.write_uart, "uart.write", data=b"after\n")
+            rom = await command(again.enter_rom, "mode.rom", identity={
+                "mode": "loader", "loader": "rom", "transport": "usb_uart",
+                "chip": "esp32s3", "mac": "10:20:30:40:50:60", "flash_size": None,
+                "return_to_console": True,
+            })
+            jedec = {"flash_id": 0x184068, "flash_size": 16777216}
+            self.assertEqual(await command(rom.read_jedec, "rom.jedec", value=jedec), jedec)
+            activity = await asyncio.to_thread(rom.activity)
+            self.assertEqual(activity["operations"][0]["detail"], jedec)
+            self.assertEqual(activity["device"]["jedec"], jedec)
 
     async def test_truncated_read_is_an_error(self):
         socket = await self.connect()

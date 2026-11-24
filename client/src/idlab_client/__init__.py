@@ -59,10 +59,12 @@ class Board:
         return "console" if self.loader is None else "loader"
 
     def _command(self, command: str, **params) -> "Board":
-        result = self._client._request(_board_path(self.name) + "/command", {
+        return self._client._board(self.name, self._operate(command, **params))
+
+    def _operate(self, command: str, **params) -> dict:
+        return self._client._request(_board_path(self.name) + "/command", {
             "generation": self.generation, "command": command, **params,
         })
-        return self._client._board(self.name, result)
 
     def enter_loader(self) -> "Board":
         """Switch from console to the flash loader on a supported transport."""
@@ -71,6 +73,23 @@ class Board:
     def return_console(self) -> "Board":
         """Return to console if this connection entered the loader from console."""
         return self._command("mode.console")
+
+    def enter_rom(self, *, reset: bool = False) -> "Board":
+        """Open ROM mode. If required, place the device in download mode first."""
+        return self._command("mode.rom", reset=reset)
+
+    def read_jedec(self) -> dict:
+        """Read the flash identifier in ROM mode."""
+        return self._operate("rom.jedec")["result"]
+
+    def identify_live(self) -> "Board":
+        """Measure hardware identity, temporarily entering the loader if needed."""
+        return self._client._board(self.name, self._operate("identify")["result"])
+
+    def activity(self) -> dict:
+        """Read the server journal, progress, and recent operations."""
+        path = _board_path(self.name) + "/activity?" + urlencode({"generation": self.generation})
+        return self._client._request(path)
 
     def reset(self) -> None:
         """Restart the firmware from console mode."""
@@ -104,13 +123,10 @@ class Board:
         maximum = 4 * 1024 * 1024
         if self.flash_size is not None and size > self.flash_size - address:
             raise ValueError("Flash range exceeds the detected capacity")
-        return b"".join(
-            self._client._request(
-                _board_path(self.name) + "/flash/read",
-                {"generation": self.generation, "address": address + offset, "size": min(maximum, size - offset)},
-                expected_bytes=min(maximum, size - offset),
-            )
-            for offset in range(0, size, maximum)
+        return self._client._request(
+            _board_path(self.name) + "/flash/read",
+            {"generation": self.generation, "address": address, "size": size},
+            expected_bytes=size, timeout=self._client._timeout * (1 + (size - 1) // maximum),
         )
 
 
@@ -177,7 +193,7 @@ class IDLabClient:
         except (KeyError, TypeError, ValueError) as error:
             raise IDLabError("Invalid board identity") from error
 
-    def _request(self, path, arguments=None, *, expected_bytes=None):
+    def _request(self, path, arguments=None, *, expected_bytes=None, timeout=None):
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
         body = None
         if arguments is not None:
@@ -185,7 +201,7 @@ class IDLabClient:
             body = json.dumps(arguments).encode("utf-8")
         request = Request(self._base + path, data=body, headers=headers)
         try:
-            with self._opener.open(request, timeout=self._timeout) as response:
+            with self._opener.open(request, timeout=self._timeout if timeout is None else timeout) as response:
                 if expected_bytes is None:
                     return json.load(response)
                 if response.headers.get_content_type() != "application/octet-stream":
