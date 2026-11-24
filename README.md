@@ -32,35 +32,33 @@ Le mode ROM seule donne l'identité sans charger de stub.
 ## Console série
 
 Dans **Cartes actives**, saisir un nom et cliquer sur **Ajouter une carte**.
-Le mode **Automatique** cherche une réponse du chargeur sans demander de
+IDLab cherche automatiquement une réponse du chargeur sans demander de
 reset. Si le chargeur répond, IDLab identifie la puce et prépare la lecture
-flash. Si le chargeur ne répond pas, IDLab ouvre la console, sauf avec
-**Entrée BOOT manuelle**. Le mode **Console seule** ouvre directement le
-port, sans envoyer de trame SYNC.
+flash. Si le chargeur ne répond pas, IDLab ouvre la console au débit UART
+choisi dans les options avancées (115 200 bauds par défaut).
+Quand la carte est connectée en téléchargement, le reset depuis IDLab et
+l’onglet **Consoles** sont indisponibles. Pour retrouver la console,
+déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT,
+puis reconnecte-la depuis la liste des cartes.
 Le panneau Identification reprend les indices du démarrage ESP-IDF visibles
 sur l’UART, dont la puce, la révision et la taille flash configurée.
 **Identifier**, **Relire la table** et **Lire la flash** passent par le
 connecteur de la carte. Sur un pont UART reconnu ou USB Serial/JTAG, elles
 ouvrent le chargeur si nécessaire, puis rétablissent le mode de départ.
 La carte peut redémarrer et la capture UART est suspendue pendant
-l’opération. Pour un port à entrée manuelle, place la carte en mode
-téléchargement et reconnecte-la en **Automatique** avant la lecture.
+l’opération. Si le port exige une entrée manuelle, place la carte en mode
+téléchargement et reconnecte-la avant la lecture.
 L’identité mesurée et la capture restent affichées au retour en console.
-Les options avancées règlent le débit UART, l’ouverture en console seule
-et l’entrée BOOT manuelle. **Opérations → ROM seule** ouvre une session
+**Opérations → ROM seule** ouvre une session
 sans stub sur la carte sélectionnée, affiche son identité et permet une
 lecture du JEDEC. Pendant cette session, **Consoles**, **Partitions**,
 **Plan flash**, **Lecture mémoire** et **Déclencheurs et outils** sont grisés
-pour la carte sélectionnée. Une boîte de dialogue demande confirmation du reset automatique ou
-guide l’entrée manuelle avec BOOT et RESET. Si le navigateur détecte à
+pour la carte sélectionnée. Une boîte de dialogue propose un reset
+automatique depuis une console sur un port compatible. Elle guide
+l’entrée manuelle avec BOOT et RESET dans les autres cas. Si le navigateur détecte à
 nouveau le même port, IDLab tente la connexion automatiquement. La boîte
 se ferme une fois la session ROM confirmée. La tentative manuelle reste
-disponible via **Essayer la connexion**. Avec **Entrée BOOT manuelle**,
-l’onglet **Consoles** est grisé pour cette carte dès son ajout, avec ou
-sans chargeur détecté. Si le chargeur ne répond pas, place la carte en
-téléchargement avec BOOT et RESET, puis reconnecte-la. Pour passer en console,
-déconnecte et retire la carte d’IDLab, redémarre-la sans maintenir BOOT,
-puis ajoute-la en **Console seule**.
+disponible via **Essayer la connexion**.
 
 ## Piloter depuis Python
 

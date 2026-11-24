@@ -3,7 +3,7 @@ import test from 'node:test';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
-function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = false, noLoader = false } = {}) {
+function fixture({ vid = 0x10c4, failRead = false, inDownload = false } = {}) {
   const events = [];
   let identity, socket;
   const bytes = Uint8Array.of(0, 255, 13);
@@ -15,11 +15,11 @@ function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = fal
       getChipDescription: async () => 'ESP32-S3',
     };
     constructor({transport}) { this.transport = transport; }
-    async detectChip(entry) {
+    async detectChip(entry, attempts) {
       events.push('detect:' + entry);
       port.readable = {};
       port.writable = {};
-      if (noLoader) throw new Error('Failed to connect with the device');
+      if (attempts === 1 && !inDownload) throw new Error('Failed to connect with the device');
     }
     async runStub() { this.IS_STUB = true; }
     async readFlashId() { return 0x184068; }
@@ -33,7 +33,7 @@ function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = fal
     async usesUsbOtg() { return vid === 0x303a; }
   }
   const card = new BoardConnector('board', port, {
-    baud: 115200, use, manual, onChange() {}, onCapture() {}, onJournal() {},
+    baud: 115200, onChange() {}, onCapture() {}, onJournal() {},
   }, {
     origin: 'http://127.0.0.1:8080/',
     loadTools: async () => ({
@@ -83,7 +83,7 @@ function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = fal
     },
   });
   port.readable = null;
-  return {card, events};
+  return {card, events, manualReset() { inDownload = false; }};
 }
 
 test('identification and flash reads from console restore the same console and retain identity', async () => {
@@ -99,20 +99,33 @@ test('identification and flash reads from console restore the same console and r
   assert.equal(result.capacity, 16 * 1024 * 1024);
   assert.deepEqual([...new Uint8Array(await result.blob.arrayBuffer())], [0, 255, 13]);
   assert.equal(card.mode, 'console');
-  assert.deepEqual(events, ['console', 'close-console', 'detect:default_reset', 'close-loader', 'console', 'reset',
+  assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console', 'detect:default_reset', 'close-loader', 'console', 'reset',
     'close-console', 'detect:default_reset', 'close-loader', 'console', 'reset']);
   assert.equal(new TextDecoder().decode(card.capture.bytes()), 'READY\nREADY\nREADY\n');
   await card.disconnect();
   assert.equal(card.lastIdentity, null);
 });
 
-test('flash operations reuse an existing loader and do not switch to console', async () => {
-  const {card, events} = fixture({use: 'stub'});
+test('an automatically detected loader stays in download mode through reads and rejects software restart', async () => {
+  const {card, events, manualReset} = fixture({inDownload: true});
   await card.connect();
   await card.identify();
   await card.readFlash(0, 3);
   assert.equal(card.mode, 'loader');
-  assert.deepEqual(events, ['detect:default_reset']);
+  assert.equal(card.consoleUnavailable, true);
+  assert.equal(card.canResetIntoRom, false);
+  await assert.rejects(card.restart(), /Reset indisponible/);
+  assert.deepEqual(events, ['detect:no_reset']);
+  await card.disconnect();
+  await card.connect();
+  assert.equal(card.mode, 'loader');
+  await card.disconnect();
+  manualReset();
+  await card.connect();
+  assert.equal(card.mode, 'console');
+  assert.equal(card.consoleUnavailable, false);
+  assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'detect:no_reset',
+    'close-loader', 'detect:no_reset', 'close-loader', 'console']);
   await card.disconnect();
 });
 
@@ -121,7 +134,8 @@ test('a failed flash read restores console without retrying the read', async () 
   await card.connect();
   await assert.rejects(card.readFlash(0, 3), /read_incomplete/);
   assert.equal(card.mode, 'console');
-  assert.deepEqual(events, ['console', 'close-console', 'detect:default_reset', 'close-loader', 'console', 'reset']);
+  assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console',
+    'detect:default_reset', 'close-loader', 'console', 'reset']);
   await card.disconnect();
 });
 
@@ -131,57 +145,31 @@ test('a manual transport leaves the running console open and requests manual dow
   assert.equal(card.canEnterLoader, false);
   await assert.rejects(card.identify(), /mode téléchargement/);
   assert.equal(card.mode, 'console');
-  assert.deepEqual(events, ['console']);
+  assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console']);
   await card.disconnect();
 });
 
-test('explicit manual BOOT leaves flash operations available in stub mode and blocks console return', async () => {
-  const {card, events} = fixture({use: 'auto', manual: true});
-  assert.equal(card.consoleUnavailable, true);
+test('entering ROM from a loader does not pulse reset and permits JEDEC reads', async () => {
+  const {card, events} = fixture({inDownload: true});
   await card.connect();
   assert.equal(card.identity.loader, 'stub');
-  assert.equal(card.consoleUnavailable, true);
-  await assert.rejects(card.returnConsole(), /Console seule/);
-  assert.equal((await card.readFlash(0, 3)).blob.size, 3);
-  assert.deepEqual(events, ['detect:no_reset']);
-  await card.disconnect();
-  assert.equal(card.consoleUnavailable, true);
-});
-
-test('explicit manual BOOT asks for BOOT and RESET if no loader responds', async () => {
-  const {card, events} = fixture({use: 'auto', manual: true, noLoader: true});
-  await assert.rejects(card.connect(), /Maintiens BOOT, appuie sur RESET/);
-  assert.equal(card.mode, 'disconnected');
-  assert.equal(card.consoleUnavailable, true);
-  assert.deepEqual(events, ['detect:no_reset', 'close-loader']);
-});
-
-test('ROM is an explicit operation that replaces the stub and permits only JEDEC reads', async () => {
-  const {card, events} = fixture({use: 'stub'});
-  await card.connect();
-  assert.equal(card.identity.loader, 'stub');
-  assert.equal((await card.enterRom()).loader, 'rom');
+  assert.equal((await card.enterRom({reset: true})).loader, 'rom');
   assert.deepEqual(card.identity.capabilities, ['identify']);
-  assert.equal(card.consoleUnavailable, false);
+  assert.equal(card.consoleUnavailable, true);
   assert.deepEqual(await card.readRomJedec(), {flash_id: 0x184068, flash_size: 16 * 1024 * 1024});
   await assert.rejects(card.readFlash(0, 3), /Lecture flash indisponible/);
-  await card.returnConsole();
-  assert.equal(card.mode, 'console');
-  assert.deepEqual(events, ['detect:default_reset', 'close-loader', 'detect:default_reset',
-    'close-loader', 'console', 'reset']);
+  await assert.rejects(card.restart(), /Reset indisponible/);
+  assert.equal(card.mode, 'loader');
+  assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'detect:no_reset']);
   await card.disconnect();
 });
 
-test('manual ROM sessions keep the loader open when console return is requested', async () => {
-  for (const options of [{manual: true}, {vid: 0x303a}]) {
-    const {card, events} = fixture(options);
-    assert.equal((await card.enterRom()).loader, 'rom');
-    assert.equal(card.consoleUnavailable, true);
-    await assert.rejects(card.returnConsole(), options.manual ? /Console seule/ : /RESET sans maintenir BOOT/);
-    assert.equal(card.mode, 'loader');
-    assert.equal((await card.readRomJedec()).flash_id, 0x184068);
-    assert.deepEqual(events, ['detect:no_reset']);
-    await card.disconnect();
-    assert.equal(card.consoleUnavailable, Boolean(options.manual));
-  }
+test('the ROM action can request a reset from a console on a supported transport', async () => {
+  const {card, events} = fixture();
+  await card.connect();
+  assert.equal(card.canResetIntoRom, true);
+  assert.equal((await card.enterRom()).loader, 'rom');
+  assert.equal(card.consoleUnavailable, true);
+  assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console', 'detect:default_reset']);
+  await card.disconnect();
 });

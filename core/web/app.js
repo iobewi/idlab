@@ -8,6 +8,7 @@ let adding = false;
 let redrawPending = false;
 const say = message => { $('client-state').textContent = message; };
 const clock = new Intl.DateTimeFormat('fr', { timeStyle: 'medium' });
+const manualConsoleReturn = 'Pour retrouver la console, déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.';
 
 function wireTabs(attribute) {
   const tabs = [...document.querySelectorAll('[' + attribute + ']')];
@@ -178,8 +179,8 @@ function renderIdentification() {
   hint.textContent = card?.mode === 'console'
     ? (info ? 'Mesures conservées du dernier passage en chargeur sur ce port.'
       : card.canEnterLoader ? 'Identifier mesure la flash, la MAC et le RDID via le chargeur.'
-      : 'Pour mesurer l’identité complète, place la carte en téléchargement puis reconnecte-la en mode Automatique.')
-    : (current ? 'Identité lue par le chargeur.' : '');
+      : 'Pour mesurer l’identité complète, place la carte en téléchargement puis reconnecte-la dans IDLab.')
+    : card?.consoleUnavailable ? manualConsoleReturn : (current ? 'Identité lue par le chargeur.' : '');
   hint.hidden = !hint.textContent;
 
 }
@@ -190,11 +191,7 @@ function renderRom(available) {
   const canOpen = card && !card.busy && !card.requesting && !['connecting', 'closing'].includes(card.mode);
   $('open-rom').disabled = !canOpen || active;
   $('rom-jedec').disabled = !available || !active;
-  $('rom-console').hidden = Boolean(card?.consoleUnavailable);
-  $('rom-console').disabled = !available || !active || $('rom-console').hidden;
   $('rom-help').textContent = !card ? 'Ajoute et sélectionne une carte.'
-    : active && card.manual ? 'ROM active en BOOT manuel. Pour utiliser la console, retire la carte d’IDLab après déconnexion, redémarre sans BOOT puis ajoute-la en Console seule.'
-    : active && card.consoleUnavailable ? 'ROM active en BOOT manuel. Pour retrouver la console, déconnecte la carte, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.'
     : active ? 'Session ROM active. Les lectures du contenu flash utilisent le stub standard.'
     : 'Ouvre une session ROM pour identifier la carte ou lire son JEDEC.';
   $('rom-identity').textContent = active
@@ -223,8 +220,8 @@ function render() {
   const romActive = selected?.mode === 'loader' && info?.loader === 'rom';
   const romTab = $('tab-rom');
   const consolesTab = $('workspace-tab-consoles');
-  const manualConsoleUnavailable = Boolean(selected?.consoleUnavailable);
-  if ((romActive || manualConsoleUnavailable) && consolesTab.getAttribute('aria-selected') === 'true') {
+  const consoleUnavailable = Boolean(selected?.consoleUnavailable);
+  if (consoleUnavailable && consolesTab.getAttribute('aria-selected') === 'true') {
     const active = document.activeElement;
     const operationsTab = $('workspace-tab-operations');
     const moveFocus = active === consolesTab || $('workspace-consoles').contains(active);
@@ -232,9 +229,8 @@ function render() {
     if (romActive) romTab.click();
     if (moveFocus) operationsTab.focus();
   }
-  consolesTab.disabled = romActive || manualConsoleUnavailable;
-  consolesTab.title = romActive ? 'Console indisponible pendant la session ROM.'
-    : manualConsoleUnavailable ? 'Console indisponible en BOOT manuel.' : '';
+  consolesTab.disabled = consoleUnavailable;
+  consolesTab.title = consoleUnavailable ? manualConsoleReturn : '';
   for (const id of ['tab-partitions', 'tab-flash', 'tab-memory', 'tab-tools']) {
     const tab = $(id);
     if (romActive && tab.getAttribute('aria-selected') === 'true') {
@@ -259,7 +255,7 @@ function render() {
   flashHint.textContent = selected?.mode === 'connecting' && selected.requesting ? 'Transition console / chargeur…'
     : selected?.mode === 'console' ? (selected.canEnterLoader
       ? 'La lecture passe au chargeur puis revient en console. La carte peut redémarrer.'
-      : 'Place la carte en téléchargement, puis reconnecte-la en mode Automatique.')
+      : 'Place la carte en téléchargement, puis reconnecte-la dans IDLab.')
     : selected?.mode === 'loader' && info?.loader === 'rom' ? 'ROM active. Le stub requis pour cette lecture est indisponible ou désactivé.'
     : selected?.mode === 'loader' && !info?.flash_size ? 'Capacité flash inconnue. Vérifie le RDID et la connexion à la flash.'
     : '';
@@ -267,9 +263,8 @@ function render() {
   const reset = $('reset-device');
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
+  reset.title = consoleUnavailable ? manualConsoleReturn : 'Redémarre la carte depuis la console.';
   $('identify-live').disabled = !(loader || autoLoader);
-  $('return-console').hidden = manualConsoleUnavailable;
-  $('return-console').disabled = !loader || $('return-console').hidden;
   $('enter-loader').disabled = !autoLoader;
   $('send').disabled = !(available && selected.mode === 'console');
   $('mark').disabled = !selected;
@@ -289,9 +284,9 @@ function render() {
   renderJournal();
 }
 
-function addCard(name, port, baud, manual, use) {
+function addCard(name, port, baud) {
   const card = new BoardConnector(name, port, {
-    baud, manual, use,
+    baud,
     onChange: () => {
       render();
       if (card === romTarget && romPortSeen) queueMicrotask(openRomWhenReady);
@@ -306,7 +301,7 @@ function addCard(name, port, baud, manual, use) {
   card.status = element('button', '', 'board-status');
   card.remove = element('button', 'Retirer');
   card.nameButton.onclick = () => { selected = card; render(); };
-  card.status.onclick = () => run(() => card.mode === 'disconnected' ? card.connect() : card.disconnect());
+  card.status.onclick = () => run(() => card.mode === 'disconnected' ? connectCard(card) : card.disconnect());
   card.remove.onclick = () => run(async () => {
     await card.disconnect();
     cards.delete(name);
@@ -329,35 +324,32 @@ async function run(action) {
   }
 }
 
+async function connectCard(card) {
+  await card.connect();
+  if (card !== selected) return;
+  say(card.name + ' connectée.');
+  $(card.mode === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
+  if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
+}
+
 async function addFromPicker() {
   if (adding) return;
   const name = $('add-device-id').value.trim();
   const baud = Number($('connect-baud').value);
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(name)) return say('Saisis un nom de carte valide.');
   if (cards.has(name)) return say('Ce nom est déjà utilisé.');
-  if (!Number.isInteger(baud) || baud < 1200 || baud > 3000000) return say('Débit UART invalide.');
+  if (!baud) return say('Choisis un débit UART.');
   if (!navigator.serial) return say('Web Serial est indisponible dans ce navigateur.');
   adding = $('add-device').disabled = true;
   try {
     const port = await navigator.serial.requestPort();
     if ([...cards.values()].some(card => card.port === port)) return say('Ce port est déjà associé à une carte.');
-    const use = $('connection-mode').value;
-    const card = addCard(name, port, baud, use !== 'console' && $('manual-download').checked, use);
-    await card.connect();
-    say(card.name + ' connectée.');
-    $(card.mode === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
-    if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
+    await connectCard(addCard(name, port, baud));
   } catch (error) { say(error.message); }
   finally { adding = $('add-device').disabled = false; }
 }
 $('add-device').onclick = addFromPicker;
 $('add-device-id').onkeydown = event => { if (event.key === 'Enter') addFromPicker(); };
-$('connection-mode').onchange = () => {
-  const manual = $('manual-download');
-  manual.disabled = $('connection-mode').value === 'console';
-  if (manual.disabled) manual.checked = false;
-};
-$('connection-mode').onchange();
 navigator.serial?.addEventListener('disconnect', event => {
   for (const card of cards.values()) {
     if (event.target === card.port || event.port === card.port) run(() => card.disconnect(true));
@@ -365,10 +357,6 @@ navigator.serial?.addEventListener('disconnect', event => {
 });
 
 $('reset-device').onclick = () => run(() => selected?.restart());
-$('return-console').onclick = () => run(async () => {
-  await selected?.returnConsole();
-  $('workspace-tab-consoles').click();
-});
 $('enter-loader').onclick = () => run(async () => {
   await selected?.enterLoader();
   $('workspace-tab-operations').click();
@@ -379,17 +367,18 @@ const romProgress = $('rom-reset-progress');
 const romConfirm = $('rom-reset-confirm');
 const romCancel = $('rom-reset-cancel');
 let romTarget;
+let romAutomatic = false;
 let romConnecting = false;
 let romPortSeen = false;
 
 $('open-rom').onclick = () => {
   if (!selected || romDialog.open) return;
   romTarget = selected;
-  const automatic = romTarget.canEnterLoader;
+  romAutomatic = romTarget.canResetIntoRom;
   $('rom-reset-device').textContent = 'Carte : ' + romTarget.name;
-  $('rom-reset-auto').hidden = !automatic;
-  $('rom-reset-steps').hidden = automatic;
-  romConfirm.textContent = automatic ? 'Redémarrer en ROM' : 'Essayer la connexion';
+  $('rom-reset-auto').hidden = !romAutomatic;
+  $('rom-reset-steps').hidden = romAutomatic;
+  romConfirm.textContent = romAutomatic ? 'Redémarrer en ROM' : 'Essayer la connexion';
   romProgress.textContent = '';
   romDialog.showModal();
 };
@@ -406,7 +395,7 @@ function openRomWhenReady() {
 }
 
 navigator.serial?.addEventListener('connect', event => {
-  if (!romDialog.open || !matchRomPort(event) || romTarget.canEnterLoader || romConnecting) return;
+  if (!romDialog.open || !matchRomPort(event) || romAutomatic || romConnecting) return;
   romPortSeen = true;
   openRomWhenReady();
 });
@@ -418,7 +407,7 @@ async function tryOpenRom() {
   romConnecting = romConfirm.disabled = romCancel.disabled = true;
   romProgress.textContent = 'Connexion à la ROM…';
   try {
-    const identity = await card.enterRom();
+    const identity = await card.enterRom({reset: romAutomatic});
     if (identity?.loader !== 'rom') throw new Error('La session ROM n’a pas été confirmée.');
     romDialog.close('connected');
     say('Session ROM ouverte sur ' + (identity.model ?? identity.chip) + '.');
@@ -442,7 +431,6 @@ romDialog.onclose = () => {
   romPortSeen = false;
 };
 $('rom-jedec').onclick = () => run(() => selected?.readRomJedec());
-$('rom-console').onclick = () => $('return-console').click();
 $('identify-live').onclick = () => run(async () => {
   const identity = await selected?.identify();
   if (identity) say((identity.model ?? identity.chip) + ' · MAC ' + identity.mac);

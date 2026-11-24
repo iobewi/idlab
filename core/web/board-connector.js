@@ -13,12 +13,12 @@ async function api(path, options) {
 }
 
 export class BoardConnector {
-  constructor(name, port, {baud, manual, use, onChange, onCapture, onJournal}, {
+  constructor(name, port, {baud, onChange, onCapture, onJournal}, {
     request = api, loadTools = () => import('/esptool.js'),
     createSocket = url => new WebSocket(url), openConsole = openSerialConsole, reset = resetConsole,
     origin = location.href,
   } = {}) {
-    Object.assign(this, {name, port, baud, manual, use, onChange, onCapture, onJournal,
+    Object.assign(this, {name, port, baud, onChange, onCapture, onJournal,
       request, loadTools, createSocket, openConsole, reset, origin});
     const info = port.getInfo();
     this.transport = connectionPlan(info, {}).transport;
@@ -27,6 +27,7 @@ export class BoardConnector {
       [info.usbVendorId, info.usbProductId].filter(Number.isInteger)
         .map(value => value.toString(16).padStart(4, '0')).join(':');
     this.mode = 'disconnected';
+    this.temporaryLoader = false;
     this.busy = false;
     this.requesting = false;
     this.lost = false;
@@ -36,11 +37,15 @@ export class BoardConnector {
   }
 
   get canEnterLoader() {
-    return !this.manual && Boolean(this.resetWait);
+    return Boolean(this.resetWait);
+  }
+
+  get canResetIntoRom() {
+    return this.mode === 'console' && this.canEnterLoader;
   }
 
   get consoleUnavailable() {
-    return this.manual || (this.mode === 'loader' && this.identity?.loader === 'rom' && !this.canEnterLoader);
+    return this.mode === 'loader' && !this.temporaryLoader;
   }
 
   #setMode(mode) {
@@ -54,14 +59,8 @@ export class BoardConnector {
     this.#setMode('connecting');
     try {
       if (this.session) await this.#closeSession();
-      if (this.use !== 'console') {
-        await this.#openLoader(this.use);
-        if (this.identity) return;
-      }
-      if (this.manual) {
-        throw new Error('Chargeur non détecté. Maintiens BOOT, appuie sur RESET, relâche BOOT, puis reconnecte la carte.');
-      }
-      await this.#openConsole();
+      await this.#openLoader('auto');
+      if (!this.identity) await this.#openConsole();
     } catch (error) {
       await this.#clearSession();
       throw error;
@@ -88,22 +87,23 @@ export class BoardConnector {
     this.onJournal('Console ouverte à ' + this.baud + ' bauds');
   }
 
-  async #openLoader(use) {
+  async #openLoader(use, {temporary = false, resetToRom = false} = {}) {
     if (this.lost) throw new Error('Port USB déconnecté.');
     const driver = new EspDriver(this.port, await this.loadTools());
     if (this.lost) throw new Error('Port USB déconnecté.');
     this.session = driver;
-    const identity = await driver.connect({auto: use === 'auto', romOnly: use === 'rom', manualEntry: this.manual, resetToRom: use === 'rom'});
+    const identity = await driver.connect({auto: use === 'auto', romOnly: use === 'rom', resetToRom});
     if (this.lost) throw new Error('Port USB déconnecté.');
     if (!identity) {
       await this.#closeSession();
-      if (!this.manual) this.onJournal('Pas de réponse du chargeur sans reset · ouverture console');
+      this.onJournal('Pas de réponse du chargeur sans reset · ouverture console');
       return;
     }
     this.identity = await this.#register(driver);
     this.romJedec = null;
     if (this.lost) throw new Error('Port USB déconnecté.');
     this.lastIdentity = this.identity;
+    this.temporaryLoader = temporary;
     this.#setMode('loader');
     this.onJournal('Chargeur détecté · ' + (identity.model ?? identity.chip));
   }
@@ -241,14 +241,14 @@ export class BoardConnector {
     return this.#exclusive(async () => {
       if (this.mode === 'loader') return operation();
       if (!this.canEnterLoader) {
-        throw new Error('Place la carte en mode téléchargement, puis reconnecte-la en mode Automatique.');
+        throw new Error('Place la carte en mode téléchargement, puis reconnecte-la dans IDLab.');
       }
       this.#setMode('connecting');
       this.onJournal('Passage au chargeur…');
       let result, failure;
       try {
         await this.#closeSession();
-        await this.#openLoader('stub');
+        await this.#openLoader('stub', {temporary: true});
         result = await operation();
       } catch (error) {
         failure = error;
@@ -286,7 +286,7 @@ export class BoardConnector {
   enterLoader() {
     return this.#exclusive(async () => {
       if (this.mode !== 'console') return;
-      if (!this.canEnterLoader) throw new Error('Place la carte en mode téléchargement, puis reconnecte-la en mode Automatique.');
+      if (!this.canEnterLoader) throw new Error('Place la carte en mode téléchargement, puis reconnecte-la dans IDLab.');
       this.#setMode('connecting');
       try {
         await this.#closeSession();
@@ -298,9 +298,10 @@ export class BoardConnector {
     });
   }
 
-  enterRom() {
+  enterRom({reset = this.canResetIntoRom} = {}) {
     return this.#exclusive(async () => {
       if (this.identity?.loader === 'rom') return this.identity;
+      const resetToRom = reset && this.canResetIntoRom;
       const previousMode = this.mode;
       const wasRegistered = Boolean(this.identity);
       this.lost = false;
@@ -309,7 +310,7 @@ export class BoardConnector {
         await this.#closeSession();
         if (wasRegistered) await this.#waitForUnregister();
         if (this.lost) throw new Error('Port USB déconnecté.');
-        await this.#openLoader('rom');
+        await this.#openLoader('rom', {resetToRom});
         return this.identity;
       } catch (error) {
         if (previousMode === 'console' && !this.lost) {
@@ -350,18 +351,6 @@ export class BoardConnector {
       }
       this.romJedec = await this.session.readJedec();
       return this.romJedec;
-    });
-  }
-
-  returnConsole() {
-    return this.#exclusive(async () => {
-      if (this.mode !== 'loader') return;
-      if (this.consoleUnavailable) {
-        if (this.manual) throw new Error('Pour utiliser la console, redémarre sans BOOT puis ajoute la carte en Console seule.');
-        throw new Error('Déconnecte la carte, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.');
-      }
-      try { await this.#resumeConsole(); }
-      catch (error) { await this.#clearSession(); throw error; }
     });
   }
 
