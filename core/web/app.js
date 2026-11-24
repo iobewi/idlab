@@ -109,12 +109,15 @@ function element(tag, content, cls) {
 
 async function observeCard(card) {
   const generation = card.identity?.generation;
-  if (!generation || card.polling) return;
-  card.polling = true;
+  if (!generation || card.mode === 'connecting' || card.polling) return;
+  const poll = new AbortController();
+  card.polling = poll;
   try {
     const path = '/api/v1/devices/' + card.name;
     const load = async (route, query = '') => {
-      const response = await fetch(path + '/' + route + '?generation=' + generation + query);
+      const response = await fetch(path + '/' + route + '?generation=' + generation + query, {
+        signal: poll.signal,
+      });
       if (!response.ok) return null;
       return response.json();
     };
@@ -128,7 +131,7 @@ async function observeCard(card) {
     const requests = [load('activity')];
     if (card === selected) requests.push(load('uart', '&cursor=' + card.uartCursor));
     const [activity, uart] = await Promise.all(requests);
-    if (card.identity?.generation !== generation || !activity) return;
+    if (poll.signal.aborted || card.identity?.generation !== generation || !activity) return;
     const previous = card.observation;
     const controlChanged = previous?.device.control !== activity.device.control ||
       previous?.external_control !== activity.external_control;
@@ -158,7 +161,7 @@ async function observeCard(card) {
   } catch {
     // A disappearing generation or a transient HTTP failure is retried on the next poll.
   } finally {
-    card.polling = false;
+    card.polling = null;
   }
 }
 setInterval(() => { for (const card of cards.values()) void observeCard(card); }, 500);
@@ -458,6 +461,7 @@ function addCard(name, port, flashBaud) {
     campaignId: () => activeCampaignId,
     onLinkLost: () => say('Liaison perdue avec « ' + name + ' ».'),
     onChange: () => {
+      if (card.mode === 'connecting') card.polling?.abort();
       if (!card.identity) card.observation = null;
       render();
       if (card === romTarget && romPortSeen) queueMicrotask(openRomWhenReady);
