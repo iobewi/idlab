@@ -36,13 +36,18 @@ if ($deploy) {
 
 $base = 'http://127.0.0.1:8080/api/v1/httpd'
 $headers = @{ Authorization = "Bearer $token" }
+$startupTransportErrors = @(
+    'ConnectFailure', 'ReceiveFailure', 'SendFailure', 'ConnectionClosed', 'KeepAliveFailure', 'Timeout'
+)
 
 function Get-IdlabStatus {
-    Invoke-RestMethod -UseBasicParsing -MaximumRedirection 0 -Method Get -Uri "$base/status" -Headers $headers -TimeoutSec 3
+    Invoke-RestMethod -UseBasicParsing -DisableKeepAlive -MaximumRedirection 0 -Method Get -Uri "$base/status" -Headers $headers -TimeoutSec 3
 }
 
 function Wait-IdlabStatus([bool]$RequireReady) {
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $status = $null
+    $lastTransportError = $null
     do {
         try {
             $status = Get-IdlabStatus
@@ -50,14 +55,16 @@ function Wait-IdlabStatus([bool]$RequireReady) {
                 return $status
             }
         } catch [System.Net.WebException] {
-            if ($_.Exception.Status -ne [System.Net.WebExceptionStatus]::ConnectFailure -or
-                [DateTime]::UtcNow -ge $deadline) { throw }
+            if ($_.Exception.Response -or $_.Exception.Status.ToString() -notin $startupTransportErrors) { throw }
+            $lastTransportError = $_.Exception.Status
         }
-        Start-Sleep -Milliseconds 300
+        if ([DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 300
+        }
     } while ([DateTime]::UtcNow -lt $deadline)
 
     if (-not $status) {
-        throw 'The IDLab manager did not respond on 127.0.0.1:8080. Check the port mapping and core logs in Docker Desktop.'
+        throw "The IDLab manager did not respond on 127.0.0.1:8080 (last transport error: $lastTransportError). Check the port mapping and core logs in Docker Desktop."
     }
     return $status
 }
@@ -70,7 +77,7 @@ try {
     if ($Action -eq 'reload') { $command = 'start' }
 
     if ($command -in @('start', 'stop', 'restart')) {
-        Invoke-RestMethod -UseBasicParsing -MaximumRedirection 0 -Method Post -Uri "$base/$command" -Headers $headers -TimeoutSec 15 | Out-Null
+        Invoke-RestMethod -UseBasicParsing -DisableKeepAlive -MaximumRedirection 0 -Method Post -Uri "$base/$command" -Headers $headers -TimeoutSec 15 | Out-Null
     }
 
     if ($command -in @('start', 'restart')) {
