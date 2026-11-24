@@ -102,16 +102,63 @@ function scheduleConsole(card) {
   requestAnimationFrame(() => { redrawPending = false; renderIdentification(); renderConsole(); });
 }
 
-function renderOperations() {
-  const entries = selected?.operations ?? [];
-  $('operations-body').replaceChildren(...entries.map(entry => {
-    const tr = element('tr');
-    for (const value of [entry.id, selected.name, 'Lecture flash', entry.state, entry.duration, entry.detail]) {
-      tr.append(element('td', value ?? '—'));
+function operationDetails(entry) {
+  const proof = JSON.stringify(entry, null, 2);
+  const row = element('tr', undefined, 'operation-detail-row');
+  row.id = 'operation-detail-' + entry.id;
+  const cell = element('td');
+  cell.colSpan = 6;
+  const panel = element('div', undefined, 'operation-proof-panel');
+  const toolbar = element('div', undefined, 'operation-proof-toolbar');
+  const actions = element('div', undefined, 'operation-proof-actions');
+  const copy = element('button', 'Copier le JSON');
+  copy.onclick = () => run(async () => {
+    await navigator.clipboard.writeText(proof);
+    say('JSON de l’opération copié.');
+  });
+  const save = element('button', 'Télécharger le JSON');
+  save.onclick = () => download(new Blob([proof + '\n'], {type: 'application/json'}),
+    'idlab-' + entry.device + '-operation-' + entry.id + '.json');
+  actions.append(copy, save);
+  toolbar.append(element('span', 'Détail de l’opération'), actions);
+  panel.append(toolbar, element('pre', proof, 'operation-detail-json result'));
+  cell.append(panel);
+  row.append(cell);
+  return row;
+}
+
+function renderOperationHistory() {
+  const card = selected;
+  const entries = card?.operations ?? [];
+  const body = $('operations-body');
+  $('empty-operations').hidden = entries.length !== 0;
+  body.replaceChildren();
+  for (const entry of entries) {
+    const row = element('tr');
+    for (const value of [entry.id, entry.device, 'Lecture flash', entry.state, entry.duration]) {
+      row.append(element('td', value ?? '—'));
     }
-    return tr;
-  }));
-  $('result').textContent = entries.length ? JSON.stringify(entries[0], null, 2) : '{}';
+    const expanded = card.inspectedOperation === entry;
+    const cell = element('td');
+    const inspect = element('button', expanded ? 'Masquer' : 'Inspecter');
+    inspect.id = 'inspect-operation-' + entry.id;
+    inspect.setAttribute('aria-expanded', expanded);
+    inspect.setAttribute('aria-label', inspect.textContent + ' l’opération ' + entry.id);
+    if (expanded) inspect.setAttribute('aria-controls', 'operation-detail-' + entry.id);
+    inspect.onclick = () => {
+      card.inspectedOperation = expanded ? null : entry;
+      renderOperationHistory();
+      $(inspect.id).focus({preventScroll: true});
+    };
+    cell.append(inspect);
+    row.append(cell);
+    body.append(row);
+    if (expanded) body.append(operationDetails(entry));
+  }
+}
+
+function renderOperations() {
+  renderOperationHistory();
   $('dump-state').textContent = selected?.dump?.summary ?? 'Aucune relecture.';
   $('hex-dump').textContent = selected?.dump?.preview ?? 'Aucune donnée lue.';
   const link = $('download');
@@ -475,19 +522,25 @@ $('read').onclick = async () => {
   const card = selected;
   if (!card || card.busy || card.requesting || $('read').disabled) return;
   const started = Date.now();
-  const entry = {id: card.operations.length + 1, state: 'En cours'};
+  const entry = {
+    id: card.operations.length + 1, device: card.name, command: 'flash.read',
+    state: 'En cours', startedAt: new Date(started).toISOString(),
+  };
   card.operations.unshift(entry);
   $('read').disabled = true;
   renderOperations();
   try {
     const address = flashNumber($('address').value.trim());
     const size = flashNumber($('size').value.trim());
+    Object.assign(entry, {address, size});
     const {blob} = await card.readFlash(address, size);
     const preview = new Uint8Array(await blob.slice(0, 256).arrayBuffer());
     card.dump = {blob, filename: card.name + '-0x' + address.toString(16) + '.bin',
       summary: blob.size + ' octets lus • aperçu des ' + preview.length + ' premiers octets',
       preview: Array.from(preview, byte => byte.toString(16).padStart(2, '0')).join(' ')};
     entry.state = 'Terminée';
+    entry.bytesRead = blob.size;
+    entry.preview = card.dump.preview;
     entry.detail = card.dump.summary;
     say(entry.detail);
   } catch (error) {

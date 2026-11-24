@@ -50,6 +50,10 @@ La carte peut redémarrer et la capture UART est suspendue pendant
 l’opération. Si le port exige une entrée manuelle, place la carte en mode
 téléchargement et reconnecte-la avant la lecture.
 L’identité mesurée et la capture restent affichées au retour en console.
+Dans **Opérations → Historique des opérations**, le bouton **Inspecter**
+rouvre le résultat d’une lecture flash de la carte sélectionnée. Le détail
+peut être copié ou téléchargé en JSON. L’historique est conservé tant que
+la page reste ouverte et que la carte reste dans la liste.
 **Opérations → ROM seule** ouvre une session
 sans stub sur la carte sélectionnée, affiche son identité et permet une
 lecture du JEDEC. Pendant cette session, **Consoles**, **Partitions**,
