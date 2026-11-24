@@ -208,7 +208,9 @@ function renderRom(available) {
 
 function render() {
   for (const card of cards.values()) {
-    card.nameButton.setAttribute('aria-pressed', card === selected);
+    const active = card === selected;
+    card.row.dataset.selected = active;
+    card.nameButton.setAttribute('aria-pressed', active);
     card.status.textContent = {connecting: 'Connexion…', console: 'Connectée', loader: 'Connectée',
       closing: 'Déconnexion…', disconnected: 'Déconnectée'}[card.mode];
     card.status.dataset.state = {console: 'connected', loader: 'connected'}[card.mode] ?? card.mode;
@@ -284,6 +286,7 @@ function addCard(name, port, baud, manual, use) {
   });
   Object.assign(card, {follow: true, pausedAt: null, operations: [], journal: []});
   const row = element('div', undefined, 'active-board');
+  card.row = row;
   card.nameButton = element('button', name, 'board-name');
   card.status = element('button', '', 'board-status');
   card.remove = element('button', 'Retirer');
