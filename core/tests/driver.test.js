@@ -36,9 +36,11 @@ test('ROM identifies without launching a stub; production reads use one reader',
     async usesUsbOtg() { return true; }
     async runStub() { this.IS_STUB = true; }
     async readFlashId() { return 0x1940c8; }
-    async readFlash(address, size, check) {
-      check();
-      return new Uint8Array(size).fill(address ? 2 : 1);
+    async readFlash(address, size, onPacket) {
+      const block = new Uint8Array(size).fill(address ? 2 : 1);
+      onPacket(block.subarray(0, 1), 1);
+      if (size > 1) onPacket(block.subarray(1), size);
+      return block;
     }
   }
 
@@ -53,7 +55,9 @@ test('ROM identifies without launching a stub; production reads use one reader',
   const loaded = await stub.connect({});
   assert.equal(loaded.loader, 'stub');
   assert.equal(loaded.transport, 'usb_otg');
-  const bytes = await stub.readFlash(0, 1048577, () => {});
+  const progress = [];
+  const bytes = await stub.readFlash(0, 1048577, () => {}, received => progress.push(received));
+  assert.deepEqual(progress, [1, 1048576, 1048577]);
   assert.equal(bytes[0], 1);
   assert.equal(bytes.at(-1), 2);
   await assert.rejects(stub.readFlash(0, 1, () => { throw new Error('closed'); }), /closed/);

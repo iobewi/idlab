@@ -72,7 +72,26 @@ function note(card, message) {
 }
 
 function renderJournal() {
-  $('agent-log').replaceChildren(...(selected?.journal ?? []).map(line => element('p', line, 'padded')));
+  const log = $('agent-log');
+  const follow = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
+  $('agent-log-entries').replaceChildren(...(selected?.journal ?? []).map(line => element('p', line, 'journal-row')));
+  renderFlashProgress();
+  if (follow) log.scrollTop = log.scrollHeight;
+}
+
+function renderFlashProgress() {
+  const line = $('agent-read-progress');
+  const log = $('agent-log');
+  const follow = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
+  const progress = selected?.flashProgress;
+  line.hidden = !progress;
+  if (progress) {
+    const {address, received, total} = progress;
+    line.textContent = 'Lecture flash à 0x' + address.toString(16) + ' · ' +
+      number.format(received) + ' / ' + number.format(total) + ' octets · ' +
+      Math.floor(received * 100 / total) + ' %';
+  }
+  if (follow) log.scrollTop = log.scrollHeight;
 }
 
 function renderConsole() {
@@ -344,6 +363,7 @@ function addCard(name, port, flashBaud) {
     },
     onCapture: () => scheduleConsole(card),
     onJournal: message => note(card, message),
+    onProgress: () => { if (card === selected) renderFlashProgress(); },
   });
   Object.assign(card, {follow: true, pausedAt: null, operations: [], journal: []});
   const row = element('div', undefined, 'active-board');

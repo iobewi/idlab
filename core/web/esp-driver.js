@@ -107,7 +107,7 @@ export class EspDriver {
     };
   }
 
-  async readFlash(address, size, checkSession) {
+  async readFlash(address, size, checkSession, onProgress = () => {}) {
     const capacity = this.identity?.flash_size;
     if (!capacity || !this.loader.IS_STUB) throw new Error('operation_unsupported');
     if (!Number.isSafeInteger(address) || !Number.isSafeInteger(size) ||
@@ -119,7 +119,10 @@ export class EspDriver {
       checkSession();
       // Keep the standard reader's cumulative copies bounded to one block.
       const length = Math.min(FLASH_BLOCK, size - offset);
-      const block = await this.loader.readFlash(address + offset, length, checkSession);
+      const block = await this.loader.readFlash(address + offset, length, (_packet, received) => {
+        checkSession();
+        onProgress(offset + received);
+      });
       if (block.length !== length) throw new Error('incomplete_flash_read');
       data.set(block, offset);
     }

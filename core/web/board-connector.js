@@ -15,12 +15,12 @@ async function api(path, options) {
 }
 
 export class BoardConnector {
-  constructor(name, port, {flashBaud = ESP_SYNC_BAUD, onChange, onCapture, onJournal}, {
+  constructor(name, port, {flashBaud = ESP_SYNC_BAUD, onChange, onCapture, onJournal, onProgress = () => {}}, {
     request = api, loadTools = () => import('/esptool.js'),
     createSocket = url => new WebSocket(url), openConsole = openSerialConsole, reset = resetConsole,
     origin = location.href,
   } = {}) {
-    Object.assign(this, {name, port, flashBaud, onChange, onCapture, onJournal,
+    Object.assign(this, {name, port, flashBaud, onChange, onCapture, onJournal, onProgress,
       request, loadTools, createSocket, openConsole, reset, origin});
     const info = port.getInfo();
     this.transport = connectionPlan(info, {}).transport;
@@ -173,18 +173,28 @@ export class BoardConnector {
     try {
       check();
       if (command.command !== 'flash.read') throw new Error('operation_unsupported');
-      this.onJournal('Lecture flash en cours');
       const started = performance.now();
-      const data = await driver.readFlash(command.address, command.size, check);
+      let lastUpdate = started;
+      this.flashProgress = {address: command.address, received: 0, total: command.size};
+      this.onProgress();
+      const data = await driver.readFlash(command.address, command.size, check, received => {
+        const now = performance.now();
+        if (received < command.size && now - lastUpdate < 250) return;
+        lastUpdate = now;
+        this.flashProgress.received = received;
+        this.onProgress();
+      });
       const elapsed = Math.max(1, performance.now() - started);
       check();
       socket.send(data);
       if (data.length === command.size) this.flashReadRate = data.length * 1000 / elapsed;
-      this.onJournal('Lecture flash terminée');
+      this.onJournal('Lecture flash terminée · ' + command.size + ' octets');
     } catch (error) {
       if (socket.readyState === 1) socket.send(command.id);
       this.onJournal(error.message);
     } finally {
+      this.flashProgress = null;
+      this.onProgress();
       this.busy = false;
       if (!this.requesting && (this.lost || socket.readyState !== 1)) await this.disconnect();
       this.onChange();

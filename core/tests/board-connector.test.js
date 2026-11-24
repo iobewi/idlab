@@ -7,6 +7,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
   readBlock, shortResponseAt } = {}) {
   const events = [];
   const reads = [];
+  const progress = [];
   let identity, socket, responseBytes;
   let deviceBaud = 115200;
   const bytes = Uint8Array.of(0, 255, 13);
@@ -41,18 +42,19 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
     }
     async isResponsive() { return !failBaud && this.transport.baudrate === deviceBaud; }
     async readFlashId() { return 0x184068; }
-    async readFlash(address, size, check) {
-      check();
+    async readFlash(address, size, onPacket) {
       if (failRead) throw new Error('error during read');
-      if (readBlock) return readBlock(address, size);
-      assert.equal(size, bytes.length);
-      return bytes;
+      const block = readBlock ? readBlock(address, size) : bytes;
+      assert.equal(size, block.length);
+      onPacket(block, block.length);
+      return block;
     }
     async openAndSync() {}
     async usesUsbOtg() { return vid === 0x303a; }
   }
   const card = new BoardConnector('board', port, {
     flashBaud, onChange() {}, onCapture() {}, onJournal() {},
+    onProgress() { progress.push(card.flashProgress && {...card.flashProgress}); },
   }, {
     origin: 'http://127.0.0.1:8080/',
     loadTools: async () => ({
@@ -112,7 +114,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
     },
   });
   port.readable = null;
-  return {card, events, reads, manualReset() { inDownload = false; deviceBaud = 115200; }};
+  return {card, events, reads, progress, manualReset() { inDownload = false; deviceBaud = 115200; }};
 }
 
 test('identification and flash reads from console restore the same console and retain identity', async () => {
@@ -158,10 +160,11 @@ test('an automatically detected loader stays in download mode through reads and 
   await card.disconnect();
 });
 
-test('a failed flash read restores console without retrying the read', async () => {
-  const {card, events} = fixture({failRead: true});
+test('a failed flash read clears progress and restores console without retrying the read', async () => {
+  const {card, events, progress} = fixture({failRead: true});
   await card.connect();
   await assert.rejects(card.readFlash(0, 3), /read_incomplete/);
+  assert.deepEqual(progress, [{address: 0, received: 0, total: 3}, null]);
   assert.equal(card.mode, 'console');
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console',
     'detect:default_reset', 'close-loader', 'console', 'reset']);
@@ -172,7 +175,7 @@ test('reads the complete factory partition in ordered chunks on one loader sessi
   const mib = 1024 * 1024;
   const factory = 0x10000;
   const size = 0xfa0000;
-  const {card, events, reads} = fixture({
+  const {card, events, reads, progress} = fixture({
     readBlock: (address, length) => new Uint8Array(length).fill((address - factory) / mib + 1),
   });
   await card.connect();
@@ -181,6 +184,11 @@ test('reads the complete factory partition in ordered chunks on one loader sessi
   assert.deepEqual(reads, [0, 4, 8, 12].map(offset => ({
     generation: 'generation', address: factory + offset * mib, size: Math.min(4 * mib, size - offset * mib),
   })));
+  for (const {address, size} of reads) {
+    assert.ok(progress.some(item => item?.address === address && item.received === 0));
+    assert.ok(progress.some(item => item?.address === address && item.received === size));
+  }
+  assert.equal(progress.at(-1), null);
   for (let offset = 0; offset < size; offset += mib) {
     const byte = new Uint8Array(await blob.slice(offset, offset + 1).arrayBuffer());
     assert.equal(byte[0], offset / mib + 1);
