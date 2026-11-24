@@ -39,8 +39,8 @@ export class BoardConnector {
     return !this.manual && Boolean(this.resetWait);
   }
 
-  get romRequiresManualReturn() {
-    return this.mode === 'loader' && this.identity?.loader === 'rom' && !this.canEnterLoader;
+  get consoleUnavailable() {
+    return this.manual || (this.mode === 'loader' && this.identity?.loader === 'rom' && !this.canEnterLoader);
   }
 
   #setMode(mode) {
@@ -57,6 +57,9 @@ export class BoardConnector {
       if (this.use !== 'console') {
         await this.#openLoader(this.use);
         if (this.identity) return;
+      }
+      if (this.manual) {
+        throw new Error('Chargeur non détecté. Maintiens BOOT, appuie sur RESET, relâche BOOT, puis reconnecte la carte.');
       }
       await this.#openConsole();
     } catch (error) {
@@ -94,7 +97,7 @@ export class BoardConnector {
     if (this.lost) throw new Error('Port USB déconnecté.');
     if (!identity) {
       await this.#closeSession();
-      this.onJournal('Pas de réponse du chargeur sans reset · ouverture console');
+      if (!this.manual) this.onJournal('Pas de réponse du chargeur sans reset · ouverture console');
       return;
     }
     this.identity = await this.#register(driver);
@@ -353,7 +356,8 @@ export class BoardConnector {
   returnConsole() {
     return this.#exclusive(async () => {
       if (this.mode !== 'loader') return;
-      if (this.romRequiresManualReturn) {
+      if (this.consoleUnavailable) {
+        if (this.manual) throw new Error('Pour utiliser la console, redémarre sans BOOT puis ajoute la carte en Console seule.');
         throw new Error('Déconnecte la carte, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.');
       }
       try { await this.#resumeConsole(); }

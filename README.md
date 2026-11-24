@@ -34,8 +34,9 @@ Le mode ROM seule donne l'identité sans charger de stub.
 Dans **Cartes actives**, saisir un nom et cliquer sur **Ajouter une carte**.
 Le mode **Automatique** cherche une réponse du chargeur sans demander de
 reset. Si le chargeur répond, IDLab identifie la puce et prépare la lecture
-flash. Si le chargeur ne répond pas, IDLab ouvre la console. Le mode
-**Console série** ouvre directement le port, sans envoyer de trame SYNC.
+flash. Si le chargeur ne répond pas, IDLab ouvre la console, sauf avec
+**Entrée BOOT manuelle**. Le mode **Console seule** ouvre directement le
+port, sans envoyer de trame SYNC.
 Le panneau Identification reprend les indices du démarrage ESP-IDF visibles
 sur l’UART, dont la puce, la révision et la taille flash configurée.
 **Identifier**, **Relire la table** et **Lire la flash** passent par le
@@ -52,10 +53,12 @@ lecture du JEDEC. Une boîte de dialogue demande confirmation du reset automatiq
 guide l’entrée manuelle avec BOOT et RESET. Si le navigateur détecte à
 nouveau le même port, IDLab tente la connexion automatiquement. La boîte
 se ferme une fois la session ROM confirmée. La tentative manuelle reste
-disponible via **Essayer la connexion**. En ROM avec entrée manuelle,
-l’onglet **Consoles** est grisé pour cette carte et la capture est
-conservée. Le retour console passe par une déconnexion et un RESET sans
-maintenir BOOT, puis une reconnexion.
+disponible via **Essayer la connexion**. Avec **Entrée BOOT manuelle**,
+l’onglet **Consoles** est grisé pour cette carte dès son ajout, avec ou
+sans chargeur détecté. Si le chargeur ne répond pas, place la carte en
+téléchargement avec BOOT et RESET, puis reconnecte-la. Pour passer en console,
+déconnecte et retire la carte d’IDLab, redémarre-la sans maintenir BOOT,
+puis ajoute-la en **Console seule**.
 
 ## Piloter depuis Python
 

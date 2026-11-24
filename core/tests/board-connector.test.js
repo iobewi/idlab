@@ -3,7 +3,7 @@ import test from 'node:test';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
-function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = false } = {}) {
+function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = false, noLoader = false } = {}) {
   const events = [];
   let identity, socket;
   const bytes = Uint8Array.of(0, 255, 13);
@@ -18,6 +18,8 @@ function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = fal
     async detectChip(entry) {
       events.push('detect:' + entry);
       port.readable = {};
+      port.writable = {};
+      if (noLoader) throw new Error('Failed to connect with the device');
     }
     async runStub() { this.IS_STUB = true; }
     async readFlashId() { return 0x184068; }
@@ -38,7 +40,7 @@ function fixture({ use = 'console', vid = 0x10c4, manual = false, failRead = fal
       ...upstream,
       ESPLoader: Loader,
       Transport: class extends upstream.Transport {
-        async disconnect() { events.push('close-loader'); port.readable = null; }
+        async disconnect() { events.push('close-loader'); port.readable = port.writable = null; }
       },
     }),
     async openConsole(_port, _baud, _text, onBytes) {
@@ -124,7 +126,7 @@ test('a failed flash read restores console without retrying the read', async () 
 });
 
 test('a manual transport leaves the running console open and requests manual download mode', async () => {
-  const {card, events} = fixture({manual: true});
+  const {card, events} = fixture({vid: 0x303a});
   await card.connect();
   assert.equal(card.canEnterLoader, false);
   await assert.rejects(card.identify(), /mode téléchargement/);
@@ -133,13 +135,34 @@ test('a manual transport leaves the running console open and requests manual dow
   await card.disconnect();
 });
 
+test('explicit manual BOOT leaves flash operations available in stub mode and blocks console return', async () => {
+  const {card, events} = fixture({use: 'auto', manual: true});
+  assert.equal(card.consoleUnavailable, true);
+  await card.connect();
+  assert.equal(card.identity.loader, 'stub');
+  assert.equal(card.consoleUnavailable, true);
+  await assert.rejects(card.returnConsole(), /Console seule/);
+  assert.equal((await card.readFlash(0, 3)).blob.size, 3);
+  assert.deepEqual(events, ['detect:no_reset']);
+  await card.disconnect();
+  assert.equal(card.consoleUnavailable, true);
+});
+
+test('explicit manual BOOT asks for BOOT and RESET if no loader responds', async () => {
+  const {card, events} = fixture({use: 'auto', manual: true, noLoader: true});
+  await assert.rejects(card.connect(), /Maintiens BOOT, appuie sur RESET/);
+  assert.equal(card.mode, 'disconnected');
+  assert.equal(card.consoleUnavailable, true);
+  assert.deepEqual(events, ['detect:no_reset', 'close-loader']);
+});
+
 test('ROM is an explicit operation that replaces the stub and permits only JEDEC reads', async () => {
   const {card, events} = fixture({use: 'stub'});
   await card.connect();
   assert.equal(card.identity.loader, 'stub');
   assert.equal((await card.enterRom()).loader, 'rom');
   assert.deepEqual(card.identity.capabilities, ['identify']);
-  assert.equal(card.romRequiresManualReturn, false);
+  assert.equal(card.consoleUnavailable, false);
   assert.deepEqual(await card.readRomJedec(), {flash_id: 0x184068, flash_size: 16 * 1024 * 1024});
   await assert.rejects(card.readFlash(0, 3), /Lecture flash indisponible/);
   await card.returnConsole();
@@ -153,12 +176,12 @@ test('manual ROM sessions keep the loader open when console return is requested'
   for (const options of [{manual: true}, {vid: 0x303a}]) {
     const {card, events} = fixture(options);
     assert.equal((await card.enterRom()).loader, 'rom');
-    assert.equal(card.romRequiresManualReturn, true);
-    await assert.rejects(card.returnConsole(), /RESET sans maintenir BOOT/);
+    assert.equal(card.consoleUnavailable, true);
+    await assert.rejects(card.returnConsole(), options.manual ? /Console seule/ : /RESET sans maintenir BOOT/);
     assert.equal(card.mode, 'loader');
     assert.equal((await card.readRomJedec()).flash_id, 0x184068);
     assert.deepEqual(events, ['detect:no_reset']);
     await card.disconnect();
-    assert.equal(card.romRequiresManualReturn, false);
+    assert.equal(card.consoleUnavailable, Boolean(options.manual));
   }
 });

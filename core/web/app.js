@@ -190,10 +190,11 @@ function renderRom(available) {
   const canOpen = card && !card.busy && !card.requesting && !['connecting', 'closing'].includes(card.mode);
   $('open-rom').disabled = !canOpen || active;
   $('rom-jedec').disabled = !available || !active;
-  $('rom-console').hidden = Boolean(card?.romRequiresManualReturn);
+  $('rom-console').hidden = Boolean(card?.consoleUnavailable);
   $('rom-console').disabled = !available || !active || $('rom-console').hidden;
   $('rom-help').textContent = !card ? 'Ajoute et sélectionne une carte.'
-    : card.romRequiresManualReturn ? 'ROM active en BOOT manuel. Pour retrouver la console, déconnecte la carte, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.'
+    : active && card.manual ? 'ROM active en BOOT manuel. Pour utiliser la console, retire la carte d’IDLab après déconnexion, redémarre sans BOOT puis ajoute-la en Console seule.'
+    : active && card.consoleUnavailable ? 'ROM active en BOOT manuel. Pour retrouver la console, déconnecte la carte, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.'
     : active ? 'Session ROM active. Les lectures du contenu flash utilisent le stub standard.'
     : 'Ouvre une session ROM pour identifier la carte ou lire son JEDEC.';
   $('rom-identity').textContent = active
@@ -217,17 +218,17 @@ function render() {
   $('empty-cards').hidden = cards.size !== 0;
   $('card-details').hidden = !selected;
   const consolesTab = $('workspace-tab-consoles');
-  const manualRom = Boolean(selected?.romRequiresManualReturn);
-  if (manualRom && consolesTab.getAttribute('aria-selected') === 'true') {
+  const consoleUnavailable = Boolean(selected?.consoleUnavailable);
+  if (consoleUnavailable && consolesTab.getAttribute('aria-selected') === 'true') {
     const active = document.activeElement;
     const operationsTab = $('workspace-tab-operations');
     const moveFocus = active === consolesTab || $('workspace-consoles').contains(active);
     operationsTab.click();
-    $('tab-rom').click();
+    if (selected.identity?.loader === 'rom') $('tab-rom').click();
     if (moveFocus) operationsTab.focus();
   }
-  consolesTab.disabled = manualRom;
-  consolesTab.title = manualRom ? 'Console indisponible pendant la session ROM en BOOT manuel.' : '';
+  consolesTab.disabled = consoleUnavailable;
+  consolesTab.title = consoleUnavailable ? 'Console indisponible en BOOT manuel.' : '';
   renderIdentification();
   const info = selected?.identity;
   const available = selected && !selected.busy && !selected.requesting;
@@ -250,7 +251,7 @@ function render() {
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
   $('identify-live').disabled = !(loader || autoLoader);
-  $('return-console').hidden = manualRom;
+  $('return-console').hidden = consoleUnavailable;
   $('return-console').disabled = !loader || $('return-console').hidden;
   $('enter-loader').disabled = !autoLoader;
   $('send').disabled = !(available && selected.mode === 'console');
@@ -323,7 +324,7 @@ async function addFromPicker() {
     const port = await navigator.serial.requestPort();
     if ([...cards.values()].some(card => card.port === port)) return say('Ce port est déjà associé à une carte.');
     const use = $('connection-mode').value;
-    const card = addCard(name, port, baud, $('manual-download').checked, use);
+    const card = addCard(name, port, baud, use !== 'console' && $('manual-download').checked, use);
     await card.connect();
     say(card.name + ' connectée.');
     $(card.mode === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
@@ -333,6 +334,12 @@ async function addFromPicker() {
 }
 $('add-device').onclick = addFromPicker;
 $('add-device-id').onkeydown = event => { if (event.key === 'Enter') addFromPicker(); };
+$('connection-mode').onchange = () => {
+  const manual = $('manual-download');
+  manual.disabled = $('connection-mode').value === 'console';
+  if (manual.disabled) manual.checked = false;
+};
+$('connection-mode').onchange();
 navigator.serial?.addEventListener('disconnect', event => {
   for (const card of cards.values()) {
     if (event.target === card.port || event.port === card.port) run(() => card.disconnect(true));
