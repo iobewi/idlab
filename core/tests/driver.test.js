@@ -24,6 +24,19 @@ test('packs split serial chunks without dropping a buffered packet', async () =>
   assert.deepEqual(await transport.read(100), Uint8Array.of(26));
 });
 
+test('a ROM boot banner does not discard the first synchronization response', async () => {
+  const Transport = serialTransport(upstream.Transport, upstream.ESPError);
+  const transport = new Transport({ getInfo: () => ({}) });
+  const loader = new upstream.ESPLoader({ transport, baudrate: 115200 });
+  const banner = new TextEncoder().encode('ESP-ROM:esp32\r\nwaiting for download\r\n');
+  transport.buffer = Uint8Array.of(...banner, 0xc0, 0xc0, 1, 8, 0, 0, 7, 0, 0, 0, 0xc0);
+  const [value, data] = await loader.readPacket(8, 100);
+  assert.equal(value, 7);
+  assert.equal(data.length, 0);
+  transport.buffer = banner;
+  await assert.rejects(transport.read(5), /serial_timeout/);
+});
+
 test('ROM identifies without launching a stub; production reads use one reader', async () => {
   const port = { getInfo: () => ({ usbVendorId: 0x303a, usbProductId: 18 }) };
   class FakeLoader {
@@ -105,6 +118,30 @@ test('automatic connection falls back only when no downloader answered', async (
   assert.equal(await silent.connect({auto: true}), null);
   const known = new EspDriver(port, {...upstream, ESPLoader: FailingIdentification});
   await assert.rejects(known.connect({auto: true}), /Failed to connect/);
+});
+
+test('explicit entry distinguishes synchronization failures from identification failures', async () => {
+  class NoSync {
+    async detectChip(mode) { await this.openAndSync(mode); }
+    async openAndSync(mode) {
+      assert.equal(mode, 'default_reset');
+      throw new Error('serial_timeout');
+    }
+  }
+  class NoIdentity extends NoSync {
+    async openAndSync() {}
+    async detectChip(mode) {
+      await this.openAndSync(mode);
+      throw new Error('serial_timeout');
+    }
+  }
+  const port = {getInfo: () => ({usbVendorId: 0x303a, usbProductId: 0x1001})};
+  const noSyncDriver = new EspDriver(port, {...upstream, ESPLoader: NoSync});
+  await assert.rejects(noSyncDriver.connect({}), /serial_timeout/);
+  assert.equal(noSyncDriver.connectionStage, 'Synchronisation du chargeur ROM');
+  const noIdentityDriver = new EspDriver(port, {...upstream, ESPLoader: NoIdentity});
+  await assert.rejects(noIdentityDriver.connect({}), /serial_timeout/);
+  assert.equal(noIdentityDriver.connectionStage, 'Identification de la puce par la ROM (SYNC reçu)');
 });
 
 test('transport can read again after esptool reopens it for identification', async () => {

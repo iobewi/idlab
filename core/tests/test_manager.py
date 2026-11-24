@@ -57,25 +57,49 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(page.status, 200)
         browser_headers = self.web | {"Origin": "http://127.0.0.1:8080"}
         created = await self.client.post(
-            "/api/v1/campaigns", headers=browser_headers, json={"name": "Readback"},
+            "/api/v1/campaigns", headers=browser_headers,
+            json={"name": "Readback", "metadata": {"scenario": "backup"}},
         )
         self.assertEqual(created.status, 201)
         campaign = await created.json()
+        activity = await self.client.ws_connect("/api/v1/activity", headers=browser_headers)
+        self.assertEqual(await activity.receive_json(timeout=2), {"active": False})
         agent = await self.client.ws_connect("/agent?device=board", headers=browser_headers)
         await agent.send_json({
             "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
             "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
+            "mode": "loader", "port_key": "00000000-0000-4000-8000-000000000001",
         })
         generation = (await agent.receive_json(timeout=2))["generation"]
+        chunk = b"a" * (4 * 1024 * 1024)
         read = asyncio.create_task(self.client.post(
             "/api/v1/devices/board/flash/read", headers=browser_headers,
-            json={"generation": generation, "address": 0, "size": 4, "campaign_id": campaign["id"]},
+            json={"generation": generation, "address": 0, "size": len(chunk) + 4, "campaign_id": campaign["id"]},
         ))
-        self.assertEqual((await agent.receive_json(timeout=2))["command"], "flash.read")
+        command = await agent.receive_json(timeout=2)
+        self.assertEqual(await activity.receive_json(timeout=2), {"active": True})
+        self.assertEqual(command["command"], "flash.read")
+        self.assertTrue(command["stream"])
+        await agent.send_bytes(chunk)
         await agent.send_bytes(b"data")
+        await agent.send_json({"result": command["id"], "value": 16 * 1024 * 1024})
         response = await asyncio.wait_for(read, timeout=2)
-        self.assertEqual(await response.read(), b"data")
+        self.assertEqual(await response.read(), chunk + b"data")
+        self.assertEqual(await activity.receive_json(timeout=2), {"active": False})
+        await activity.close()
         first = self.service.process
+
+        issued = await self.client.post("/api/v1/devices/board/control/token", headers=browser_headers)
+        self.assertEqual(issued.status, 200)
+        token = (await issued.json())["token"]
+        self.assertTrue((await agent.receive_json(timeout=2))["has_token"])
+        async with self.client.ws_connect(
+            "/api/v1/devices/board/control/connect",
+            headers=self.web | {"Authorization": "Bearer " + token},
+        ) as control:
+            self.assertTrue((await control.receive_json(timeout=2))["session"])
+            self.assertEqual((await agent.receive_json(timeout=2))["control"], "external")
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
 
         self.assertEqual((await self.request("POST", "start")).status, 200)
         self.assertIs(first, self.service.process)
@@ -88,6 +112,10 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         await self.client.get("/", headers=self.web)
         retained = await self.client.get("/api/v1/campaigns/" + campaign["id"], headers=browser_headers)
         self.assertEqual(await retained.json(), campaign)
+        operations = await self.client.get("/api/v1/campaigns/" + campaign["id"] + "/operations", headers=browser_headers)
+        history = await operations.json()
+        self.assertEqual(history["total"], 1)
+        self.assertEqual(history["items"][0]["bytesRead"], len(chunk) + 4)
 
         self.assertEqual((await self.request("POST", "stop")).status, 200)
         self.assertEqual((await self.client.get("/health", headers=self.web)).status, 503)

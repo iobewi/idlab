@@ -3,15 +3,18 @@ import test from 'node:test';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector} from '../web/board-connector.js';
 
-function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud, failBaud = false,
-  readBlock, shortResponseAt } = {}) {
+function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
+  readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
+  romIdentificationTimeout = false } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
-  let identity, socket, responseBytes;
+  let identity, socket, commandResult;
+  const responseParts = [];
+  const uart = [];
   let deviceBaud = 115200;
   const bytes = Uint8Array.of(0, 255, 13);
-  const port = {getInfo: () => ({usbVendorId: vid})};
+  const port = {getInfo: () => ({usbVendorId: vid, usbProductId: pid})};
   class Loader {
     ESP_CHANGE_BAUDRATE = 0x0f;
     chip = {
@@ -28,11 +31,19 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
       port.readable = {};
       port.writable = {};
       this.transport.baudrate = this.initialBaud;
-      if (attempts === 1 && (!inDownload || this.initialBaud !== deviceBaud)) {
+      if ((attempts === 1 && (!inDownload || this.initialBaud !== deviceBaud)) ||
+          (entry === 'default_reset' && failLoader)) {
         throw new Error('Failed to connect with the device');
       }
+      if (entry === 'default_reset' && romIdentificationTimeout) {
+        await this.openAndSync();
+        throw new Error('serial_timeout');
+      }
     }
-    async runStub() { this.IS_STUB = true; }
+    async runStub() {
+      if (stubTimeout) throw new Error('serial_timeout');
+      this.IS_STUB = true;
+    }
     async checkCommand(_description, opcode, data) {
       assert.equal(opcode, 0x0f);
       const payload = new DataView(data.buffer);
@@ -44,6 +55,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
     async readFlashId() { return 0x184068; }
     async readFlash(address, size, onPacket) {
       if (failRead) throw new Error('error during read');
+      if (address === shortResponseAt) return new Uint8Array(1);
       const block = readBlock ? readBlock(address, size) : bytes;
       assert.equal(size, block.length);
       onPacket(block, block.length);
@@ -53,8 +65,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
     async usesUsbOtg() { return vid === 0x303a; }
   }
   const card = new BoardConnector('board', port, {
-    flashBaud, onChange() {}, onCapture() {}, onJournal() {},
-    onProgress() { progress.push(card.flashProgress && {...card.flashProgress}); },
+    flashBaud, onChange() {}, campaignId, onLinkLost,
   }, {
     origin: 'http://127.0.0.1:8080/',
     loadTools: async () => ({
@@ -72,7 +83,7 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
       events.push('console');
       onBytes(new TextEncoder().encode('READY\n'));
       const done = Promise.withResolvers();
-      return { done: done.promise, async close() { events.push('close-console'); done.resolve(); } };
+      return { done: done.promise, async write(value) { events.push('uart:' + new TextDecoder().decode(value)); }, async close() { events.push('close-console'); done.resolve(); } };
     },
     async reset() { events.push('reset'); },
     createSocket() {
@@ -81,12 +92,19 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
         send(message) {
           if (message === 'request') return;
           if (typeof message !== 'string') {
-            responseBytes = message;
+            responseParts.push(message);
             return;
           }
-          identity = {...JSON.parse(message), generation: 'generation', capabilities: ['identify', 'flash.read']};
-          if (identity.loader === 'rom') identity.capabilities = ['identify'];
-          queueMicrotask(() => socket.onmessage({data: '{"generation":"generation"}'}));
+          const payload = JSON.parse(message);
+          if (payload.uart) { uart.push(payload.uart); return; }
+          if (payload.journal) return;
+          if (payload.progress) { progress.push(payload.progress); return; }
+          if (payload.result) { commandResult = payload; return; }
+          identity = {...(payload.identity ?? payload), generation: 'generation',
+            capabilities: ['identify', 'flash.read']};
+          if (identity.loader === 'rom' || identity.mode === 'console') identity.capabilities = ['identify'];
+          const reply = payload.identity ? {identity} : {generation: 'generation'};
+          queueMicrotask(() => socket.onmessage({data: JSON.stringify(reply)}));
         },
         close() { socket.readyState = 3; socket.onclose(); },
       };
@@ -98,41 +116,66 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
         if (socket.readyState === 3) throw new Error('device_disconnected');
         return {json: async () => identity};
       }
-      assert.equal(path, '/devices/board/flash/read');
-      const {generation, address, size} = JSON.parse(options.body);
-      assert.equal(generation, 'generation');
-      reads.push({generation, address, size});
-      responseBytes = null;
-      await socket.onmessage({data: JSON.stringify({address, size, command: 'flash.read', id: 'request'})});
-      if (failRead) {
-        socket.close();
-        throw new Error('read_incomplete_reconnect_required');
+      if (path === '/devices/board/command') {
+        const payload = JSON.parse(options.body);
+        assert.equal(payload.generation, 'generation');
+        commandResult = null;
+        await socket.onmessage({data: JSON.stringify({...payload, id: 'test-command', generation: undefined})});
+        assert.equal(commandResult?.result, 'test-command');
+        if (commandResult.error) throw new Error(commandResult.detail ?? commandResult.error);
+        return {json: async () => ({...identity, result: commandResult.value})};
       }
-      assert.equal(responseBytes?.byteLength, size);
-      const data = address === shortResponseAt ? responseBytes.subarray(0, 1) : responseBytes;
-      return {blob: async () => new Blob([data])};
+      assert.equal(path, '/devices/board/flash/read');
+      const fields = JSON.parse(options.body);
+      const {generation, address, size} = fields;
+      assert.equal(generation, 'generation');
+      reads.push(fields);
+      responseParts.length = 0;
+      commandResult = null;
+      await socket.onmessage({data: JSON.stringify({address, size, command: 'flash.read', id: 'request', stream: true})});
+      if (commandResult?.error) throw new Error(commandResult.error);
+      assert.equal(commandResult?.result, 'request');
+      const blob = new Blob(responseParts);
+      assert.equal(blob.size, size);
+      return {blob: async () => blob, headers: new Headers({'X-IDLab-Flash-Size': commandResult.value})};
     },
   });
   port.readable = null;
-  return {card, events, reads, progress, manualReset() { inDownload = false; deviceBaud = 115200; }};
+  return {card, events, reads, progress, uart, manualReset() { inDownload = false; deviceBaud = 115200; }};
 }
 
+test('only unexpected disconnections report a lost board link', async () => {
+  let losses = 0;
+  const {card} = fixture({onLinkLost: () => { losses++; }});
+  await card.connect();
+  await card.disconnect();
+  assert.equal(losses, 0);
+  await card.connect();
+  await card.disconnect(true);
+  assert.equal(losses, 1);
+  await card.connect();
+  card.socket.close();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(card.mode, 'disconnected');
+  assert.equal(losses, 2);
+});
+
 test('identification and flash reads from console restore the same console and retain identity', async () => {
-  const {card, events} = fixture();
+  const {card, events, uart} = fixture();
   await card.connect();
   assert.equal(card.mode, 'console');
   assert.equal(card.canEnterLoader, true);
   assert.equal((await card.identify()).mac, '10:20:30:40:50:60');
   assert.equal(card.mode, 'console');
   assert.equal(card.lastIdentity.flash_id, 0x184068);
-  assert.equal(card.identity, null);
+  assert.equal(card.identity.mode, 'console');
   const result = await card.readFlash(0x8000, 3);
   assert.equal(result.capacity, 16 * 1024 * 1024);
   assert.deepEqual([...new Uint8Array(await result.blob.arrayBuffer())], [0, 255, 13]);
   assert.equal(card.mode, 'console');
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console', 'detect:default_reset', 'close-loader', 'console', 'reset',
     'close-console', 'detect:default_reset', 'close-loader', 'console', 'reset']);
-  assert.equal(new TextDecoder().decode(card.capture.bytes()), 'READY\nREADY\nREADY\n');
+  assert.equal(Buffer.from(uart.join(''), 'hex').toString(), 'READY\nREADY\nREADY\n');
   await card.disconnect();
   assert.equal(card.lastIdentity, null);
 });
@@ -145,6 +188,8 @@ test('an automatically detected loader stays in download mode through reads and 
   assert.equal(card.mode, 'loader');
   assert.equal(card.consoleUnavailable, true);
   assert.equal(card.canResetIntoRom, false);
+  assert.equal(card.canReturnToConsole, false);
+  await assert.rejects(card.returnConsole(), /RESET manuel/);
   await assert.rejects(card.restart(), /Reset indisponible/);
   assert.deepEqual(events, ['detect:no_reset']);
   await card.disconnect();
@@ -160,11 +205,74 @@ test('an automatically detected loader stays in download mode through reads and 
   await card.disconnect();
 });
 
+test('web reads send the selected campaign only while the campaign is selected', async () => {
+  let selected = '0'.repeat(32);
+  const {card, reads} = fixture({inDownload: true, campaignId: () => selected});
+  await card.connect();
+  await card.readFlash(0, 3);
+  assert.equal(reads[0].campaign_id, selected);
+  selected = null;
+  await card.readFlash(0, 3);
+  assert.equal('campaign_id' in reads[1], false);
+  await card.disconnect();
+});
+
+test('the explicit loader action can return to console and switch again', async () => {
+  const {card, events} = fixture();
+  await card.connect();
+  const socket = card.socket;
+  await card.write('status');
+  assert.equal(events.at(-1), 'uart:status');
+  await card.enterLoader();
+  assert.equal(card.socket, socket);
+  assert.equal(card.canReturnToConsole, true);
+  card.control = 'external';
+  await assert.rejects(card.returnConsole(), /Carte indisponible/);
+  card.control = 'available';
+  await card.returnConsole();
+  assert.equal(card.socket, socket);
+  assert.equal(card.mode, 'console');
+  assert.equal(card.consoleUnavailable, false);
+  assert.deepEqual(events.slice(-3), ['close-loader', 'console', 'reset']);
+  await card.enterLoader();
+  assert.equal(card.canReturnToConsole, true);
+  await card.disconnect();
+});
+
+test('a failed USB Serial/JTAG loader entry reports the cause and restores the same console session', async () => {
+  const {card, events} = fixture({vid: 0x303a, pid: 0x1001, failLoader: true});
+  await card.connect();
+  const socket = card.socket;
+  await assert.rejects(card.enterLoader(), /Failed to connect with the device/);
+  assert.equal(card.mode, 'console');
+  assert.equal(card.socket, socket);
+  assert.deepEqual(events.slice(-5), ['close-console', 'detect:default_reset', 'close-loader', 'console', 'reset']);
+  await card.write('status');
+  assert.equal(events.at(-1), 'uart:status');
+  await card.disconnect();
+});
+
+test('an identification timeout after SYNC on USB Serial/JTAG suggests manual RESET', async () => {
+  const {card} = fixture({vid: 0x303a, pid: 0x1001, romIdentificationTimeout: true});
+  await card.connect();
+  await assert.rejects(card.enterLoader(), /SYNC reçu.*serial_timeout.*RESET sans maintenir BOOT, recharge la page/);
+  assert.equal(card.mode, 'console');
+  await card.disconnect();
+});
+
+test('a serial timeout during stub startup identifies the stage and restores UART', async () => {
+  const {card} = fixture({vid: 0x303a, pid: 0x1001, stubTimeout: true});
+  await card.connect();
+  await assert.rejects(card.enterLoader(), /Chargement et démarrage du stub.*serial_timeout/);
+  assert.equal(card.mode, 'console');
+  await card.disconnect();
+});
+
 test('a failed flash read clears progress and restores console without retrying the read', async () => {
   const {card, events, progress} = fixture({failRead: true});
   await card.connect();
-  await assert.rejects(card.readFlash(0, 3), /read_incomplete/);
-  assert.deepEqual(progress, [{address: 0, received: 0, total: 3}, null]);
+  await assert.rejects(card.readFlash(0, 3), /device_command_failed/);
+  assert.deepEqual(progress, [{address: 0, received: 0, total: 3}]);
   assert.equal(card.mode, 'console');
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console',
     'detect:default_reset', 'close-loader', 'console', 'reset']);
@@ -181,14 +289,9 @@ test('reads the complete factory partition in ordered chunks on one loader sessi
   await card.connect();
   const {blob} = await card.readFlash(factory, size);
   assert.equal(blob.size, size);
-  assert.deepEqual(reads, [0, 4, 8, 12].map(offset => ({
-    generation: 'generation', address: factory + offset * mib, size: Math.min(4 * mib, size - offset * mib),
-  })));
-  for (const {address, size} of reads) {
-    assert.ok(progress.some(item => item?.address === address && item.received === 0));
-    assert.ok(progress.some(item => item?.address === address && item.received === size));
-  }
-  assert.equal(progress.at(-1), null);
+  assert.deepEqual(reads, [{generation: 'generation', address: factory, size}]);
+  assert.deepEqual(progress.at(0), {address: factory, received: 0, total: size});
+  assert.deepEqual(progress.at(-1), {address: factory, received: size, total: size});
   for (let offset = 0; offset < size; offset += mib) {
     const byte = new Uint8Array(await blob.slice(offset, offset + 1).arrayBuffer());
     assert.equal(byte[0], offset / mib + 1);
@@ -199,16 +302,16 @@ test('reads the complete factory partition in ordered chunks on one loader sessi
   await card.disconnect();
 });
 
-test('a short chunk aborts the dump and an invalid full range sends no read', async () => {
+test('a short chunk aborts the dump and an invalid range is rejected', async () => {
   const mib = 1024 * 1024;
   const {card, reads} = fixture({
     inDownload: true, shortResponseAt: 4 * mib, readBlock: (_, length) => new Uint8Array(length),
   });
   await card.connect();
-  await assert.rejects(card.readFlash(15 * mib, 2 * mib), /plage demandée/);
-  assert.equal(reads.length, 0);
-  await assert.rejects(card.readFlash(0, 9 * mib), /incomplete_flash_read/);
-  assert.deepEqual(reads.map(read => read.address), [0, 4 * mib]);
+  await assert.rejects(card.readFlash(15 * mib, 2 * mib), /invalid_flash_range/);
+  assert.equal(reads.length, 1);
+  await assert.rejects(card.readFlash(0, 9 * mib), /device_command_failed/);
+  assert.deepEqual(reads.map(read => read.address), [15 * mib, 0]);
   await card.disconnect();
 });
 
@@ -217,7 +320,6 @@ test('UART flash uses the selected baud and reconnects to the same stub without 
   await card.connect();
   assert.equal(card.activeBaud, 921600);
   await card.readFlash(0, 3);
-  assert.ok(card.flashReadRate > 0);
   await card.disconnect();
   await card.connect();
   assert.equal(card.activeBaud, 921600);
@@ -245,7 +347,6 @@ test('native USB flash leaves the port configuration alone at any selected UART 
   assert.equal(card.identity.transport, 'usb_otg');
   await card.readFlash(0, 3);
   assert.deepEqual(events, ['detect:no_reset']);
-  assert.ok(card.flashReadRate > 0);
   await card.disconnect();
 });
 
@@ -253,7 +354,7 @@ test('a manual transport leaves the running console open and requests manual dow
   const {card, events} = fixture({vid: 0x303a});
   await card.connect();
   assert.equal(card.canEnterLoader, false);
-  await assert.rejects(card.identify(), /mode téléchargement/);
+  await assert.rejects(card.identify(), /device_command_failed/);
   assert.equal(card.mode, 'console');
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console']);
   await card.disconnect();
@@ -266,8 +367,8 @@ test('entering ROM from a loader does not pulse reset and permits JEDEC reads', 
   assert.equal((await card.enterRom({reset: true})).loader, 'rom');
   assert.deepEqual(card.identity.capabilities, ['identify']);
   assert.equal(card.consoleUnavailable, true);
-  assert.deepEqual(await card.readRomJedec(), {flash_id: 0x184068, flash_size: 16 * 1024 * 1024});
-  await assert.rejects(card.readFlash(0, 3), /Lecture flash indisponible/);
+  assert.deepEqual((await card.readRomJedec()).result, {flash_id: 0x184068, flash_size: 16 * 1024 * 1024});
+  await assert.rejects(card.readFlash(0, 3), /invalid_flash_range/);
   await assert.rejects(card.restart(), /Reset indisponible/);
   assert.equal(card.mode, 'loader');
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'detect:no_reset']);

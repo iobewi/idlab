@@ -8,6 +8,8 @@ import sys
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, WSMsgType, web
 
+from api_activity import ApiActivity
+
 SERVER = Path(__file__).resolve().with_name("server.py")
 WS_LIMIT = 4 * 1024 * 1024 + 1
 HOP_HEADERS = {
@@ -167,7 +169,7 @@ def create_app(*, token, port=8080, service=None):
 
         upstream = f"http://127.0.0.1:{service.port}{request.raw_path}"
         headers = proxy_headers(request.headers)
-        if request.path == "/agent" and request.headers.get("Upgrade", "").lower() == "websocket":
+        if (request.path == "/agent" or request.path.endswith("/control/connect")) and request.headers.get("Upgrade", "").lower() == "websocket":
             try:
                 async with request.app[UPSTREAM].ws_connect(
                     upstream, headers=headers, max_msg_size=WS_LIMIT, heartbeat=20,
@@ -183,8 +185,9 @@ def create_app(*, token, port=8080, service=None):
 
         try:
             body = await request.read() if request.can_read_body else None
+            timeout = {"timeout": ClientTimeout(total=None, connect=2)} if request.path.endswith("/flash/read") else {}
             async with request.app[UPSTREAM].request(
-                request.method, upstream, headers=headers, data=body, allow_redirects=False,
+                request.method, upstream, headers=headers, data=body, allow_redirects=False, **timeout,
             ) as response:
                 return web.Response(
                     status=response.status, headers=proxy_headers(response.headers),
@@ -208,11 +211,14 @@ def create_app(*, token, port=8080, service=None):
             await service.stop()
 
     UPSTREAM = web.AppKey("upstream", ClientSession)
-    app = web.Application(middlewares=[authenticate], client_max_size=4096)
+    activity = ApiActivity()
+    app = web.Application(middlewares=[authenticate, activity.track], client_max_size=4096)
     # Reserve the management namespace. Ordinary IDLab HTTP and WebSocket stay on this port.
     app.router.add_route("*", "/api/v1/httpd/{action:status|start|stop|restart}", dispatch)
+    app.router.add_get("/api/v1/activity", activity.observe)
     app.router.add_route("*", "/{path:.*}", relay)
     app.on_shutdown.append(stop_service)
+    app.on_shutdown.append(activity.close)
     app.cleanup_ctx.append(upstream_session)
     return app
 

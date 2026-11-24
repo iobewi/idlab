@@ -1,13 +1,49 @@
 import asyncio
 import os
 from pathlib import Path
+import sqlite3
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import unittest
 
-from aiohttp import CookieJar
+from aiohttp import CookieJar, WSServerHandshakeError
 from aiohttp.test_utils import TestClient, TestServer
 
+from campaigns import Campaigns
 from server import create_app, validate_identity
+
+
+class CampaignStorageTests(unittest.TestCase):
+    def test_migrates_existing_campaigns_and_recovers_unfinished_operations(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "campaigns.sqlite3"
+            db = sqlite3.connect(path)
+            try:
+                db.execute("""
+                    CREATE TABLE campaigns (
+                        id TEXT PRIMARY KEY, name TEXT NOT NULL, state TEXT NOT NULL,
+                        started_at TEXT NOT NULL, ended_at TEXT, abort_requested_at TEXT,
+                        verdict TEXT, reason TEXT
+                    )
+                """)
+                db.execute("INSERT INTO campaigns (id, name, state, started_at) VALUES (?, ?, 'active', ?)",
+                           ("old", "Existing campaign", "2026-01-01T00:00:00+00:00"))
+                db.commit()
+            finally:
+                db.close()
+            campaigns = Campaigns(path)
+            try:
+                self.assertEqual(campaigns.get("old")["metadata"], {})
+                campaigns.enter("old", {"id": "op", "startedAt": "2026-01-01T00:00:00+00:00", "state": "En cours"})
+            finally:
+                campaigns.close()
+            campaigns = Campaigns(path)
+            try:
+                record = campaigns.operations("old", limit=25, offset=0)["items"][0]
+                self.assertEqual(record["state"], "Échec")
+                self.assertEqual(campaigns.get("old")["in_flight"], 0)
+            finally:
+                campaigns.close()
 
 
 class IdentityTests(unittest.TestCase):
@@ -24,7 +60,7 @@ class IdentityTests(unittest.TestCase):
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.server = TestServer(create_app(port=0, token="test-token", read_timeout=0.2))
+        self.server = TestServer(create_app(port=0, token="test-token", read_timeout=0.2, command_timeout=0.5))
         # Use a nominated Host for origin validation while connecting to an
         # ephemeral test port, so parallel test runs never share a socket.
         self.browser = TestClient(self.server, cookie_jar=CookieJar(unsafe=True))
@@ -48,7 +84,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
 
     def read(self, name, generation, *, address=0, size=4, headers=None):
         return self.browser.post(
-            f"/api/v1/devices/{name}/flash/read", headers=headers or self.script,
+            f"/api/v1/devices/{name}/flash/read", headers=headers or self.local,
             json={"generation": generation, "address": address, "size": size},
         )
 
@@ -63,11 +99,13 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.status, 304)
                     self.assertEqual(response.headers["Cache-Control"], "no-cache")
 
-    async def test_web_and_script_use_same_read(self):
+    async def test_web_read_and_script_observation(self):
         ws, generation = await self.board("board")
         response = await self.browser.get("/api/v1/devices/board", headers=self.script)
         self.assertEqual((await response.json())["capabilities"], ["identify", "flash.read"])
-        for headers, data in ((self.script, b"abcd"), (self.local, b"efgh")):
+        denied = await self.read("board", generation, headers=self.script)
+        self.assertEqual((denied.status, await denied.json()), (403, {"error": "control_session_required"}))
+        for headers, data in ((self.local, b"abcd"), (self.local, b"efgh")):
             read = asyncio.create_task(self.read("board", generation, headers=headers))
             command = await ws.receive_json()
             self.assertEqual((command["command"], command["address"], command["size"]), ("flash.read", 0, 4))
@@ -99,6 +137,130 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await stub.send_bytes(b"data")
         self.assertEqual(await (await read).read(), b"data")
 
+    async def test_loader_switch_reports_failure_and_can_be_retried_on_the_same_session(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        console = {"mode": "console", "transport": "usb_serial_jtag"}
+        await agent.send_json(console)
+        generation = (await agent.receive_json(timeout=2))["generation"]
+
+        async def command(name):
+            request = asyncio.create_task(self.browser.post(
+                "/api/v1/devices/board/command", headers=self.local,
+                json={"generation": generation, "command": name},
+            ))
+            message = await agent.receive_json(timeout=2)
+            self.assertEqual(message["command"], name)
+            return request, message["id"]
+
+        request, identifier = await command("mode.loader")
+        await agent.send_json({"identity": console})
+        self.assertEqual((await agent.receive_json(timeout=2))["identity"]["generation"], generation)
+        detail = "Failed to connect with the device"
+        await agent.send_json({"result": identifier, "error": "device_command_failed", "detail": detail})
+        response = await request
+        self.assertEqual((response.status, await response.json()),
+                         (502, {"error": "device_command_failed", "detail": detail}))
+
+        request, identifier = await command("mode.loader")
+        await agent.send_json({"identity": {
+            "mode": "loader", "loader": "stub", "chip": "esp32p4", "mac": "10:20:30:40:50:60",
+            "transport": "usb_serial_jtag", "return_to_console": True, "flash_size": 32 * 1024 * 1024,
+        }})
+        self.assertIn("mode.console", (await agent.receive_json(timeout=2))["identity"]["capabilities"])
+        await agent.send_json({"result": identifier})
+        response = await request
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["generation"], generation)
+
+    async def test_loader_command_timeout_has_a_distinct_error(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await agent.send_json({"mode": "console", "transport": "usb_serial_jtag"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        request = asyncio.create_task(self.browser.post(
+            "/api/v1/devices/board/command", headers=self.local,
+            json={"generation": generation, "command": "mode.loader"},
+        ))
+        self.assertEqual((await agent.receive_json(timeout=2))["command"], "mode.loader")
+        await agent.receive(timeout=2)
+        response = await request
+        self.assertEqual((response.status, await response.json()), (504, {"error": "device_command_timeout"}))
+
+    async def test_exclusive_control_stops_and_reuses_token_then_revokes(self):
+        agent, generation = await self.board("board")
+        base = "/api/v1/devices/board/control/"
+        issued = await self.browser.post(base + "token", headers=self.local)
+        token = (await issued.json())["token"]
+        self.assertTrue((await agent.receive_json(timeout=2))["has_token"])
+        headers = self.script | {"Authorization": "Bearer " + token}
+        ws = await self.browser.ws_connect(base + "connect", headers=headers)
+        session = (await ws.receive_json(timeout=2))["session"]
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "external")
+        denied = await self.browser.post("/api/v1/devices/board/command", headers=self.local,
+                                         json={"generation": generation, "command": "identify"})
+        self.assertEqual((denied.status, await denied.json()), (409, {"error": "externally_controlled"}))
+        with self.assertRaises(WSServerHandshakeError) as busy:
+            await self.browser.ws_connect(base + "connect", headers=headers)
+        self.assertEqual(busy.exception.status, 409)
+        self.assertEqual((await self.read("board", generation)).status, 409)
+        response = await self.browser.get("/api/v1/devices/board", headers=self.script)
+        self.assertEqual((await response.json())["control"], "external")
+        read = asyncio.create_task(self.read(
+            "board", generation, headers=self.script | {"Authorization": "Bearer " + session},
+        ))
+        command = await agent.receive_json(timeout=2)
+        stopping = asyncio.create_task(self.browser.post(base + "stop", headers=self.local))
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "stopping")
+        self.assertEqual((await agent.receive_json(timeout=2))["cancel"], command["id"])
+        self.assertEqual((await self.read("board", generation)).status, 409)
+        await ws.receive(timeout=2)
+        await stopping
+        await agent.send_bytes(b"abcd")
+        response = await read
+        self.assertEqual((response.status, await response.json()), (403, {"error": "control_stopped"}))
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
+        ws = await self.browser.ws_connect(base + "connect", headers=headers)
+        self.assertNotEqual((await ws.receive_json(timeout=2))["session"], session)
+        revoked = asyncio.create_task(self.browser.post(base + "revoke", headers=self.local))
+        await ws.receive(timeout=2)
+        self.assertEqual((await revoked).status, 200)
+        with self.assertRaises(WSServerHandshakeError) as caught:
+            await self.browser.ws_connect(base + "connect", headers=headers)
+        self.assertEqual(caught.exception.status, 403)
+
+    async def test_api_activity_tracks_concurrent_clients_and_explicit_reads(self):
+        a, ga = await self.board("a")
+        b, gb = await self.board("b")
+        issued = await self.browser.post("/api/v1/devices/b/control/token", headers=self.local)
+        token = (await issued.json())["token"]
+        await b.receive_json(timeout=2)
+        control = await self.browser.ws_connect("/api/v1/devices/b/control/connect",
+                                                headers=self.script | {"Authorization": f"Bearer {token}"})
+        session = (await control.receive_json(timeout=2))["session"]
+        await b.receive_json(timeout=2)
+        stream = await self.browser.ws_connect("/api/v1/activity", headers=self.local)
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": False})
+        read_a = asyncio.create_task(self.read("a", ga))
+        await a.receive_json(timeout=2)
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": True})
+        read_b = asyncio.create_task(self.read("b", gb, headers=self.script | {"Authorization": f"Bearer {session}"}))
+        await b.receive_json(timeout=2)
+        await a.send_bytes(b"aaaa")
+        self.assertEqual(await (await read_a).read(), b"aaaa")
+        # The oldest request completed while the other board is still busy.
+        async with self.browser.ws_connect("/api/v1/activity", headers=self.local) as late_observer:
+            self.assertEqual(await late_observer.receive_json(timeout=2), {"active": True})
+        await b.send_bytes(b"bbbb")
+        self.assertEqual(await (await read_b).read(), b"bbbb")
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": False})
+
+        self.assertEqual((await self.browser.get("/api/v1/devices", headers=self.script)).status, 200)
+        response = await self.browser.get("/api/v1/campaigns", headers=self.script | {"X-IDLab-Action": "1"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": True})
+        self.assertEqual(await stream.receive_json(timeout=2), {"active": False})
+        await stream.close()
+        await control.close()
+
     async def test_two_boards_stay_independent(self):
         a, ga = await self.board("a")
         b, gb = await self.board("b")
@@ -111,6 +273,41 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await a.send_bytes(b"aaaa")
         self.assertEqual(await (await read_b).read(), b"bbbb")
         self.assertEqual(await (await read_a).read(), b"aaaa")
+
+    async def test_activity_and_large_flash_use_one_server_operation(self):
+        ws = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await ws.send_json({"mode": "loader", "loader": "stub", "chip": "esp32s3",
+                            "mac": "10:20:30:40:50:60", "transport": "usb_uart", "flash_size": 16777216,
+                            "port_key": "00000000-0000-4000-8000-000000000001"})
+        generation = (await ws.receive_json(timeout=2))["generation"]
+        mib = 1024 * 1024
+        size = 4 * mib + 1
+        path = "/api/v1/devices/board/activity"
+
+        async def activity():
+            response = await self.browser.get(path, headers=self.script, params={"generation": generation})
+            self.assertEqual(response.status, 200)
+            return await response.json()
+
+        read = asyncio.create_task(self.read("board", generation, size=size))
+        command = await ws.receive_json(timeout=2)
+        self.assertTrue(command["stream"])
+        self.assertEqual(command["size"], size)
+        self.assertEqual((await activity())["operations"][0]["id"], command["id"])
+        await ws.send_json({"journal": "Transfert"})
+        await ws.send_json({"id": command["id"], "progress": {"address": 0, "received": 4 * mib, "total": size}})
+        await ws.send_bytes(b"a" * (4 * mib))
+        self.assertFalse(read.done())
+        await ws.send_bytes(b"b")
+        await ws.send_json({"result": command["id"], "value": 16777216})
+        response = await read
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.read(), b"a" * (4 * mib) + b"b")
+        observed = await activity()
+        self.assertEqual(observed["journal"][0]["message"], "Transfert")
+        self.assertIsNone(observed["progress"])
+        self.assertEqual(len(observed["operations"]), 1)
+        self.assertEqual(observed["operations"][0]["bytesRead"], size)
 
     async def test_short_read_invalidates_session(self):
         ws, generation = await self.board("board")
@@ -159,7 +356,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
 
         def read(name, generation):
             return self.browser.post(
-                f"/api/v1/devices/{name}/flash/read", headers=self.script,
+                f"/api/v1/devices/{name}/flash/read", headers=self.local,
                 json={"generation": generation, "address": 0, "size": 4, "campaign_id": campaign_id},
             )
 

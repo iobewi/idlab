@@ -67,14 +67,17 @@ export function serialTransport(Transport, ESPError) {
           continue;
         }
 
-        deadline = performance.now() + timeout;
+        if (packet) deadline = performance.now() + timeout;
+        let skippedPrefix = false;
         for (const [index, byte] of chunk.entries()) {
           if (!packet) {
+            // ROM boot banners can precede the first SLIP response after reset.
             if (byte !== this.SLIP_END) {
-              this.buffer = chunk.subarray(index + 1);
-              this.detectPanicHandler(chunk);
-              throw new ESPError('serial_invalid_frame');
+              skippedPrefix = true;
+              continue;
             }
+            if (skippedPrefix) this.detectPanicHandler(chunk.subarray(0, index));
+            deadline = performance.now() + timeout;
             packet = new Uint8Array(256);
             continue;
           }
@@ -85,6 +88,7 @@ export function serialTransport(Transport, ESPError) {
             else if (byte === this.SLIP_ESC_ESC) decoded = this.SLIP_ESC;
             else throw new ESPError('serial_invalid_escape');
           } else if (byte === this.SLIP_END) {
+            if (!length) continue;
             this.buffer = chunk.subarray(index + 1);
             return packet.slice(0, length);
           } else if (byte === this.SLIP_ESC) {
@@ -99,6 +103,7 @@ export function serialTransport(Transport, ESPError) {
           }
           packet[length++] = decoded;
         }
+        if (!packet && skippedPrefix) this.detectPanicHandler(chunk);
       }
     }
   };

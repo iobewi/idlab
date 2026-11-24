@@ -33,36 +33,42 @@ export class EspDriver {
     const usb = this.port.getInfo();
     const plan = connectionPlan(usb, options);
     const loader = this.loader;
-    if (auto) {
-      // A short SYNC probe detects an already active downloader without
-      // asserting reset. Only an unanswered probe falls back to UART.
-      let synced = false;
-      const openAndSync = loader.openAndSync;
-      loader.openAndSync = async (...args) => {
-        await openAndSync.apply(loader, args);
-        synced = true;
-      };
-      try {
-        await loader.detectChip('no_reset', 1);
-      } catch (error) {
-        if (!synced && !this.transport.closed && this.port.readable && this.port.writable &&
-            error.message === 'Failed to connect with the device') return null;
-        throw error;
-      } finally {
-        loader.openAndSync = openAndSync;
-      }
-    } else {
-      await loader.detectChip(plan.entry);
+    this.identificationAfterSync = false;
+    this.connectionStage = 'Synchronisation du chargeur ROM';
+    let synced = false;
+    const openAndSync = loader.openAndSync;
+    loader.openAndSync = async (...args) => {
+      this.identificationAfterSync = false;
+      if (synced) this.connectionStage = 'Resynchronisation du chargeur ROM';
+      await openAndSync.apply(loader, args);
+      synced = true;
+      this.identificationAfterSync = true;
+      this.connectionStage = 'Identification de la puce par la ROM (SYNC reçu)';
+    };
+    try {
+      // An unanswered, reset-free probe can fall back to the console.
+      if (auto) await loader.detectChip('no_reset', 1);
+      else await loader.detectChip(plan.entry);
+    } catch (error) {
+      if (auto && !synced && !this.transport.closed && this.port.readable && this.port.writable &&
+          error.message === 'Failed to connect with the device') return null;
+      throw error;
+    } finally {
+      loader.openAndSync = openAndSync;
     }
+    this.identificationAfterSync = false;
     if (romOnly && loader.syncStubDetected) throw new Error('Un stub tourne déjà. Remets la carte en mode ROM.');
     if (loader.secureDownloadMode) throw new Error('Identité indisponible en mode téléchargement sécurisé.');
 
+    this.connectionStage = 'Lecture de l’identité matérielle';
     let transport = plan.transport;
     if (transport === 'unknown' && await loader.usesUsbOtg()) transport = 'usb_otg';
     const mac = await loader.chip.readMac(loader);
     const model = await loader.chip.getChipDescription?.(loader) ?? loader.chip.CHIP_NAME;
     if (plan.useStub) {
+      this.connectionStage = 'Préparation du chargeur';
       if (!loader.syncStubDetected) await loader.chip.postConnect?.(loader);
+      this.connectionStage = 'Chargement et démarrage du stub';
       await loader.runStub();
       if (loader.IS_STUB && transport === 'usb_uart' && flashBaud !== this.transport.baudrate) {
         await this.#changeFlashBaud(flashBaud);
@@ -70,6 +76,7 @@ export class EspDriver {
     }
     let flashId = null, flashSize = null;
     if (loader.IS_STUB) {
+      this.connectionStage = 'Lecture du JEDEC';
       ({flash_id: flashId, flash_size: flashSize} = await this.readJedec());
     }
     const chip = loader.chip.CHIP_NAME.toLowerCase().replace(/[^a-z0-9]/g, '');

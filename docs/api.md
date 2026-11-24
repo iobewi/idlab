@@ -13,10 +13,17 @@ L’interface web, l’API et l’agent WebSocket utilisent le même point d’e
 
 Envoyer le jeton avec `Authorization: Bearer <jeton>`. Les requêtes JSON
 utilisent `Content-Type: application/json`. Le navigateur utilise son
-cookie local pour les opérations des cartes et des campagnes. Ses POST
+cookie local pour les opérations des cartes et des campagnes. Ses requêtes de modification
 doivent porter un en-tête `Origin` correspondant à l’hôte IDLab. Les routes
 `httpd` sont réservées aux scripts authentifiés et refusent les requêtes
 avec `Origin`.
+
+Le WebSocket `/api/v1/activity` indique à l’interface si une action API est
+en cours. Il envoie `{"active": true}` à la première action et
+`{"active": false}` à la fin de la dernière. Le maintien de l’écran suit
+cet état pour tous les clients. Les requêtes de consultation restent
+passives par défaut. Un client peut signaler une lecture ponctuelle avec
+`X-IDLab-Action: 1`.
 
 ## Processus HTTP
 
@@ -58,10 +65,70 @@ curl --fail-with-body \
 | `GET /api/v1/devices/{name}` | `200`, description de la session |
 | `POST /api/v1/devices/{name}/flash/read` | `200`, octets bruts en `application/octet-stream` |
 
-Le reset matériel est indisponible via l’API des cartes, en ROM comme
-avec un stub. Pour quitter le mode téléchargement, déconnecter la carte
-dans IDLab, appuyer physiquement sur RESET sans maintenir BOOT, puis
-reconnecter la carte. `POST /api/v1/httpd/restart` redémarre le processus HTTP.
+Le reset via l’API des cartes est disponible en console sur les transports
+compatibles. En téléchargement, le retour automatique est réservé aux
+connexions ayant ouvert le chargeur depuis la console. Si IDLab a détecté
+le chargeur à la connexion, déconnecter la carte dans IDLab, appuyer
+physiquement sur RESET sans maintenir BOOT, puis reconnecter la carte.
+`POST /api/v1/httpd/restart` redémarre le processus HTTP.
+
+### Pilotage exclusif
+
+Pour une carte connectée en console ou en téléchargement, le web peut
+créer un jeton avec **Get token**. Il est réutilisable tant que la carte
+reste associée au même connecteur, y compris après une reconnexion dans
+la même page. En cas de retrait de la carte ou de rechargement de la page,
+révoquer l’ancien jeton et en créer un autre. Les jetons sont conservés
+en mémoire jusqu’à leur révocation ou au redémarrage du serveur.
+
+| Méthode et chemin sous `/api/v1/devices/{name}` | Accès et effet |
+|---|---|
+| `POST /control/token` | Session navigateur locale. Renvoie le jeton une fois. |
+| `GET /control/connect` (WebSocket) | Le jeton de pilotage est envoyé en Bearer. Renvoie un identifiant secret de session et la génération. La connexion ouverte réserve la carte. |
+| `POST /control/stop` | Session navigateur locale. Arrête le pilotage externe. Le jeton peut resservir. |
+| `POST /control/revoke` | Session navigateur locale. Supprime le jeton et arrête le pilotage externe. |
+
+Pendant le pilotage externe, la lecture flash exige l’identifiant secret
+de la session en Bearer. Le jeton général `IDLAB_TOKEN` permet de consulter
+l’état de la carte et de piloter les campagnes. Une deuxième session de
+pilotage est refusée avec `409`. Une lecture interrompue par le web renvoie
+`403 control_stopped` ou `403 control_revoked`. Si l’arrêt coupe un
+transfert série, reconnecter la carte pour reprendre les commandes.
+
+Le navigateur et Python appellent `POST /api/v1/devices/{name}/command`
+avec `generation` et `command`. La réponse est la description actualisée
+de la carte. Les bascules console–chargeur gardent la même génération et
+le même canal agent.
+
+| Commande | Effet |
+|---|---|
+| `uart.write` | Envoie de 1 à 1 900 octets en console. Champ `hex` sans séparateur. |
+| `console.reset` | Redémarre le firmware depuis la console si le transport le permet. |
+| `mode.loader` | Ouvre le chargeur flash depuis la console si le transport le permet. |
+| `mode.console` | Revient en console depuis un chargeur ouvert par IDLab sur cette connexion. |
+| `mode.rom` | Ouvre la ROM sur une carte connectée. Le booléen `reset` demande le reset automatique, autorisé depuis la console sur un transport compatible. |
+| `rom.jedec` | Lit le JEDEC depuis la ROM. Le résultat est renvoyé dans `result`. |
+| `identify` | Mesure l’identité matérielle. Depuis la console, passe par le chargeur puis revient à la console si le transport le permet. |
+
+En cas d’échec de `mode.loader`, le connecteur tente de rétablir la
+console si le port et la session sont encore actifs. La réponse
+`502 device_command_failed` peut inclure un champ `detail` avec la
+cause de l’échec.
+Si le connecteur ne rend aucun résultat dans le délai de la commande,
+l’API renvoie `504 device_command_timeout` et ferme la session de la carte.
+
+`GET /api/v1/devices/{name}/uart?generation=…&cursor=…` renvoie les octets
+RX en hexadécimal, le prochain curseur et le nombre d’octets perdus avant
+ce curseur (`hex`, `cursor`, `dropped`). Sans curseur, la lecture commence
+au plus ancien octet conservé. Le serveur conserve au plus 1 Mio par carte
+et renvoie jusqu’à 64 Kio par appel. L’observation utilise le jeton général
+ou celui de la session de pilotage. En Python, utiliser `board.read_uart()`.
+L’interface web lit la capture sur cette même route.
+
+`GET /api/v1/devices/{name}/activity?generation=…` renvoie l’état de la
+carte, la progression en cours, jusqu’à 300 messages du journal et les
+100 dernières opérations de cette génération. La consultation utilise
+les mêmes droits que la lecture UART. En Python, utiliser `board.activity()`.
 
 Un nom de carte contient de 1 à 48 caractères ASCII parmi les lettres,
 chiffres, tirets et underscores. Le premier caractère est alphanumérique.
@@ -85,35 +152,41 @@ Une description de session ressemble à ceci.
 une lecture. `generation` change lorsque la carte se reconnecte.
 
 Le corps d’une lecture contient la génération actuelle, une adresse entière
-positive ou nulle et une taille entière de 1 octet à 4 Mio. La plage doit tenir
-dans la flash. Le champ `campaign_id` est facultatif. Une carte accepte une
+positive ou nulle et une taille entière de 1 octet jusqu’à la capacité de
+la flash, avec un maximum de 64 Mio. Le connecteur transmet les octets
+au serveur par blocs de 4 Mio maximum. Le champ `campaign_id` est facultatif. Une carte accepte une
 lecture à la fois. Une lecture incomplète renvoie une erreur, ferme la session
 et ne livre aucun résultat partiel.
 
 ## Campagnes
 
-Une campagne suit un essai composé par un script. Le script choisit les
-opérations et le verdict. Chaque lecture qui doit être suivie par la campagne
-envoie son `campaign_id`. Les lectures qui omettent ce champ restent
-indépendantes.
+Une campagne regroupe les opérations d’un essai et son verdict. Le web
+et les scripts associent une opération en envoyant `campaign_id` dans
+le corps de `/command` ou de `/flash/read`. Ce champ est facultatif et
+s’applique à la requête. Une campagne peut couvrir plusieurs cartes.
 
 | Méthode et chemin | Corps JSON | Succès |
 |---|---|---|
 | `GET /api/v1/campaigns` | — | `200`, liste filtrée avec totaux et pagination |
-| `POST /api/v1/campaigns` | `{"name":"Lecture de référence"}` | `201`, campagne active et en-tête `Location` |
-| `GET /api/v1/campaigns/{id}` | — | `200`, campagne connue |
+| `POST /api/v1/campaigns` | `{"name":"Lecture de référence","metadata":{"scenario":"backup"}}` | `201`, campagne active et en-tête `Location` |
+| `GET /api/v1/campaigns/{id}` | — | `200`, état, métadonnées, verdict et opérations en cours |
+| `PATCH /api/v1/campaigns/{id}` | `{"name":"Nouveau nom"}`, `{"metadata":{…}}` ou les deux | `200`, campagne active mise à jour |
+| `GET /api/v1/campaigns/{id}/operations` | — | `200`, historique paginé des opérations rattachées |
 | `POST /api/v1/campaigns/{id}/finish` | `{"verdict":"PASS"}` | `200`, campagne terminée |
-| `POST /api/v1/campaigns/{id}/abort` | `{"reason":"Arrêt opérateur"}` | `202` pendant une lecture active, `200` une fois arrêtée |
+| `POST /api/v1/campaigns/{id}/abort` | `{"reason":"Arrêt opérateur"}` | `202` pendant une opération active, `200` une fois arrêtée |
 
 Le nom, le verdict et le motif sont des chaînes non vides après suppression
 des espaces aux extrémités, limitées respectivement à 120, 80 et 500
-caractères. Le verdict est libre. Une campagne suit les lectures admises
-par le serveur. Elle peut couvrir plusieurs cartes.
+caractères. Le verdict est libre. Les métadonnées forment un objet JSON
+facultatif, vide par défaut et limité à 3 000 octets sérialisés. Lors d’un
+`PATCH`, fournir `metadata` remplace l’objet entier. Le statut évolue via
+les actions de cycle de vie.
 
 ```json
 {
   "id": "b3caa50230c14c978a8867f1bbbe8de9",
   "name": "Lecture de référence",
+  "metadata": {"scenario": "backup"},
   "state": "active",
   "started_at": "2026-11-24T08:15:00.000+00:00",
   "ended_at": null,
@@ -124,25 +197,30 @@ par le serveur. Elle peut couvrir plusieurs cartes.
 }
 ```
 
-- **`active`** accepte les lectures associées. `finish` réussit lorsqu’il
-  n’y a plus de lecture en cours.
-- **`abort_requested`** bloque les nouvelles lectures associées. Les
-  lectures déjà admises continuent jusqu’à leur résultat ou leur échec.
+- **`active`** accepte les opérations associées. `finish` réussit lorsqu’il
+  n’y a plus d’opération en cours.
+- **`abort_requested`** bloque les nouvelles opérations associées. Les
+  opérations déjà admises continuent jusqu’à leur résultat ou leur échec.
   Interroger la campagne avec `GET` pour suivre l’arrêt.
-- **`aborted`** indique que l’arrêt a été enregistré et qu’aucune lecture
+- **`aborted`** indique que l’arrêt a été enregistré et qu’aucune opération
   associée n’est encore suivie. Le premier motif est conservé. Répéter
   `abort` sur une campagne déjà arrêtée conserve le même enregistrement.
 - **`finished`** conserve le verdict du script. Répéter `finish` avec le
   même verdict conserve le même enregistrement.
 
-Les horodatages sont en UTC. Les campagnes survivent au redémarrage dans
+Les horodatages sont en UTC. Les campagnes et leurs opérations survivent au redémarrage dans
 `campaigns.sqlite3`. Compose conserve le fichier sur son volume `state`.
 Hors conteneur, `IDLAB_STATE_DIR` choisit le dossier, avec
-`~/.local/state/idlab` par défaut. Le nombre de lectures en cours concerne
-le processus courant. Après une coupure brutale, une campagne active reste
-active. Si elle est encore en `abort_requested`, examiner le résultat
-éventuel de l’ancienne lecture puis répéter `abort` pour clôturer l’arrêt.
-Le serveur ne rejoue aucune lecture ni aucun verdict.
+`~/.local/state/idlab` par défaut. Au redémarrage, les opérations
+interrompues apparaissent en échec. Une campagne active reste active.
+Pour une campagne encore en `abort_requested`, répéter `abort` pour
+clôturer l’arrêt.
+
+La liste des opérations accepte `limit` (1 à 100, 25 par défaut) et
+`offset` (0 par défaut). Elle renvoie `items`, `total`, `limit` et
+`offset`. Chaque entrée indique la carte, la génération, la commande,
+l’état et le résultat disponible. Les dumps complets sont retournés
+par la lecture flash.
 
 ### Liste, résumé et recherche
 

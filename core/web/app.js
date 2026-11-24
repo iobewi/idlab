@@ -1,15 +1,77 @@
 import { BoardConnector } from './board-connector.js';
+import { ConsoleBuffer } from './console-buffer.js';
+import { BootIdentity } from './boot-identity.js';
+import { activeCampaignId } from './campaign-view.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
 const $ = id => document.getElementById(id);
 const cards = new Map();
+let nextBoardNumber = 1;
 let selected = null;
 let adding = false;
-let redrawPending = false;
 const say = message => { $('client-state').textContent = message; };
 const clock = new Intl.DateTimeFormat('fr', { timeStyle: 'medium' });
 const number = new Intl.NumberFormat('fr', {maximumFractionDigits: 1});
 const manualConsoleReturn = 'Pour retrouver la console, déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.';
+const externallyControlled = card => Boolean(card?.identity && card.observation?.external_control);
+let apiActive = false;
+const needsWakeLock = () => apiActive || [...cards.values()].some(card =>
+  card.requesting || card.busy || card.mode === 'connecting' || card.mode === 'closing' ||
+  (card.identity && (['busy', 'stopping'].includes(card.observation?.device.control) || externallyControlled(card))));
+let wakeLock;
+let requestingWakeLock = false;
+
+async function updateWakeLock() {
+  if (wakeLock && (!needsWakeLock() || document.hidden)) await wakeLock.release();
+  if (needsWakeLock() && !document.hidden && navigator.wakeLock && !wakeLock && !requestingWakeLock) {
+    requestingWakeLock = true;
+    renderWakeState();
+    try {
+      const lock = await navigator.wakeLock.request('screen');
+      wakeLock = lock;
+      lock.addEventListener('release', () => {
+        if (wakeLock === lock) wakeLock = null;
+        renderWakeState();
+      }, {once: true});
+      if (!needsWakeLock() || document.hidden) await lock.release();
+    } catch {
+      wakeLock = null;
+    } finally {
+      requestingWakeLock = false;
+    }
+  }
+  renderWakeState();
+}
+
+function renderWakeState() {
+  const active = needsWakeLock();
+  const label = $('status-label-control');
+  const controlState = active ? 'Opération en cours' : 'Disponible';
+  if (label.textContent !== controlState) {
+    label.textContent = controlState;
+    $('status-icon-control').setAttribute('href', active ? '#icon-busy' : '#icon-check');
+  }
+  const state = !active ? 'Veille normale'
+    : wakeLock && !wakeLock.released ? 'Maintien éveillé'
+    : requestingWakeLock ? 'Activation du maintien éveillé…' : 'Maintien éveillé indisponible';
+  $('wake-state').textContent = state;
+}
+document.addEventListener('visibilitychange', updateWakeLock);
+
+function watchApiActivity() {
+  const url = new URL('/api/v1/activity', location.href);
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const socket = new WebSocket(url);
+  socket.onmessage = event => {
+    apiActive = JSON.parse(event.data).active === true;
+    void updateWakeLock();
+  };
+  socket.onclose = () => {
+    apiActive = false;
+    void updateWakeLock();
+    setTimeout(watchApiActivity, 2000);
+  };
+}
 
 function wireTabs(attribute) {
   const tabs = [...document.querySelectorAll('[' + attribute + ']')];
@@ -53,10 +115,18 @@ for (const button of document.querySelectorAll('[data-close-status]')) {
   button.onclick = () => { selectBand(null); $('status-' + button.dataset.closeStatus).focus(); };
 }
 document.addEventListener('keydown', event => { if (event.key === 'Escape') selectBand(null); });
-$('access-toggle').onclick = event => {
-  $('access-panel').hidden = !$('access-panel').hidden;
-  event.currentTarget.setAttribute('aria-expanded', !$('access-panel').hidden);
-};
+async function checkServer() {
+  const alert = $('server-alert');
+  let message;
+  try {
+    const response = await fetch('/health', { cache: 'no-store', signal: AbortSignal.timeout(3000) });
+    message = response.ok ? '' : 'Service IDLab indisponible.';
+  } catch {
+    message = 'Connexion au serveur perdue.';
+  }
+  if (alert.textContent !== message) alert.textContent = message;
+  setTimeout(checkServer, 5000);
+}
 
 function element(tag, content, cls) {
   const el = document.createElement(tag);
@@ -65,16 +135,68 @@ function element(tag, content, cls) {
   return el;
 }
 
-function note(card, message) {
-  card.journal.push(clock.format(new Date()) + ' · ' + message);
-  if (card.journal.length > 300) card.journal.shift();
-  if (card === selected) renderJournal();
+async function observeCard(card) {
+  const generation = card.identity?.generation;
+  if (!generation || card.polling) return;
+  card.polling = true;
+  try {
+    const path = '/api/v1/devices/' + card.name;
+    const load = async (route, query = '') => {
+      const response = await fetch(path + '/' + route + '?generation=' + generation + query);
+      if (!response.ok) return null;
+      return response.json();
+    };
+    if (card.observedGeneration !== generation) {
+      card.observedGeneration = generation;
+      card.uartCursor = 0;
+      card.capture = new ConsoleBuffer();
+      card.boot = new BootIdentity();
+      card.pausedAt = null;
+    }
+    const requests = [load('activity')];
+    if (card === selected) requests.push(load('uart', '&cursor=' + card.uartCursor));
+    const [activity, uart] = await Promise.all(requests);
+    if (card.identity?.generation !== generation || !activity) return;
+    const previous = card.observation;
+    const controlChanged = previous?.device.control !== activity.device.control ||
+      previous?.external_control !== activity.external_control;
+    const historyChanged = JSON.stringify(previous?.operations) !== JSON.stringify(activity.operations);
+    const journalChanged = previous?.journal.at(-1)?.at !== activity.journal.at(-1)?.at;
+    card.observation = activity;
+    card.lastJournal = activity.journal;
+    if (uart) {
+      card.uartCursor = uart.cursor;
+      if (uart.dropped) card.capture.note('MARK', uart.dropped + ' octets perdus');
+      if (uart.hex) {
+        const bytes = Uint8Array.from(uart.hex.match(/../g), byte => parseInt(byte, 16));
+        card.boot.append(card.capture.append(bytes).text);
+      }
+    }
+    if (controlChanged) render();
+    else if (card === selected) {
+      renderIdentification();
+      if (uart?.hex || uart?.dropped) renderConsole();
+      if (journalChanged) renderJournal();
+      else renderFlashProgress();
+      if (historyChanged) {
+        renderRom(selected && !externallyControlled(selected) && !selected.busy && !selected.requesting);
+        renderOperationHistory();
+      }
+    }
+  } catch {
+    // A disappearing generation or a transient HTTP failure is retried on the next poll.
+  } finally {
+    card.polling = false;
+  }
 }
+setInterval(() => { for (const card of cards.values()) void observeCard(card); }, 500);
 
 function renderJournal() {
   const log = $('agent-log');
   const follow = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
-  $('agent-log-entries').replaceChildren(...(selected?.journal ?? []).map(line => element('p', line, 'journal-row')));
+  const journal = selected?.lastJournal ?? [];
+  $('agent-log-entries').replaceChildren(...journal.filter(entry => entry.at > (selected.journalAfter ?? ''))
+    .map(entry => element('p', clock.format(new Date(entry.at)) + ' · ' + entry.message, 'journal-row')));
   renderFlashProgress();
   if (follow) log.scrollTop = log.scrollHeight;
 }
@@ -83,7 +205,7 @@ function renderFlashProgress() {
   const line = $('agent-read-progress');
   const log = $('agent-log');
   const follow = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
-  const progress = selected?.flashProgress;
+  const progress = selected?.observation?.progress;
   line.hidden = !progress;
   if (progress) {
     const {address, received, total} = progress;
@@ -116,12 +238,6 @@ function renderConsole() {
     : selected?.mode === 'console' ? 'Console ouverte · en attente d’octets UART' : 'Aucune capture';
 }
 
-function scheduleConsole(card) {
-  if (card !== selected || redrawPending) return;
-  redrawPending = true;
-  requestAnimationFrame(() => { redrawPending = false; renderIdentification(); renderConsole(); });
-}
-
 function operationDetails(entry) {
   const proof = JSON.stringify(entry, null, 2);
   const row = element('tr', undefined, 'operation-detail-row');
@@ -149,16 +265,16 @@ function operationDetails(entry) {
 
 function renderOperationHistory() {
   const card = selected;
-  const entries = card?.operations ?? [];
+  const entries = card?.observation?.operations ?? [];
   const body = $('operations-body');
   $('empty-operations').hidden = entries.length !== 0;
   body.replaceChildren();
   for (const entry of entries) {
     const row = element('tr');
-    for (const value of [entry.id, entry.device, 'Lecture flash', entry.state, entry.duration]) {
+    for (const value of [entry.id, entry.device, entry.command === 'flash.read' ? 'Lecture flash' : entry.command, entry.state, entry.duration]) {
       row.append(element('td', value ?? '—'));
     }
-    const expanded = card.inspectedOperation === entry;
+    const expanded = card.inspectedOperation === entry.id;
     const cell = element('td');
     const inspect = element('button', expanded ? 'Masquer' : 'Inspecter');
     inspect.id = 'inspect-operation-' + entry.id;
@@ -166,7 +282,7 @@ function renderOperationHistory() {
     inspect.setAttribute('aria-label', inspect.textContent + ' l’opération ' + entry.id);
     if (expanded) inspect.setAttribute('aria-controls', 'operation-detail-' + entry.id);
     inspect.onclick = () => {
-      card.inspectedOperation = expanded ? null : entry;
+      card.inspectedOperation = expanded ? null : entry.id;
       renderOperationHistory();
       $(inspect.id).focus({preventScroll: true});
     };
@@ -217,11 +333,12 @@ function renderPartitions(loader) {
 
 function renderIdentification() {
   const card = selected;
-  const current = card?.identity;
+  const current = card?.mode === 'loader' ? card.identity : null;
   const info = current ?? card?.lastIdentity;
   const transport = info?.transport ?? card?.transport;
   const nativeUsb = transport === 'usb_otg' || transport === 'usb_serial_jtag';
   const activeBaud = card?.activeBaud;
+  const rate = card?.observation?.operations.find(entry => entry.bytesPerSecond)?.bytesPerSecond;
   const boot = card?.boot;
   const chip = boot?.chip?.toUpperCase().replace(/^ESP32(?=[A-Z])/, 'ESP32-');
   const chipHint = [chip, boot?.revision].filter(Boolean).join(' · ');
@@ -241,7 +358,7 @@ function renderIdentification() {
     'interface-info': [{usb_serial_jtag: 'USB Serial/JTAG', usb_otg: 'USB OTG',
       usb_uart: 'Pont USB–UART'}[transport], card?.portLabel].filter(Boolean).join(' · ') || null,
     'serial-speed-info': activeBaud ? (nativeUsb ? 'USB natif' : number.format(activeBaud) + ' bauds') : null,
-    'transfer-rate-info': card?.flashReadRate ? number.format(card.flashReadRate / 1024) + ' Kio/s' : null,
+    'transfer-rate-info': rate ? number.format(rate / 1024) + ' Kio/s' : null,
     'footer-target': card?.name,
   })) $(id).textContent = value ?? '—';
 
@@ -250,7 +367,8 @@ function renderIdentification() {
     ? (info ? 'Mesures conservées du dernier passage en chargeur sur ce port.'
       : card.canEnterLoader ? 'Identifier mesure la flash, la MAC et le RDID via le chargeur.'
       : 'Pour mesurer l’identité complète, place la carte en téléchargement puis reconnecte-la dans IDLab.')
-    : card?.consoleUnavailable ? manualConsoleReturn : (current ? 'Identité lue par le chargeur.' : '');
+    : card?.consoleUnavailable && !card.canReturnToConsole
+      ? manualConsoleReturn : (current ? 'Identité lue par le chargeur.' : '');
   hint.hidden = !hint.textContent;
 
 }
@@ -258,7 +376,7 @@ function renderIdentification() {
 function renderRom(available) {
   const card = selected;
   const active = card?.mode === 'loader' && card.identity?.loader === 'rom';
-  const canOpen = card && !card.busy && !card.requesting && !['connecting', 'closing'].includes(card.mode);
+  const canOpen = available && !['connecting', 'closing'].includes(card.mode);
   $('open-rom').disabled = !canOpen || active;
   $('rom-jedec').disabled = !available || !active;
   $('rom-help').textContent = !card ? 'Ajoute et sélectionne une carte.'
@@ -266,7 +384,7 @@ function renderRom(available) {
     : 'Ouvre une session ROM pour identifier la carte ou lire son JEDEC.';
   $('rom-identity').textContent = active
     ? (card.identity.model ?? card.identity.chip) + ' · MAC ' + card.identity.mac : '';
-  const jedec = active ? card.romJedec : null;
+  const jedec = active ? card.observation?.device.jedec : null;
   $('rom-flash-id').textContent = jedec
     ? 'RDID 0x' + jedec.flash_id.toString(16).padStart(6, '0') + ' · ' +
       (jedec.flash_size ? jedec.flash_size / (1024 * 1024) + ' Mio' : 'capacité inconnue')
@@ -300,7 +418,9 @@ function render() {
     if (moveFocus) operationsTab.focus();
   }
   consolesTab.disabled = consoleUnavailable;
-  consolesTab.title = consoleUnavailable ? manualConsoleReturn : '';
+  consolesTab.title = consoleUnavailable
+    ? selected.canReturnToConsole ? 'Utilise « Revenir à la console » dans les commandes de la carte.' : manualConsoleReturn
+    : '';
   for (const id of ['tab-partitions', 'tab-flash', 'tab-memory', 'tab-tools']) {
     const tab = $(id);
     if (romActive && tab.getAttribute('aria-selected') === 'true') {
@@ -314,7 +434,8 @@ function render() {
     tab.title = romActive ? 'Indisponible pendant la session ROM seule.' : '';
   }
   renderIdentification();
-  const available = selected && !selected.busy && !selected.requesting;
+  const external = externallyControlled(selected);
+  const available = selected && !external && !selected.busy && !selected.requesting;
   const loader = available && selected.mode === 'loader';
   renderRom(available);
   const autoLoader = available && selected.mode === 'console' && selected.canEnterLoader;
@@ -333,9 +454,11 @@ function render() {
   const reset = $('reset-device');
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
-  reset.title = consoleUnavailable ? manualConsoleReturn : 'Redémarre la carte depuis la console.';
+  reset.title = consoleUnavailable ? consolesTab.title : 'Redémarre la carte depuis la console.';
   $('identify-live').disabled = !(loader || autoLoader);
-  $('enter-loader').disabled = !autoLoader;
+  const modeButton = $('enter-loader');
+  modeButton.textContent = selected?.mode === 'loader' ? 'Revenir à la console' : 'Ouvrir le chargeur flash';
+  modeButton.disabled = !(autoLoader || (available && selected.canReturnToConsole));
   $('send').disabled = !(available && selected.mode === 'console');
   $('mark').disabled = !selected;
   $('export').disabled = !selected;
@@ -344,11 +467,13 @@ function render() {
   $('pause').textContent = selected?.pausedAt != null ? 'Reprendre l’affichage' : 'Pause affichage';
   $('follow').hidden = !selected || selected.follow;
   $('follow-state').textContent = selected?.follow ? 'Suivi du direct' : 'Défilement manuel';
-  $('status-label-agent').textContent = [...cards.values()].some(c => c.mode === 'loader')
-    ? 'Agent connecté' : 'Agent hors ligne';
-  $('server-state').textContent = $('status-label-agent').textContent;
-  $('control-state').textContent = selected?.busy ? 'Opération en cours' : 'Disponible';
-  $('status-label-control').textContent = $('control-state').textContent;
+  $('control-state').textContent = selected?.observation?.device.control === 'stopping' ? 'Arrêt en cours'
+    : selected?.observation?.device.control === 'busy' || selected?.requesting ? 'Opération en cours' : external ? 'Pilotage externe' : 'Disponible';
+  $('grant').disabled = !selected?.identity || selected.hasControlToken || !['console', 'loader'].includes(selected.mode);
+  $('revoke').disabled = !selected?.hasControlToken;
+  $('release-control').disabled = !external || selected?.observation?.device.control === 'stopping';
+  $('grant-state').textContent = selected?.hasControlToken ? 'Jeton émis' : 'Aucun jeton';
+  void updateWakeLock();
   renderConsole();
   renderOperations();
   renderJournal();
@@ -357,21 +482,21 @@ function render() {
 function addCard(name, port, flashBaud) {
   const card = new BoardConnector(name, port, {
     flashBaud,
+    campaignId: () => activeCampaignId,
+    onLinkLost: () => say('Liaison perdue avec « ' + name + ' ».'),
     onChange: () => {
+      if (!card.identity) card.observation = null;
       render();
       if (card === romTarget && romPortSeen) queueMicrotask(openRomWhenReady);
     },
-    onCapture: () => scheduleConsole(card),
-    onJournal: message => note(card, message),
-    onProgress: () => { if (card === selected) renderFlashProgress(); },
   });
-  Object.assign(card, {follow: true, pausedAt: null, operations: [], journal: []});
+  Object.assign(card, {follow: true, pausedAt: null, capture: new ConsoleBuffer(), boot: new BootIdentity()});
   const row = element('div', undefined, 'active-board');
   card.row = row;
   card.nameButton = element('button', name, 'board-name');
   card.status = element('button', '', 'board-status');
   card.remove = element('button', 'Retirer');
-  card.nameButton.onclick = () => { selected = card; render(); };
+  card.nameButton.onclick = () => { selected = card; render(); void observeCard(card); };
   card.status.onclick = () => run(() => card.mode === 'disconnected' ? connectCard(card) : card.disconnect());
   card.remove.onclick = () => run(async () => {
     await card.disconnect();
@@ -395,6 +520,45 @@ async function run(action) {
   }
 }
 
+async function controlAction(action) {
+  const card = selected;
+  if (!card) return;
+  const response = await fetch('/api/v1/devices/' + card.name + '/control/' + action, {method: 'POST'});
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error ?? ('HTTP ' + response.status));
+  if (result.token) {
+    $('control-token-card').textContent = card.name;
+    $('control-token').value = result.token;
+    $('control-token-feedback').textContent = '';
+    $('control-token-dialog').showModal();
+  } else if (action === 'revoke' && card.mode === 'disconnected') {
+    card.hasControlToken = false;
+    render();
+  }
+}
+$('grant').onclick = () => run(() => controlAction('token'));
+$('revoke').onclick = () => run(() => controlAction('revoke'));
+$('release-control').onclick = () => run(() => controlAction('stop'));
+$('control-token-copy').onclick = async () => {
+  const dialog = $('control-token-dialog');
+  const input = $('control-token');
+  const token = input.value;
+  if (!dialog.open || !token) return;
+  try {
+    await navigator.clipboard.writeText(token);
+    if (dialog.open && input.value === token) $('control-token-feedback').textContent = 'Jeton copié.';
+  } catch {
+    if (!dialog.open || input.value !== token) return;
+    input.focus();
+    input.select();
+    $('control-token-feedback').textContent = 'Copie automatique indisponible. Appuie sur Ctrl+C.';
+  }
+};
+$('control-token-dialog').onclose = () => {
+  $('control-token').value = '';
+  $('control-token-feedback').textContent = '';
+};
+
 async function connectCard(card) {
   await card.connect();
   if (card !== selected) return;
@@ -403,13 +567,20 @@ async function connectCard(card) {
   if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
 }
 
+function suggestBoardName() {
+  while (cards.has('board_' + nextBoardNumber)) nextBoardNumber++;
+  return 'board_' + nextBoardNumber;
+}
+
 async function addFromPicker() {
   if (adding) return;
   function feedback(message) {
     $('add-card-feedback').textContent = message;
     say(message);
   }
-  const name = $('add-device-id').value.trim();
+  const input = $('add-device-id');
+  const enteredName = input.value;
+  const name = enteredName.trim();
   const flashBaud = Number($('flash-baud').value);
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(name)) return feedback('Saisis un nom de carte valide.');
   if (cards.has(name)) return feedback('Ce nom est déjà utilisé.');
@@ -421,7 +592,9 @@ async function addFromPicker() {
     const port = await navigator.serial.requestPort();
     if ([...cards.values()].some(card => card.port === port)) return feedback('Ce port est déjà associé à une carte.');
     feedback('Détection de la carte…');
-    await connectCard(addCard(name, port, flashBaud));
+    const card = addCard(name, port, flashBaud);
+    if (input.value === enteredName) input.value = suggestBoardName();
+    await connectCard(card);
     $('add-card-feedback').textContent = '';
   } catch (error) {
     feedback(error.name === 'NotFoundError' ? 'Aucun port sélectionné.' : error.message);
@@ -439,9 +612,30 @@ navigator.serial?.addEventListener('disconnect', event => {
 
 $('reset-device').onclick = () => run(() => selected?.restart());
 $('enter-loader').onclick = () => run(async () => {
-  await selected?.enterLoader();
-  $('workspace-tab-operations').click();
-  $('tab-memory').click();
+  const card = selected;
+  if (!card || $('enter-loader').disabled) return;
+  if (card.mode === 'loader') {
+    await card.returnConsole();
+    if (card === selected) $('workspace-tab-consoles').click();
+  } else {
+    say('Ouverture du chargeur flash sur « ' + card.name + ' »…');
+    try {
+      await card.enterLoader();
+    } catch (error) {
+      const messages = {
+        'Failed to connect with the device': 'La carte ne répond pas en mode téléchargement.',
+        device_command_timeout: 'Le connecteur série n’a pas répondu à temps.',
+        device_session_changed: card.lost ? 'Le port USB s’est déconnecté pendant la bascule.'
+          : 'La session de la carte a été interrompue.',
+      };
+      const detail = messages[error.message] ?? error.message;
+      throw new Error('Impossible d’ouvrir le chargeur sur « ' + card.name + ' ». ' + detail);
+    }
+    if (card !== selected) return;
+    say('Chargeur flash ouvert sur « ' + card.name + ' ».');
+    $('workspace-tab-operations').click();
+    $('tab-memory').click();
+  }
 });
 const romDialog = $('rom-reset-dialog');
 const romProgress = $('rom-reset-progress');
@@ -545,7 +739,6 @@ async function readPartitions() {
     card.suggestPartition = address === 0x8000 && error.message === 'partition_table_invalid';
     card.partitionStatus = error.message === 'partition_table_invalid' ? 'Aucune table valide à cette adresse.' : error.message;
   } finally {
-    note(card, 'Partitions : ' + card.partitionStatus);
     if (card === selected) render();
   }
 }
@@ -555,37 +748,23 @@ $('try-partition-address').onclick = () => { $('partition-address').value = '0x1
 $('read').onclick = async () => {
   const card = selected;
   if (!card || card.busy || card.requesting || $('read').disabled) return;
-  const started = Date.now();
-  const entry = {
-    id: card.operations.length + 1, device: card.name, command: 'flash.read',
-    state: 'En cours', startedAt: new Date(started).toISOString(),
-  };
-  card.operations.unshift(entry);
   card.dump = null;
   $('read').disabled = true;
   renderOperations();
   try {
     const address = flashNumber($('address').value.trim());
     const size = flashNumber($('size').value.trim());
-    Object.assign(entry, {address, size});
     const {blob} = await card.readFlash(address, size);
     const preview = new Uint8Array(await blob.slice(0, 256).arrayBuffer());
     card.dump = {blob, filename: card.name + '-0x' + address.toString(16) + '.bin',
       summary: blob.size + ' octets lus • aperçu des ' + preview.length + ' premiers octets',
       preview: Array.from(preview, byte => byte.toString(16).padStart(2, '0')).join(' ')};
-    entry.state = 'Terminée';
-    entry.bytesRead = blob.size;
-    entry.preview = card.dump.preview;
-    entry.detail = card.dump.summary;
-    say(entry.detail);
+    say(card.dump.summary);
   } catch (error) {
-    entry.state = 'Échec';
-    entry.detail = error.message;
-    say(entry.detail);
+    say(error.message);
   } finally {
-    entry.duration = (Date.now() - started) + ' ms';
-    note(card, 'Lecture flash : ' + entry.detail);
     if (card === selected) render();
+    void observeCard(card);
   }
 };
 
@@ -603,9 +782,8 @@ $('send').onclick = async () => {
       payload = Uint8Array.from(compact.match(/../g), byte => parseInt(byte, 16));
     }
     await card.write(payload);
-    card.capture.note('TX', value);
     $('uart').value = '';
-    scheduleConsole(card);
+    void observeCard(card);
   } catch (error) { say(error.message); }
   finally { sending = false; }
 };
@@ -643,10 +821,16 @@ $('agent-log-toggle').onclick = event => {
   event.currentTarget.setAttribute('aria-expanded', !log.hidden);
   event.currentTarget.textContent = log.hidden ? 'Développer' : 'Réduire';
 };
-$('agent-log-clear').onclick = () => { if (selected) selected.journal.length = 0; renderJournal(); };
+$('agent-log-clear').onclick = () => {
+  if (selected) selected.journalAfter = selected.lastJournal?.at(-1)?.at;
+  renderJournal();
+};
 const emptyCards = element('p', 'Aucune carte connectée dans cette fenêtre.', 'hint');
 emptyCards.id = 'empty-cards';
 $('active-cards').replaceChildren(emptyCards);
+$('add-device-id').value = suggestBoardName();
 $('server-origin').textContent = location.origin;
 say('Ajoute une carte pour ouvrir une console ou une session chargeur.');
 render();
+void checkServer();
+watchApiActivity();
