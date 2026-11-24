@@ -24,18 +24,53 @@ python core/server.py
 Ouvrir <http://127.0.0.1:8080>. Choisir un nom et le port de la carte.
 En mode stub standard, le pilote peut faire entrer automatiquement la carte
 en mode téléchargement sur un pont UART reconnu ou sur USB Serial/JTAG.
-Si le câblage ne permet pas le reset automatique, cocher l'option de mode
-téléchargement manuel. Pour un transport inconnu ou USB-OTG, placer d'abord
-la carte en mode téléchargement. Le stub standard s'exécute en RAM.
+Si le câblage ou le transport exige une entrée manuelle, placer d’abord
+la carte en mode téléchargement avec BOOT et RESET. Le stub standard
+s’exécute en RAM.
 Le mode ROM seule donne l'identité sans charger de stub.
 
 ## Console série
 
-Dans l’interface IDLab, sélectionner **Console série**, renseigner le débit du
-firmware et cliquer sur **Connecter**. La console affiche les octets reçus sous
-forme de texte UTF-8 et permet d’envoyer une commande. Les échanges restent
-dans le navigateur pour cette session. Pour lire la flash sur le même port,
-déconnecter la console et reconnecter la carte en mode **Flash — stub standard**.
+Dans **Cartes actives**, saisir un nom et cliquer sur **Ajouter une carte**.
+IDLab cherche automatiquement une réponse du chargeur sans demander de
+reset. Si le chargeur répond, IDLab identifie la puce et prépare la lecture
+flash. Si le chargeur ne répond pas, IDLab ouvre la console à 115 200 bauds.
+Sur un pont USB–UART, le débit flash choisi dans les options avancées
+s’applique après synchronisation et démarrage du stub. IDLab vérifie
+sa réponse au nouveau débit avant de commencer une lecture. Si le débit
+n’est pas confirmé, redémarrer manuellement en téléchargement et ajouter
+la carte avec un débit inférieur. En USB natif, la vitesse utile se lit
+dans **Dernière lecture flash**, en Kio/s.
+Quand la carte est connectée en téléchargement, le reset depuis IDLab et
+l’onglet **Consoles** sont indisponibles. L’API des cartes n’expose aucune
+commande de reset matériel. Pour retrouver la console,
+déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT,
+puis reconnecte-la depuis la liste des cartes.
+Le panneau Identification reprend les indices du démarrage ESP-IDF visibles
+sur l’UART, dont la puce, la révision et la taille flash configurée.
+**Identifier**, **Relire la table** et **Lire la flash** passent par le
+connecteur de la carte. Sur un pont UART reconnu ou USB Serial/JTAG, elles
+ouvrent le chargeur si nécessaire, puis rétablissent le mode de départ.
+La carte peut redémarrer et la capture UART est suspendue pendant
+l’opération. Si le port exige une entrée manuelle, place la carte en mode
+téléchargement et reconnecte-la avant la lecture.
+L’identité mesurée et la capture restent affichées au retour en console.
+Si une plage dépasse 4 Mio, l’interface découpe la lecture en requêtes
+successives et assemble un seul dump. L’API accepte 4 Mio par requête.
+Dans **Opérations → Historique des opérations**, le bouton **Inspecter**
+rouvre le résultat d’une lecture flash de la carte sélectionnée. Le détail
+peut être copié ou téléchargé en JSON. L’historique est conservé tant que
+la page reste ouverte et que la carte reste dans la liste.
+**Opérations → ROM seule** ouvre une session
+sans stub sur la carte sélectionnée, affiche son identité et permet une
+lecture du JEDEC. Pendant cette session, **Consoles**, **Partitions**,
+**Plan flash**, **Lecture mémoire** et **Déclencheurs et outils** sont grisés
+pour la carte sélectionnée. Une boîte de dialogue propose un reset
+automatique depuis une console sur un port compatible. Elle guide
+l’entrée manuelle avec BOOT et RESET dans les autres cas. Si le navigateur détecte à
+nouveau le même port, IDLab tente la connexion automatiquement. La boîte
+se ferme une fois la session ROM confirmée. La tentative manuelle reste
+disponible via **Essayer la connexion**.
 
 ## Piloter depuis Python
 

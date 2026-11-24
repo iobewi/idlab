@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { openSerialConsole } from '../web/serial-console.js';
+import { openSerialConsole, resetConsole } from '../web/serial-console.js';
 
 test('console reads split UTF-8, writes commands and releases the port', async () => {
   let input;
@@ -41,4 +41,50 @@ test('disconnect cancels the pending serial read', async () => {
   const session = await openSerialConsole(port, 115200, () => {});
   await session.close();
   assert.equal(cancelled, true);
+});
+
+test('historical console receives raw UART data and sends literal hex bytes', async () => {
+  const input = Uint8Array.of(0, 255, 13);
+  const captured = [];
+  const writes = [];
+  let inputStream;
+  const port = {
+    readable: new ReadableStream({start(controller) { inputStream = controller; }}),
+    writable: new WritableStream({write(chunk) { writes.push(chunk); }}),
+    async open() {},
+    async close() {},
+  };
+  const session = await openSerialConsole(port, 115200, null, bytes => captured.push(bytes));
+  inputStream.enqueue(input);
+  await session.write(input);
+  inputStream.close();
+  await session.done;
+  assert.deepEqual(captured, [input]);
+  assert.deepEqual(writes, [input]);
+  await session.close();
+});
+
+test('opening the console releases DTR and RTS before reading', async () => {
+  const signals = [];
+  const port = {
+    readable: new ReadableStream(),
+    async open() {},
+    async setSignals(value) {
+      assert.equal(this.readable.locked, false);
+      signals.push(value);
+    },
+    async close() {},
+  };
+  const console = await openSerialConsole(port, 115200, null);
+  assert.deepEqual(signals, [{dataTerminalReady: false, requestToSend: false}]);
+  await console.close();
+});
+
+test('an explicit reset pulses RTS and leaves DTR deasserted', async () => {
+  const signals = [];
+  await resetConsole({async setSignals(value) { signals.push(value); }}, 0);
+  assert.deepEqual(signals, [
+    {dataTerminalReady: false, requestToSend: true},
+    {dataTerminalReady: false, requestToSend: false},
+  ]);
 });

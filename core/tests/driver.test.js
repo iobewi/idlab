@@ -36,9 +36,11 @@ test('ROM identifies without launching a stub; production reads use one reader',
     async usesUsbOtg() { return true; }
     async runStub() { this.IS_STUB = true; }
     async readFlashId() { return 0x1940c8; }
-    async readFlash(address, size, check) {
-      check();
-      return new Uint8Array(size).fill(address ? 2 : 1);
+    async readFlash(address, size, onPacket) {
+      const block = new Uint8Array(size).fill(address ? 2 : 1);
+      onPacket(block.subarray(0, 1), 1);
+      if (size > 1) onPacket(block.subarray(1), size);
+      return block;
     }
   }
 
@@ -53,8 +55,69 @@ test('ROM identifies without launching a stub; production reads use one reader',
   const loaded = await stub.connect({});
   assert.equal(loaded.loader, 'stub');
   assert.equal(loaded.transport, 'usb_otg');
-  const bytes = await stub.readFlash(0, 1048577, () => {});
+  const progress = [];
+  const bytes = await stub.readFlash(0, 1048577, () => {}, received => progress.push(received));
+  assert.deepEqual(progress, [1, 1048576, 1048577]);
   assert.equal(bytes[0], 1);
   assert.equal(bytes.at(-1), 2);
   await assert.rejects(stub.readFlash(0, 1, () => { throw new Error('closed'); }), /closed/);
+});
+
+test('automatic connection uses an already responding downloader without reset', async () => {
+  class FakeLoader {
+    chip = {
+      CHIP_NAME: 'ESP32-S3',
+      readMac: async () => '10:20:30:40:50:60',
+      getChipDescription: async () => 'ESP32-S3 (revision v0.2)',
+    };
+    async openAndSync(mode, attempts) {
+      assert.equal(mode, 'no_reset');
+      assert.equal(attempts, 1);
+    }
+    async detectChip(...args) { await this.openAndSync(...args); }
+    async runStub() { this.IS_STUB = true; }
+    async readFlashId() { return 0x184068; }
+  }
+
+  const port = {getInfo: () => ({usbVendorId: 0x303a, usbProductId: 0x1001})};
+  const driver = new EspDriver(port, {...upstream, ESPLoader: FakeLoader});
+  assert.deepEqual(await driver.connect({auto: true}), {
+    chip: 'esp32s3', model: 'ESP32-S3 (revision v0.2)', mac: '10:20:30:40:50:60',
+    flash_size: 16 * 1024 * 1024, flash_id: 0x184068,
+    transport: 'usb_serial_jtag', usb_vid: 0x303a, usb_pid: 0x1001, loader: 'stub',
+  });
+});
+
+test('automatic connection falls back only when no downloader answered', async () => {
+  class NoAnswer {
+    async openAndSync() { throw new Error('Failed to connect with the device'); }
+    async detectChip(...args) { await this.openAndSync(...args); }
+  }
+  class FailingIdentification extends NoAnswer {
+    async openAndSync() {}
+    async detectChip(...args) {
+      await this.openAndSync(...args);
+      throw new Error('Failed to connect with the device');
+    }
+  }
+  const port = {getInfo: () => ({}), readable: {}, writable: {}};
+  const silent = new EspDriver(port, {...upstream, ESPLoader: NoAnswer});
+  assert.equal(await silent.connect({auto: true}), null);
+  const known = new EspDriver(port, {...upstream, ESPLoader: FailingIdentification});
+  await assert.rejects(known.connect({auto: true}), /Failed to connect/);
+});
+
+test('transport can read again after esptool reopens it for identification', async () => {
+  class FakeTransport extends upstream.Transport {
+    async connect() {}
+    async disconnect() {}
+  }
+  const Transport = serialTransport(FakeTransport, upstream.ESPError);
+  const transport = new Transport({});
+  await transport.connect();
+  await transport.disconnect();
+  await assert.rejects(transport.read(100), /serial_closed/);
+  await transport.connect();
+  transport.buffer = Uint8Array.of(0xc0, 42, 0xc0);
+  assert.deepEqual(await transport.read(100), Uint8Array.of(42));
 });

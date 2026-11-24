@@ -56,9 +56,22 @@ def validate_identity(value):
         raise ValueError("invalid_transport")
     if loader not in ("rom", "stub"):
         raise ValueError("invalid_loader")
+    metadata = {}
+    if "model" in value:
+        model = value["model"]
+        if not isinstance(model, str) or not 1 <= len(model) <= 160:
+            raise ValueError("invalid_model")
+        metadata["model"] = model
+    for key, maximum in (("flash_id", 0xffffff), ("usb_vid", 0xffff), ("usb_pid", 0xffff)):
+        if key in value:
+            field = value[key]
+            if field is not None and (type(field) is not int or not 0 <= field <= maximum):
+                raise ValueError(f"invalid_{key}")
+            metadata[key] = field
     return {
         "chip": chip, "mac": mac.lower(), "flash_size": size, "transport": transport, "loader": loader,
         "capabilities": ["identify", "flash.read"] if loader == "stub" and size else ["identify"],
+        **metadata,
     }
 
 
@@ -246,9 +259,14 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     async def close_agents(app):
         await asyncio.gather(*(socket.close(code=1001) for socket in tuple(sockets)))
 
+    async def revalidate_browser_files(request, response):
+        if request.path in {"/", "/esptool.js"} or request.path.startswith("/web/"):
+            response.headers["Cache-Control"] = "no-cache"
+
     app = web.Application(middlewares=[local_access], client_max_size=4096)
     app.cleanup_ctx.append(campaign_storage)
     app.on_shutdown.append(close_agents)
+    app.on_response_prepare.append(revalidate_browser_files)
     app.add_routes([
         web.get("/", index),
         web.get("/health", health),

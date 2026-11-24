@@ -1,8 +1,21 @@
+const idleSignals = {dataTerminalReady: false, requestToSend: false};
+
+// An explicit firmware restart for the known USB reset circuits.
+export async function resetConsole(port, holdMs) {
+  try {
+    await port.setSignals({dataTerminalReady: false, requestToSend: true});
+    await new Promise(resolve => setTimeout(resolve, holdMs));
+  } finally {
+    await port.setSignals(idleSignals);
+  }
+}
+
 // A console owns this Web Serial port until close() completes.
-export async function openSerialConsole(port, baudRate, onText) {
+export async function openSerialConsole(port, baudRate, onText, onBytes = () => {}) {
   await port.open({ baudRate });
   let reader;
   try {
+    await port.setSignals?.(idleSignals);
     reader = port.readable.getReader();
   } catch (error) {
     await port.close();
@@ -11,7 +24,7 @@ export async function openSerialConsole(port, baudRate, onText) {
   let closing;
   let ended = false;
   let writing = Promise.resolve();
-  const decoder = new TextDecoder();
+  const decoder = onText ? new TextDecoder() : null;
   const encoder = new TextEncoder();
 
   const done = (async () => {
@@ -19,9 +32,10 @@ export async function openSerialConsole(port, baudRate, onText) {
       for (;;) {
         const {value, done: eof} = await reader.read();
         if (eof) break;
-        onText(decoder.decode(value, {stream: true}));
+        onBytes(value);
+        if (decoder) onText(decoder.decode(value, {stream: true}));
       }
-      const remainder = decoder.decode();
+      const remainder = decoder?.decode();
       if (remainder) onText(remainder);
     } finally {
       ended = true;
@@ -37,7 +51,7 @@ export async function openSerialConsole(port, baudRate, onText) {
         if (ended) throw new Error('Console déconnectée.');
         const writer = port.writable.getWriter();
         try {
-          await writer.write(encoder.encode(text));
+          await writer.write(typeof text === 'string' ? encoder.encode(text) : text);
         } finally {
           writer.releaseLock();
         }

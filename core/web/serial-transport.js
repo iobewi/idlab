@@ -9,12 +9,22 @@ export function serialTransport(Transport, ESPError) {
       if (bytes.length) this.wake?.();
     }
 
+    async connect(...args) {
+      this.generation = (this.generation ?? 0) + 1;
+      this.closed = false;
+      this.buffer = empty;
+      return super.connect(...args);
+    }
+
     async readLoop() {
+      const generation = this.generation;
       try {
         await super.readLoop();
       } finally {
-        this.closed = true;
-        this.wake?.();
+        if (this.generation === generation) {
+          this.closed = true;
+          this.wake?.();
+        }
       }
     }
 

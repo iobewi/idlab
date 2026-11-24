@@ -7,7 +7,19 @@ import unittest
 from aiohttp import CookieJar
 from aiohttp.test_utils import TestClient, TestServer
 
-from server import create_app
+from server import create_app, validate_identity
+
+
+class IdentityTests(unittest.TestCase):
+    def test_identification_retains_loader_details_and_read_capability(self):
+        value = {
+            "chip": "esp32s3", "model": "ESP32-S3 (revision v0.2)", "mac": "10:20:30:40:50:60",
+            "flash_size": 16 * 1024 * 1024, "flash_id": 0x184068, "loader": "stub",
+            "transport": "usb_serial_jtag", "usb_vid": 0x303a, "usb_pid": 0x1001,
+        }
+        self.assertEqual(validate_identity(value), value | {"capabilities": ["identify", "flash.read"]})
+        with self.assertRaises(ValueError):
+            validate_identity(value | {"flash_id": -1})
 
 
 class CoreTests(unittest.IsolatedAsyncioTestCase):
@@ -40,6 +52,17 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             json={"generation": generation, "address": address, "size": size},
         )
 
+    async def test_workbench_files_are_revalidated_after_deploy(self):
+        for path in ("/", "/web/app.js", "/web/board-connector.js", "/web/style.css"):
+            with self.subTest(path=path):
+                async with self.browser.get(path, headers=self.local) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.headers["Cache-Control"], "no-cache")
+                    etag = response.headers["ETag"]
+                async with self.browser.get(path, headers=self.local | {"If-None-Match": etag}) as response:
+                    self.assertEqual(response.status, 304)
+                    self.assertEqual(response.headers["Cache-Control"], "no-cache")
+
     async def test_web_and_script_use_same_read(self):
         ws, generation = await self.board("board")
         response = await self.browser.get("/api/v1/devices/board", headers=self.script)
@@ -52,6 +75,29 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             response = await read
             self.assertEqual(response.status, 200)
             self.assertEqual(await response.read(), data)
+
+    async def test_device_api_does_not_expose_hardware_reset(self):
+        _, rom_generation = await self.board("rom", loader="rom")
+        stub, stub_generation = await self.board("stub")
+        for name, generation in (("rom", rom_generation), ("stub", stub_generation)):
+            path = f"/api/v1/devices/{name}"
+            for action in ("reset", "restart"):
+                response = await self.browser.post(
+                    f"{path}/{action}", headers=self.script, json={"generation": generation},
+                )
+                self.assertEqual(response.status, 404)
+            response = await self.browser.post(
+                f"{path}/flash/read", headers=self.script,
+                json={"generation": generation, "address": 0, "size": 4, "command": "reset"},
+            )
+            self.assertEqual((response.status, await response.json()), (400, {"error": "invalid_arguments"}))
+            session = await self.browser.get(path, headers=self.script)
+            self.assertEqual((await session.json())["generation"], generation)
+
+        read = asyncio.create_task(self.read("stub", stub_generation))
+        self.assertEqual((await stub.receive_json(timeout=2))["command"], "flash.read")
+        await stub.send_bytes(b"data")
+        self.assertEqual(await (await read).read(), b"data")
 
     async def test_two_boards_stay_independent(self):
         a, ga = await self.board("a")
