@@ -1,0 +1,71 @@
+{
+  "version": "2.0.0",
+  "type": "process",
+  "command": "powershell.exe",
+  "options": {
+    "cwd": "${workspaceFolder}"
+  },
+  "problemMatcher": [],
+  "tasks": [
+    {
+      "label": "IDLab : Préparer le conteneur",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "RemoteSigned",
+        "-File",
+        "${workspaceFolder}/.vscode/idlab.ps1",
+        "-Action",
+        "prepare"
+      ]
+    },
+    {
+      "label": "IDLab : Démarrer le serveur HTTP",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "RemoteSigned",
+        "-File",
+        "${workspaceFolder}/.vscode/idlab.ps1",
+        "-Action",
+        "start"
+      ]
+    },
+    {
+      "label": "IDLab : Arrêter le serveur HTTP",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "RemoteSigned",
+        "-File",
+        "${workspaceFolder}/.vscode/idlab.ps1",
+        "-Action",
+        "stop"
+      ]
+    },
+    {
+      "label": "IDLab : Redémarrer le serveur HTTP",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "RemoteSigned",
+        "-File",
+        "${workspaceFolder}/.vscode/idlab.ps1",
+        "-Action",
+        "restart"
+      ]
+    },
+    {
+      "label": "IDLab : État du serveur HTTP",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "RemoteSigned",
+        "-File",
+        "${workspaceFolder}/.vscode/idlab.ps1",
+        "-Action",
+        "status"
+      ]
+    }
+  ]
+}

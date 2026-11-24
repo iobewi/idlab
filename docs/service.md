@@ -13,6 +13,28 @@ l'API du banc. Le gestionnaire, l’interface, l’API et Web Serial utilisent l
 Compose le publie sur `127.0.0.1` de l’hôte. Le serveur HTTP enfant écoute
 sur un port privé du conteneur. Utiliser Docker Engine 28 ou plus récent.
 
+## Depuis VS Code sur Windows
+
+Ouvrir le dépôt dans une **fenêtre locale Windows** de VS Code. Si la fenêtre
+est attachée au Dev Container, ouvrir le même dossier dans une deuxième fenêtre
+locale. Dans la palette `Ctrl+Maj+P`, choisir **Tasks: Run Task**, puis une
+tâche **IDLab**.
+
+1. **Préparer le conteneur** construit et lance le conteneur Compose. Si aucun
+   jeton ni fichier `.env` n’existe, cette tâche génère un jeton de gestion
+   dans le fichier local `.env`, ignoré par Git.
+2. **Démarrer le serveur HTTP** lance le processus HTTP et attend qu’il soit
+   prêt. Ouvrir ensuite `http://127.0.0.1:8080/` dans le navigateur Windows.
+3. **État du serveur HTTP**, **Arrêter le serveur HTTP** et **Redémarrer le
+   serveur HTTP** pilotent le même processus par API sur le port 8080.
+
+Les tâches utilisent `IDLAB_MANAGER_TOKEN` dans l’environnement de VS Code
+ou une ligne `IDLAB_MANAGER_TOKEN=valeur` sans guillemets dans `.env`.
+Pour un conteneur déjà lancé, reprendre le jeton utilisé au démarrage. Un
+jeton défini dans une session PowerShell séparée doit être ajouté au `.env`
+local ou transmis à l’environnement de VS Code.
+Le conteneur de développement peut être fermé indépendamment du serveur.
+
 ## Appels HTTP
 
 Voir la [référence API v1](api.md) pour les cartes et les campagnes.
