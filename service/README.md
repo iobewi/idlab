@@ -15,6 +15,8 @@ sur un port privé du conteneur. Utiliser Docker Engine 28 ou plus récent.
 
 ## Appels HTTP
 
+Voir la [référence API v1](../docs/api.md) pour les cartes et les campagnes.
+
 Chaque requête de gestion doit porter
 `Authorization: Bearer <IDLAB_MANAGER_TOKEN>`. Les POST ont un corps vide.
 

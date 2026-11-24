@@ -5,8 +5,14 @@ services:
     build: .
     environment:
       IDLAB_LOOPBACK_FORWARDED: "1"
+      IDLAB_STATE_DIR: /var/lib/idlab
       IDLAB_TOKEN: ${IDLAB_TOKEN:-}
       IDLAB_MANAGER_TOKEN: ${IDLAB_MANAGER_TOKEN:?Set IDLAB_MANAGER_TOKEN}
     ports:
       - "127.0.0.1:8080:8080"
+    volumes:
+      - state:/var/lib/idlab
     stop_grace_period: 10s
+
+volumes:
+  state:

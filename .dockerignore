@@ -4,6 +4,7 @@
 !core/package.json
 !core/package-lock.json
 !core/server.py
+!core/campaigns.py
 !core/web/
 !core/web/**
 !service/

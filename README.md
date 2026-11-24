@@ -31,6 +31,9 @@ Le mode ROM seule donne l'identité sans charger de stub.
 
 ## Appeler l'API
 
+La [référence API v1](docs/api.md) décrit les commandes HTTP, les opérations
+des cartes et le cycle de vie des campagnes.
+
 Définir `IDLAB_TOKEN` dans l'environnement du serveur et du script. Garder
 sa valeur hors du dépôt. Le navigateur local fonctionne avec son propre
 cookie de session. Le serveur écoute uniquement sur la boucle locale.

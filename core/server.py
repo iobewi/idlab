@@ -11,6 +11,8 @@ import uuid
 
 from aiohttp import WSMsgType, web
 
+from campaigns import CampaignError, Campaigns
+
 ROOT = Path(__file__).resolve().parent
 BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
 MAX_READ = 4 * 1024 * 1024
@@ -60,11 +62,26 @@ def validate_identity(value):
     }
 
 
-def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=False):
+async def text_field(request, field, limit):
+    try:
+        payload = await request.json()
+    except (TypeError, ValueError) as error:
+        raise CampaignError(400, "invalid_json") from error
+    if not isinstance(payload, dict) or set(payload) != {field}:
+        raise CampaignError(400, "invalid_arguments")
+    value = payload[field]
+    if not isinstance(value, str) or not 1 <= len(value.strip()) <= limit:
+        raise CampaignError(400, "invalid_arguments")
+    return value.strip()
+
+
+def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=False,
+               campaign_db=":memory:"):
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     session = secrets.token_urlsafe(32)
     boards = {}
     sockets = set()
+    CAMPAIGNS = web.AppKey("campaigns", Campaigns)
 
     @web.middleware
     async def local_access(request, handler):
@@ -85,7 +102,37 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                     return problem(403, "browser_session_required")
             elif not script and (not browser or (request.method == "POST" and origin is None)):
                 return problem(401, "authentication_required")
-        return await handler(request)
+        try:
+            return await handler(request)
+        except CampaignError as error:
+            return problem(error.status, error.code)
+
+    async def campaign_storage(app):
+        campaigns = Campaigns(campaign_db)
+        app[CAMPAIGNS] = campaigns
+        try:
+            yield
+        finally:
+            campaigns.close()
+
+    async def start_campaign(request):
+        name = await text_field(request, "name", 120)
+        campaign = request.app[CAMPAIGNS].start(name)
+        return web.json_response(
+            campaign, status=201, headers={"Location": f"/api/v1/campaigns/{campaign['id']}"},
+        )
+
+    async def get_campaign(request):
+        return web.json_response(request.app[CAMPAIGNS].get(request.match_info["id"]))
+
+    async def finish_campaign(request):
+        verdict = await text_field(request, "verdict", 80)
+        return web.json_response(request.app[CAMPAIGNS].finish(request.match_info["id"], verdict))
+
+    async def abort_campaign(request):
+        reason = await text_field(request, "reason", 500)
+        campaign = request.app[CAMPAIGNS].abort(request.match_info["id"], reason)
+        return web.json_response(campaign, status=202 if campaign["state"] == "abort_requested" else 200)
 
     async def index(request):
         response = web.FileResponse(ROOT / "web/index.html")
@@ -145,7 +192,12 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             params = await request.json()
         except (TypeError, ValueError):
             return problem(400, "invalid_json")
-        if not isinstance(params, dict) or set(params) != {"generation", "address", "size"}:
+        required = {"generation", "address", "size"}
+        if not isinstance(params, dict) or not required <= params.keys() <= required | {"campaign_id"}:
+            return problem(400, "invalid_arguments")
+        campaign_id = params.get("campaign_id")
+        if "campaign_id" in params and (not isinstance(campaign_id, str) or
+                                        not re.fullmatch(r"[0-9a-f]{32}", campaign_id)):
             return problem(400, "invalid_arguments")
         board = boards.get(request.match_info["name"])
         if not board or board.socket.closed or params["generation"] != board.generation:
@@ -159,6 +211,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if board.pending:
             return problem(409, "device_busy")
 
+        campaigns = request.app[CAMPAIGNS]
+        if campaign_id is not None:
+            campaigns.enter(campaign_id)
         operation = Operation(uuid.uuid4().hex, asyncio.get_running_loop().create_future())
         board.pending = operation
         complete = False
@@ -171,9 +226,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         except (ConnectionError, TimeoutError):
             pass
         finally:
-            if not complete:
-                await board.socket.close(code=1011)
-            board.pending = None
+            try:
+                if not complete:
+                    await board.socket.close(code=1011)
+            finally:
+                board.pending = None
+                if campaign_id is not None:
+                    campaigns.leave(campaign_id)
         return problem(502, "read_incomplete_reconnect_required")
 
     async def identify(request):
@@ -184,10 +243,15 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         await asyncio.gather(*(socket.close(code=1001) for socket in tuple(sockets)))
 
     app = web.Application(middlewares=[local_access], client_max_size=4096)
+    app.cleanup_ctx.append(campaign_storage)
     app.on_shutdown.append(close_agents)
     app.add_routes([
         web.get("/", index),
         web.get("/health", health),
+        web.post("/api/v1/campaigns", start_campaign),
+        web.get("/api/v1/campaigns/{id}", get_campaign),
+        web.post("/api/v1/campaigns/{id}/finish", finish_campaign),
+        web.post("/api/v1/campaigns/{id}/abort", abort_campaign),
         web.get("/api/v1/devices", devices),
         web.get("/api/v1/devices/{name}", identify),
         web.post("/api/v1/devices/{name}/flash/read", read_flash),
@@ -205,5 +269,8 @@ if __name__ == "__main__":
     port = int(os.environ.get("IDLAB_PORT", "8080"))
     forwarded = os.environ.get("IDLAB_LOOPBACK_FORWARDED") == "1"
     public_port = int(os.environ.get("IDLAB_PUBLIC_PORT", str(port)))
-    app = create_app(port=public_port, token=os.environ.get("IDLAB_TOKEN"), loopback_forwarded=forwarded)
+    state_dir = Path(os.environ.get("IDLAB_STATE_DIR", Path.home() / ".local/state/idlab"))
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    app = create_app(port=public_port, token=os.environ.get("IDLAB_TOKEN"),
+                     loopback_forwarded=forwarded, campaign_db=state_dir / "campaigns.sqlite3")
     web.run_app(app, host="0.0.0.0" if forwarded else "127.0.0.1", port=port, shutdown_timeout=3)
