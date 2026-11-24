@@ -41,11 +41,14 @@ sa réponse au nouveau débit avant de commencer une lecture. Si le débit
 n’est pas confirmé, redémarrer manuellement en téléchargement et ajouter
 la carte avec un débit inférieur. En USB natif, la vitesse utile se lit
 dans **Dernière lecture flash**, en Kio/s.
-Quand la carte est connectée en téléchargement, le reset depuis IDLab et
+Quand la carte est détectée en téléchargement à la connexion, le reset depuis IDLab et
 l’onglet **Consoles** sont indisponibles. L’API des cartes n’expose aucune
 commande de reset matériel. Pour retrouver la console,
 déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT,
 puis reconnecte-la depuis la liste des cartes.
+Si IDLab a ouvert le chargeur depuis une console déjà active, le même
+bouton devient **Revenir à la console**. Le retour est disponible sur les
+ports à reset automatique quand le web a la main.
 Le panneau Identification reprend les indices du démarrage ESP-IDF visibles
 sur l’UART, dont la puce, la révision et la taille flash configurée.
 **Identifier**, **Relire la table** et **Lire la flash** passent par le

@@ -76,6 +76,7 @@ ou au redémarrage du serveur.
 | `GET /control/connect` (WebSocket) | Le jeton de pilotage est envoyé en Bearer. Renvoie un identifiant secret de session et la génération. La connexion ouverte réserve la carte. |
 | `POST /control/stop` | Session navigateur locale. Arrête le pilotage externe. Le jeton peut resservir. |
 | `POST /control/revoke` | Session navigateur locale. Supprime le jeton et arrête le pilotage externe. |
+| `POST /control/return-console` | Réserve la transition au navigateur local pour la génération fournie en JSON. Le connecteur ferme ensuite le canal du chargeur et effectue le retour console. |
 
 Pendant le pilotage externe, la lecture flash exige l’identifiant secret
 de la session en Bearer. Le jeton général `IDLAB_TOKEN` permet de consulter

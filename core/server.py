@@ -41,10 +41,11 @@ class Board:
     identity: dict
     pending: Operation | None = None
     control: Control | None = None
+    returning_to_console: bool = False
 
     def describe(self):
         state = ("stopping" if self.control and self.control.stopped else
-                 "busy" if self.pending else "external" if self.control else "available")
+                 "busy" if self.pending or self.returning_to_console else "external" if self.control else "available")
         return {"generation": self.generation, **self.identity, "control": state}
 
 
@@ -222,6 +223,17 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         name = request.match_info["name"]
         action = request.match_info["action"]
         board = boards.get(name)
+        if action == "return-console":
+            generation = await text_field(request, "generation", 32)
+            board = boards.get(name)
+            if not board or board.socket.closed or board.generation != generation:
+                return problem(409, "device_session_changed")
+            if board.control:
+                return problem(409, "externally_controlled")
+            if board.pending or board.returning_to_console:
+                return problem(409, "device_busy")
+            board.returning_to_console = True
+            return web.json_response({"control": "busy"})
         if action == "token":
             if not board or board.socket.closed:
                 return problem(404, "device_disconnected")
@@ -255,7 +267,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             return problem(403, "control_token_device_mismatch")
         if "flash.read" not in board.identity["capabilities"]:
             return problem(409, "operation_unsupported")
-        if board.control or board.pending:
+        if board.control or board.pending or board.returning_to_console:
             return problem(409, "device_busy")
         socket = web.WebSocketResponse(heartbeat=20)
         control = Control(secrets.token_urlsafe(32), socket)
@@ -343,7 +355,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if (type(address) is not int or type(size) is not int or address < 0
                 or not 0 < size <= MAX_READ or address + size > board.identity["flash_size"]):
             return problem(400, "invalid_flash_range")
-        if board.pending:
+        if board.pending or board.returning_to_console:
             return problem(409, "device_busy")
 
         campaigns = request.app[CAMPAIGNS]
@@ -402,7 +414,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         web.post("/api/v1/campaigns/{id}/abort", abort_campaign),
         web.get("/api/v1/devices", devices),
         web.get("/api/v1/devices/{name}", identify),
-        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke}", manage_control),
+        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke|return-console}", manage_control),
         web.get("/api/v1/devices/{name}/control/connect", connect_control),
         web.post("/api/v1/devices/{name}/flash/read", read_flash),
         web.get("/agent", agent),

@@ -98,6 +98,11 @@ function fixture({ vid = 0x10c4, failRead = false, inDownload = false, flashBaud
         if (socket.readyState === 3) throw new Error('device_disconnected');
         return {json: async () => identity};
       }
+      if (path === '/devices/board/control/return-console') {
+        assert.deepEqual(JSON.parse(options.body), {generation: 'generation'});
+        events.push('reserve-return');
+        return {};
+      }
       assert.equal(path, '/devices/board/flash/read');
       const {generation, address, size} = JSON.parse(options.body);
       assert.equal(generation, 'generation');
@@ -145,6 +150,8 @@ test('an automatically detected loader stays in download mode through reads and 
   assert.equal(card.mode, 'loader');
   assert.equal(card.consoleUnavailable, true);
   assert.equal(card.canResetIntoRom, false);
+  assert.equal(card.canReturnToConsole, false);
+  await assert.rejects(card.returnConsole(), /RESET manuel/);
   await assert.rejects(card.restart(), /Reset indisponible/);
   assert.deepEqual(events, ['detect:no_reset']);
   await card.disconnect();
@@ -157,6 +164,23 @@ test('an automatically detected loader stays in download mode through reads and 
   assert.equal(card.consoleUnavailable, false);
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'detect:no_reset',
     'close-loader', 'detect:no_reset', 'close-loader', 'console']);
+  await card.disconnect();
+});
+
+test('the explicit loader action can return to console and switch again', async () => {
+  const {card, events} = fixture();
+  await card.connect();
+  await card.enterLoader();
+  assert.equal(card.canReturnToConsole, true);
+  card.control = 'external';
+  await assert.rejects(card.returnConsole(), /Carte indisponible/);
+  card.control = 'available';
+  await card.returnConsole();
+  assert.equal(card.mode, 'console');
+  assert.equal(card.consoleUnavailable, false);
+  assert.deepEqual(events.slice(-4), ['reserve-return', 'close-loader', 'console', 'reset']);
+  await card.enterLoader();
+  assert.equal(card.canReturnToConsole, true);
   await card.disconnect();
 });
 

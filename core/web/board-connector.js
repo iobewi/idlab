@@ -31,6 +31,7 @@ export class BoardConnector {
     this.mode = 'disconnected';
     this.lastLoaderBaud = ESP_SYNC_BAUD;
     this.temporaryLoader = false;
+    this.loaderFromConsole = false;
     this.busy = false;
     this.requesting = false;
     this.lost = false;
@@ -49,6 +50,10 @@ export class BoardConnector {
 
   get consoleUnavailable() {
     return this.mode === 'loader' && !this.temporaryLoader;
+  }
+
+  get canReturnToConsole() {
+    return this.mode === 'loader' && this.loaderFromConsole && this.canEnterLoader;
   }
 
   get activeBaud() {
@@ -103,7 +108,7 @@ export class BoardConnector {
     this.onJournal('Console ouverte à ' + CONSOLE_BAUD + ' bauds');
   }
 
-  async #openLoader(use, {temporary = false, resetToRom = false, initialBaud = ESP_SYNC_BAUD} = {}) {
+  async #openLoader(use, {temporary = false, fromConsole = false, resetToRom = false, initialBaud = ESP_SYNC_BAUD} = {}) {
     if (this.lost) throw new Error('Port USB déconnecté.');
     const driver = new EspDriver(this.port, await this.loadTools(), initialBaud);
     if (this.lost) throw new Error('Port USB déconnecté.');
@@ -122,6 +127,7 @@ export class BoardConnector {
     this.lastIdentity = this.identity;
     this.lastLoaderBaud = driver.transport.baudrate || ESP_SYNC_BAUD;
     this.temporaryLoader = temporary;
+    this.loaderFromConsole = fromConsole;
     this.#setMode('loader');
     this.onJournal('Chargeur détecté · ' + (identity.model ?? identity.chip));
     if (identity.transport === 'usb_uart') this.onJournal('Débit chargeur · ' + this.lastLoaderBaud + ' bauds');
@@ -218,6 +224,8 @@ export class BoardConnector {
     const session = this.session;
     const socket = this.socket;
     this.session = this.socket = this.identity = null;
+    this.loaderFromConsole = false;
+    this.control = null;
     socket?.close();
     try {
       await session?.close();
@@ -233,7 +241,6 @@ export class BoardConnector {
       await this.#closeSession();
     } finally {
       this.lastIdentity = this.romJedec = null;
-      this.control = null;
       this.boot = new BootIdentity();
       this.#setMode('disconnected');
     }
@@ -355,11 +362,23 @@ export class BoardConnector {
       this.#setMode('connecting');
       try {
         await this.#closeSession();
-        await this.#openLoader('stub');
+        await this.#openLoader('stub', {fromConsole: true});
       } catch (error) {
         await this.#clearSession();
         throw error;
       }
+    });
+  }
+
+  returnConsole() {
+    return this.#exclusive(async () => {
+      if (!this.canReturnToConsole) throw new Error('Un RESET manuel sans BOOT est nécessaire.');
+      await this.request('/devices/' + this.name + '/control/return-console', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({generation: this.identity.generation}),
+      });
+      try { await this.#resumeConsole(); }
+      catch (error) { await this.#clearSession(); throw error; }
     });
   }
 
@@ -368,6 +387,7 @@ export class BoardConnector {
       if (this.identity?.loader === 'rom') return this.identity;
       const resetToRom = reset && this.canResetIntoRom;
       const previousMode = this.mode;
+      const fromConsole = this.canEnterLoader && (previousMode === 'console' || this.loaderFromConsole);
       const wasRegistered = Boolean(this.identity);
       this.lost = false;
       this.#setMode('connecting');
@@ -375,7 +395,7 @@ export class BoardConnector {
         await this.#closeSession();
         if (wasRegistered) await this.#waitForUnregister();
         if (this.lost) throw new Error('Port USB déconnecté.');
-        await this.#openLoader('rom', {resetToRom});
+        await this.#openLoader('rom', {resetToRom, fromConsole});
         return this.identity;
       } catch (error) {
         if (previousMode === 'console' && !this.lost) {

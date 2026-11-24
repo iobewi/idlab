@@ -282,7 +282,8 @@ function renderIdentification() {
     ? (info ? 'Mesures conservées du dernier passage en chargeur sur ce port.'
       : card.canEnterLoader ? 'Identifier mesure la flash, la MAC et le RDID via le chargeur.'
       : 'Pour mesurer l’identité complète, place la carte en téléchargement puis reconnecte-la dans IDLab.')
-    : card?.consoleUnavailable ? manualConsoleReturn : (current ? 'Identité lue par le chargeur.' : '');
+    : card?.consoleUnavailable && !card.canReturnToConsole
+      ? manualConsoleReturn : (current ? 'Identité lue par le chargeur.' : '');
   hint.hidden = !hint.textContent;
 
 }
@@ -332,7 +333,9 @@ function render() {
     if (moveFocus) operationsTab.focus();
   }
   consolesTab.disabled = consoleUnavailable;
-  consolesTab.title = consoleUnavailable ? manualConsoleReturn : '';
+  consolesTab.title = consoleUnavailable
+    ? selected.canReturnToConsole ? 'Utilise « Revenir à la console » dans les commandes de la carte.' : manualConsoleReturn
+    : '';
   for (const id of ['tab-partitions', 'tab-flash', 'tab-memory', 'tab-tools']) {
     const tab = $(id);
     if (romActive && tab.getAttribute('aria-selected') === 'true') {
@@ -366,9 +369,11 @@ function render() {
   const reset = $('reset-device');
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
-  reset.title = consoleUnavailable ? manualConsoleReturn : 'Redémarre la carte depuis la console.';
+  reset.title = consoleUnavailable ? consolesTab.title : 'Redémarre la carte depuis la console.';
   $('identify-live').disabled = !(loader || autoLoader);
-  $('enter-loader').disabled = !autoLoader;
+  const modeButton = $('enter-loader');
+  modeButton.textContent = selected?.mode === 'loader' ? 'Revenir à la console' : 'Ouvrir le chargeur flash';
+  modeButton.disabled = !(autoLoader || (available && selected.canReturnToConsole));
   $('send').disabled = !(available && selected.mode === 'console');
   $('mark').disabled = !selected;
   $('export').disabled = !selected;
@@ -517,9 +522,17 @@ navigator.serial?.addEventListener('disconnect', event => {
 
 $('reset-device').onclick = () => run(() => selected?.restart());
 $('enter-loader').onclick = () => run(async () => {
-  await selected?.enterLoader();
-  $('workspace-tab-operations').click();
-  $('tab-memory').click();
+  const card = selected;
+  if (!card || $('enter-loader').disabled) return;
+  if (card.mode === 'loader') {
+    await card.returnConsole();
+    if (card === selected) $('workspace-tab-consoles').click();
+  } else {
+    await card.enterLoader();
+    if (card !== selected) return;
+    $('workspace-tab-operations').click();
+    $('tab-memory').click();
+  }
 });
 const romDialog = $('rom-reset-dialog');
 const romProgress = $('rom-reset-progress');
