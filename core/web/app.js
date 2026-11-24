@@ -13,21 +13,25 @@ const clock = new Intl.DateTimeFormat('fr', { timeStyle: 'medium' });
 const number = new Intl.NumberFormat('fr', {maximumFractionDigits: 1});
 const manualConsoleReturn = 'Pour retrouver la console, déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.';
 const externallyControlled = card => Boolean(card?.identity && card.observation?.external_control);
+const needsWakeLock = () => [...cards.values()].some(card =>
+  card.requesting || card.busy || card.mode === 'connecting' || card.mode === 'closing' ||
+  (card.identity && (['busy', 'stopping'].includes(card.observation?.device.control) || externallyControlled(card))));
 let wakeLock;
 let requestingWakeLock = false;
 
 async function updateWakeLock() {
-  const needed = [...cards.values()].some(externallyControlled);
-  if (!needed && wakeLock) await wakeLock.release();
-  if (needed && !document.hidden && navigator.wakeLock && !wakeLock && !requestingWakeLock) {
+  if (wakeLock && (!needsWakeLock() || document.hidden)) await wakeLock.release();
+  if (needsWakeLock() && !document.hidden && navigator.wakeLock && !wakeLock && !requestingWakeLock) {
     requestingWakeLock = true;
+    renderWakeState();
     try {
-      wakeLock = await navigator.wakeLock.request('screen');
-      wakeLock.addEventListener('release', () => {
-        wakeLock = null;
+      const lock = await navigator.wakeLock.request('screen');
+      wakeLock = lock;
+      lock.addEventListener('release', () => {
+        if (wakeLock === lock) wakeLock = null;
         renderWakeState();
       }, {once: true});
-      if (![...cards.values()].some(externallyControlled)) await wakeLock.release();
+      if (!needsWakeLock() || document.hidden) await lock.release();
     } catch {
       wakeLock = null;
     } finally {
@@ -38,8 +42,9 @@ async function updateWakeLock() {
 }
 
 function renderWakeState() {
-  const state = wakeLock ? 'Maintien éveillé'
-    : [...cards.values()].some(externallyControlled) ? 'Maintien éveillé indisponible' : 'Veille normale';
+  const state = !needsWakeLock() ? 'Veille normale'
+    : wakeLock && !wakeLock.released ? 'Maintien éveillé'
+    : requestingWakeLock ? 'Activation du maintien éveillé…' : 'Maintien éveillé indisponible';
   $('status-label-wake').textContent = state;
   $('wake-state').textContent = state;
 }
