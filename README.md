@@ -4,9 +4,9 @@ IOBEWI Device Lab relie des cartes embarquées aux scripts et à l'interface
 opérateur. Le navigateur possède les ports Web Serial. Le serveur local
 coordonne les appels. Les deux utilisent la même opération de lecture.
 
-Ce premier lot contient le serveur, le navigateur et le pilote ESP32.
-Il couvre la connexion, l'identification et la lecture flash. L'API HTTP
-peut déjà être utilisée depuis un script.
+`core/` contient le serveur, le navigateur et le pilote ESP32.
+`client/` fournit le connecteur Python. Le banc couvre la connexion,
+l'identification et la lecture flash.
 
 ## Démarrer
 
@@ -29,7 +29,26 @@ téléchargement manuel. Pour un transport inconnu ou USB-OTG, placer d'abord
 la carte en mode téléchargement. Le stub standard s'exécute en RAM.
 Le mode ROM seule donne l'identité sans charger de stub.
 
-## Appeler l'API
+## Piloter depuis Python
+
+Installer le connecteur avec `python -m pip install ./client`. Utiliser la
+même valeur de `IDLAB_TOKEN` pour le serveur et le script, puis connecter la
+carte dans le navigateur.
+
+```python
+from idlab_client import IDLabClient
+
+lab = IDLabClient()
+print(lab.devices())
+board = lab.identify("ma-carte")
+data = board.read_flash(address=0x10000, size=4096)
+```
+
+Chaque objet `Board` est lié à une génération. Après une reconnexion,
+appeler de nouveau `identify`. Le client transmet les refus du serveur
+avec `IDLabHTTPError.status` et `IDLabHTTPError.code`.
+
+## Appeler l'API HTTP
 
 Définir `IDLAB_TOKEN` dans l'environnement du serveur et du script. Garder
 sa valeur hors du dépôt. Le navigateur local fonctionne avec son propre
@@ -53,4 +72,12 @@ résultat partiel. Pour lire de nouveau, reconnecter la carte et l'identifier.
 cd core
 python -m unittest discover -s tests -v
 node --test tests/*.test.js
+```
+
+Pour tester le connecteur contre le serveur avec un agent simulé, depuis la
+racine après installation des dépendances de `core/` :
+
+```sh
+python -m pip install -e ./client
+python -m unittest discover -s client/tests -v
 ```
