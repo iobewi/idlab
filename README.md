@@ -72,7 +72,7 @@ résultat partiel. Pour lire de nouveau, reconnecter la carte et l'identifier.
 ## Service web dédié
 
 IDLab peut tourner dans un conteneur Docker indépendant du devcontainer.
-L'[API de gestion du service](service/README.md) permet de le démarrer,
+L'[API de gestion du service](docs/service.md) permet de le démarrer,
 de l'arrêter, de le redémarrer et de vérifier son état depuis un script.
 
 ## Tests sans matériel

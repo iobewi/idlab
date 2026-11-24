@@ -8,7 +8,7 @@ import sys
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, WSMsgType, web
 
-SERVER = Path(__file__).resolve().parents[1] / "core" / "server.py"
+SERVER = Path(__file__).resolve().with_name("server.py")
 WS_LIMIT = 4 * 1024 * 1024 + 1
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
