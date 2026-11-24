@@ -77,6 +77,9 @@ de l'arrêter, de le redémarrer et de vérifier son état depuis un script.
 
 ## Développer dans VS Code
 
+Sur Windows, les [tâches IDLab dans VS Code](docs/service.md#depuis-vs-code-sur-windows)
+pilotent le serveur depuis la palette de commandes.
+
 Avec l’extension **Dev Containers**, ouvrir le dépôt dans VS Code puis choisir
 **Dev Containers: Reopen in Container**. Le conteneur de développement installe
 Python 3.12, Node.js 22, le connecteur Python en mode éditable et les dépendances
