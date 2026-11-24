@@ -12,6 +12,7 @@ const clock = new Intl.DateTimeFormat('fr', { timeStyle: 'medium' });
 function wireTabs(attribute) {
   const tabs = [...document.querySelectorAll('[' + attribute + ']')];
   function select(tab) {
+    if (tab.disabled) return;
     for (const element of tabs) {
       const active = element === tab;
       element.setAttribute('aria-selected', active);
@@ -19,16 +20,19 @@ function wireTabs(attribute) {
       $(element.getAttribute('aria-controls')).hidden = !active;
     }
   }
-  for (const [index, tab] of tabs.entries()) {
+  for (const tab of tabs) {
     tab.onclick = () => select(tab);
     tab.onkeydown = event => {
-      const last = tabs.length - 1;
-      const target = {ArrowLeft: (index + last) % tabs.length, ArrowRight: (index + 1) % tabs.length,
+      const enabled = tabs.filter(element => !element.disabled);
+      const index = enabled.indexOf(tab);
+      if (index === -1) return;
+      const last = enabled.length - 1;
+      const target = {ArrowLeft: (index + last) % enabled.length, ArrowRight: (index + 1) % enabled.length,
         Home: 0, End: last}[event.key];
       if (target === undefined) return;
       event.preventDefault();
-      select(tabs[target]);
-      tabs[target].focus();
+      select(enabled[target]);
+      enabled[target].focus();
     };
   }
 }
@@ -212,6 +216,18 @@ function render() {
   }
   $('empty-cards').hidden = cards.size !== 0;
   $('card-details').hidden = !selected;
+  const consolesTab = $('workspace-tab-consoles');
+  const manualRom = Boolean(selected?.romRequiresManualReturn);
+  if (manualRom && consolesTab.getAttribute('aria-selected') === 'true') {
+    const active = document.activeElement;
+    const operationsTab = $('workspace-tab-operations');
+    const moveFocus = active === consolesTab || $('workspace-consoles').contains(active);
+    operationsTab.click();
+    $('tab-rom').click();
+    if (moveFocus) operationsTab.focus();
+  }
+  consolesTab.disabled = manualRom;
+  consolesTab.title = manualRom ? 'Console indisponible pendant la session ROM en BOOT manuel.' : '';
   renderIdentification();
   const info = selected?.identity;
   const available = selected && !selected.busy && !selected.requesting;
@@ -234,7 +250,7 @@ function render() {
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
   $('identify-live').disabled = !(loader || autoLoader);
-  $('return-console').hidden = Boolean(selected?.romRequiresManualReturn);
+  $('return-console').hidden = manualRom;
   $('return-console').disabled = !loader || $('return-console').hidden;
   $('enter-loader').disabled = !autoLoader;
   $('send').disabled = !(available && selected.mode === 'console');

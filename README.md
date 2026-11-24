@@ -53,8 +53,9 @@ guide l’entrée manuelle avec BOOT et RESET. Si le navigateur détecte à
 nouveau le même port, IDLab tente la connexion automatiquement. La boîte
 se ferme une fois la session ROM confirmée. La tentative manuelle reste
 disponible via **Essayer la connexion**. En ROM avec entrée manuelle,
-le retour console passe par une déconnexion et un RESET sans maintenir
-BOOT, puis une reconnexion.
+l’onglet **Consoles** est grisé pour cette carte et la capture est
+conservée. Le retour console passe par une déconnexion et un RESET sans
+maintenir BOOT, puis une reconnexion.
 
 ## Piloter depuis Python
 
