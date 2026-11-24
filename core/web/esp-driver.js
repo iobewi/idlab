@@ -33,27 +33,25 @@ export class EspDriver {
     const usb = this.port.getInfo();
     const plan = connectionPlan(usb, options);
     const loader = this.loader;
-    this.connectionStage = 'Détection du chargeur ROM';
-    if (auto) {
-      // A short SYNC probe detects an already active downloader without
-      // asserting reset. Only an unanswered probe falls back to UART.
-      let synced = false;
-      const openAndSync = loader.openAndSync;
-      loader.openAndSync = async (...args) => {
-        await openAndSync.apply(loader, args);
-        synced = true;
-      };
-      try {
-        await loader.detectChip('no_reset', 1);
-      } catch (error) {
-        if (!synced && !this.transport.closed && this.port.readable && this.port.writable &&
-            error.message === 'Failed to connect with the device') return null;
-        throw error;
-      } finally {
-        loader.openAndSync = openAndSync;
-      }
-    } else {
-      await loader.detectChip(plan.entry);
+    this.connectionStage = 'Synchronisation du chargeur ROM';
+    let synced = false;
+    const openAndSync = loader.openAndSync;
+    loader.openAndSync = async (...args) => {
+      if (synced) this.connectionStage = 'Resynchronisation du chargeur ROM';
+      await openAndSync.apply(loader, args);
+      synced = true;
+      this.connectionStage = 'Identification de la puce par la ROM (SYNC reçu)';
+    };
+    try {
+      // An unanswered, reset-free probe can fall back to the console.
+      if (auto) await loader.detectChip('no_reset', 1);
+      else await loader.detectChip(plan.entry);
+    } catch (error) {
+      if (auto && !synced && !this.transport.closed && this.port.readable && this.port.writable &&
+          error.message === 'Failed to connect with the device') return null;
+      throw error;
+    } finally {
+      loader.openAndSync = openAndSync;
     }
     if (romOnly && loader.syncStubDetected) throw new Error('Un stub tourne déjà. Remets la carte en mode ROM.');
     if (loader.secureDownloadMode) throw new Error('Identité indisponible en mode téléchargement sécurisé.');

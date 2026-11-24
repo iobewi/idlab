@@ -120,6 +120,30 @@ test('automatic connection falls back only when no downloader answered', async (
   await assert.rejects(known.connect({auto: true}), /Failed to connect/);
 });
 
+test('explicit entry distinguishes synchronization failures from identification failures', async () => {
+  class NoSync {
+    async detectChip(mode) { await this.openAndSync(mode); }
+    async openAndSync(mode) {
+      assert.equal(mode, 'default_reset');
+      throw new Error('serial_timeout');
+    }
+  }
+  class NoIdentity extends NoSync {
+    async openAndSync() {}
+    async detectChip(mode) {
+      await this.openAndSync(mode);
+      throw new Error('serial_timeout');
+    }
+  }
+  const port = {getInfo: () => ({usbVendorId: 0x303a, usbProductId: 0x1001})};
+  const noSyncDriver = new EspDriver(port, {...upstream, ESPLoader: NoSync});
+  await assert.rejects(noSyncDriver.connect({}), /serial_timeout/);
+  assert.equal(noSyncDriver.connectionStage, 'Synchronisation du chargeur ROM');
+  const noIdentityDriver = new EspDriver(port, {...upstream, ESPLoader: NoIdentity});
+  await assert.rejects(noIdentityDriver.connect({}), /serial_timeout/);
+  assert.equal(noIdentityDriver.connectionStage, 'Identification de la puce par la ROM (SYNC reçu)');
+});
+
 test('transport can read again after esptool reopens it for identification', async () => {
   class FakeTransport extends upstream.Transport {
     async connect() {}
