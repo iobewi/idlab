@@ -29,6 +29,14 @@ téléchargement manuel. Pour un transport inconnu ou USB-OTG, placer d'abord
 la carte en mode téléchargement. Le stub standard s'exécute en RAM.
 Le mode ROM seule donne l'identité sans charger de stub.
 
+## Console série
+
+Dans l’interface IDLab, sélectionner **Console série**, renseigner le débit du
+firmware et cliquer sur **Connecter**. La console affiche les octets reçus sous
+forme de texte UTF-8 et permet d’envoyer une commande. Les échanges restent
+dans le navigateur pour cette session. Pour lire la flash sur le même port,
+déconnecter la console et reconnecter la carte en mode **Flash — stub standard**.
+
 ## Piloter depuis Python
 
 Installer le connecteur avec `python -m pip install ./client`. Utiliser la
