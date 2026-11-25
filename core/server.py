@@ -3,14 +3,15 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import hmac
-import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import secrets
 import uuid
+from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
 
@@ -163,46 +164,82 @@ def operation_campaign(payload):
     return campaign_id
 
 
-def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=False,
+def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                campaign_db=":memory:", command_timeout=30):
-    hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    session = secrets.token_urlsafe(32)
+    origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+    if public_origin:
+        parsed = urlsplit(public_origin)
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                or parsed.password is not None or public_origin != f"https://{parsed.netloc}"):
+            raise ValueError("IDLAB_PUBLIC_ORIGIN must be an HTTPS origin without a path")
+        origins.add(public_origin)
     boards = {}
     tokens = {}
     sockets = set()
     CAMPAIGNS = web.AppKey("campaigns", Campaigns)
+    OWNER = web.RequestKey("web_owner", str)
+    BOARD_KEY = web.RequestKey("board_key", tuple)
     LOCAL_OPERATOR = web.RequestKey("local_operator", bool)
 
+    def matches_token(supplied, credential):
+        return bool(credential) and hmac.compare_digest(supplied.encode(), f"Bearer {credential}".encode())
+
+    def visible_boards(owner):
+        if owner is not None:
+            return {name: board for (session_id, name), board in boards.items() if session_id == owner}
+        result, ambiguous = {}, set()
+        for (_, name), board in boards.items():
+            if name in result:
+                ambiguous.add(name)
+            result[name] = board
+        for name in ambiguous:
+            del result[name]
+        return result
+
     @web.middleware
-    async def local_access(request, handler):
-        if request.host not in hosts or not request.remote:
-            return problem(403, "local_access_required")
-        if not loopback_forwarded and not ipaddress.ip_address(request.remote).is_loopback:
-            return problem(403, "local_access_required")
+    async def authenticate(request, handler):
         origin = request.headers.get("Origin")
-        if origin is not None and origin != f"http://{request.host}":
+        if origin is not None and (origin not in origins or urlsplit(origin).netloc != request.host):
             return problem(403, "origin_mismatch")
         if request.path.startswith("/api/") or request.path == "/agent":
             cookie = request.cookies.get("idlab_session", "")
-            browser = hmac.compare_digest(cookie.encode(), session.encode())
+            owner = None
+            if re.fullmatch(r"[A-Za-z0-9_-]{43}", cookie):
+                candidate = hashlib.sha256(cookie.encode()).hexdigest()
+                if request.app[CAMPAIGNS].has_session(candidate):
+                    owner = candidate
             bearer = request.headers.get("Authorization", "")
-            script = token and hmac.compare_digest(bearer.encode(), f"Bearer {token}".encode())
-            scoped = re.fullmatch(r"/api/v1/devices/([\w-]+)(/flash/read|/command|/uart|/activity)?", request.path)
-            board = boards.get(scoped[1]) if scoped else None
-            control = board.control if board else None
-            control_request = control and hmac.compare_digest(
-                bearer.encode(), f"Bearer {control.credential}".encode(),
-            )
-            if request.path == "/agent":
-                if not browser or origin is None:
+            script = matches_token(bearer, token)
+            browser = owner is not None and not bearer
+            request[OWNER] = owner if not bearer else None
+            request[LOCAL_OPERATOR] = browser and origin is not None
+            name = request.match_info.get("name")
+            key = (owner, name) if browser else None
+            scoped = False
+            if name and bearer and not script:
+                for board_key, board in boards.items():
+                    if board_key[1] == name and board.control and not board.control.stopped and matches_token(
+                            bearer, board.control.credential):
+                        key, scoped = board_key, True
+                        request[OWNER] = board_key[0]
+                        break
+            if name and script:
+                observed = visible_boards(None).get(name)
+                key = next((key for key, board in boards.items() if board is observed), None)
+            request[BOARD_KEY] = key
+
+            if request.path == "/api/v1/web/session":
+                if request.method == "POST" and (origin is None or bearer):
+                    return problem(403, "browser_origin_required")
+                if request.method != "POST" and not browser:
+                    return problem(401, "authentication_required")
+            elif request.path in {"/agent", "/api/v1/activity"}:
+                if not request[LOCAL_OPERATOR]:
                     return problem(403, "browser_session_required")
-            elif request.path.endswith("/control/connect") and request.headers.get("Upgrade", "").lower() == "websocket":
+            elif request.path == f"/api/v1/devices/{name}/control/connect":
                 pass  # This handshake authenticates with the per-card token.
-            elif not control_request and not script and (
-                not browser or (request.method not in ("GET", "HEAD") and origin is None)
-            ):
+            elif not (scoped or script or (browser and (request.method in {"GET", "HEAD"} or origin))):
                 return problem(401, "authentication_required")
-            request[LOCAL_OPERATOR] = browser and origin is not None and not bearer
         try:
             return await handler(request)
         except CampaignError as error:
@@ -216,46 +253,58 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         finally:
             campaigns.close()
 
+    def owned_campaign(request):
+        campaign_id = request.match_info["id"]
+        request.app[CAMPAIGNS].require_owner(campaign_id, request[OWNER])
+        return campaign_id
+
     async def list_campaigns(request):
-        result = request.app[CAMPAIGNS].search(**search_parameters(request.query))
+        result = request.app[CAMPAIGNS].search(owner=request[OWNER], **search_parameters(request.query))
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def start_campaign(request):
         fields = await campaign_fields(request, creating=True)
-        campaign = request.app[CAMPAIGNS].start(fields["name"], fields.get("metadata", {}))
+        campaign = request.app[CAMPAIGNS].start(fields["name"], fields.get("metadata", {}), owner=request[OWNER])
         return web.json_response(
             campaign, status=201, headers={"Location": f"/api/v1/campaigns/{campaign['id']}"},
         )
 
     async def get_campaign(request):
-        return web.json_response(request.app[CAMPAIGNS].get(request.match_info["id"]),
+        return web.json_response(request.app[CAMPAIGNS].get(owned_campaign(request)),
                                  headers={"Cache-Control": "no-store"})
 
     async def update_campaign(request):
         fields = await campaign_fields(request)
-        return web.json_response(request.app[CAMPAIGNS].update(request.match_info["id"], fields))
+        return web.json_response(request.app[CAMPAIGNS].update(owned_campaign(request), fields))
 
     async def get_campaign_operations(request):
         if set(request.query) - {"limit", "offset"}:
             return problem(400, "invalid_campaign_filters")
         pagination = search_parameters(request.query)
         page = request.app[CAMPAIGNS].operations(
-            request.match_info["id"], limit=pagination["limit"], offset=pagination["offset"],
+            owned_campaign(request), limit=pagination["limit"], offset=pagination["offset"],
         )
         return web.json_response(page, headers={"Cache-Control": "no-store"})
 
     async def finish_campaign(request):
         verdict = await text_field(request, "verdict", 80)
-        return web.json_response(request.app[CAMPAIGNS].finish(request.match_info["id"], verdict))
+        return web.json_response(request.app[CAMPAIGNS].finish(owned_campaign(request), verdict))
 
     async def abort_campaign(request):
         reason = await text_field(request, "reason", 500)
-        campaign = request.app[CAMPAIGNS].abort(request.match_info["id"], reason)
+        campaign = request.app[CAMPAIGNS].abort(owned_campaign(request), reason)
         return web.json_response(campaign, status=202 if campaign["state"] == "abort_requested" else 200)
 
     async def index(request):
-        response = web.FileResponse(WEB_ROOT / "index.html")
-        response.set_cookie("idlab_session", session, httponly=True, samesite="Strict")
+        return web.FileResponse(WEB_ROOT / "index.html")
+
+    async def web_session(request):
+        response = web.Response(status=204, headers={"Cache-Control": "no-store"})
+        if request.method == "POST" and request[OWNER] is None:
+            secret = secrets.token_urlsafe(32)
+            request.app[CAMPAIGNS].save_session(hashlib.sha256(secret.encode()).hexdigest())
+            response.set_cookie("idlab_session", secret, httponly=True, samesite="Strict",
+                                secure=request.headers["Origin"].startswith("https://"))
         return response
 
     async def health(request):
@@ -266,33 +315,34 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         })
 
     async def devices(request):
-        return web.json_response({name: board.describe() for name, board in boards.items()})
+        return web.json_response({name: board.describe() for name, board in visible_boards(request[OWNER]).items()},
+                                 headers={"Cache-Control": "no-store"})
 
-    async def publish_control(board, name):
+    async def publish_control(board, key):
         if not board.socket.closed:
             try:
                 await board.socket.send_json({
-                    "control": board.describe()["control"], "has_token": name in tokens,
+                    "control": board.describe()["control"], "has_token": key in tokens,
                 })
             except ConnectionError:
                 pass
 
-    async def stop_control(name, board, control, reason):
+    async def stop_control(key, board, control, reason):
         if board.control is not control or control.stopped:
             return
         control.stopped = reason
         if not board.pending:
             board.control = None
-        await request_operation_stop(name, board)
+        await request_operation_stop(key, board)
         if not control.socket.closed:
             await control.socket.close(code=1008, message=control.stopped.encode())
 
-    async def request_operation_stop(name, board):
+    async def request_operation_stop(key, board):
         pending = board.pending
         cancelled = pending and not pending.future.done() and not pending.cancelled
         if cancelled:
             pending.cancelled = True
-        await publish_control(board, name)
+        await publish_control(board, key)
         if cancelled and not board.socket.closed:
             try:
                 await board.socket.send_json({"cancel": pending.id})
@@ -302,39 +352,41 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     async def manage_control(request):
         if not request[LOCAL_OPERATOR]:
             return problem(403, "local_operator_required")
-        name = request.match_info["name"]
+        key = request[BOARD_KEY]
         action = request.match_info["action"]
-        board = boards.get(name)
+        board = boards.get(key)
         if action == "token":
             if not board or board.socket.closed:
                 return problem(404, "device_disconnected")
             binding = board.port_key or board.identity["mac"]
             if not binding:
                 return problem(409, "operation_unsupported")
-            if name in tokens:
+            if key in tokens:
                 return problem(409, "control_token_exists")
             credential = secrets.token_urlsafe(32)
-            tokens[name] = (credential, binding)
-            await publish_control(board, name)
+            tokens[key] = (credential, binding)
+            await publish_control(board, key)
             return web.json_response({"token": credential}, headers={"Cache-Control": "no-store"})
         if action == "revoke":
-            tokens.pop(name, None)
+            tokens.pop(key, None)
         if board and board.control:
-            await stop_control(name, board, board.control,
+            await stop_control(key, board, board.control,
                                "control_revoked" if action == "revoke" else "control_stopped")
         elif board and action == "stop":
-            await request_operation_stop(name, board)
+            await request_operation_stop(key, board)
         elif board:
-            await publish_control(board, name)
+            await publish_control(board, key)
         return web.json_response({"control": board.describe()["control"] if board else "disconnected"})
 
     async def connect_control(request):
         name = request.match_info["name"]
-        grant = tokens.get(name)
         supplied = request.headers.get("Authorization", "")
-        if not grant or not hmac.compare_digest(supplied.encode(), f"Bearer {grant[0]}".encode()):
+        match = next(((key, grant) for key, grant in tokens.items()
+                      if key[1] == name and matches_token(supplied, grant[0])), None)
+        if match is None:
             return problem(403, "invalid_control_token")
-        board = boards.get(name)
+        key, grant = match
+        board = boards.get(key)
         if not board or board.socket.closed:
             return problem(404, "device_disconnected")
         if (board.port_key or board.identity["mac"]) != grant[1]:
@@ -347,12 +399,12 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         sockets.add(socket)
         try:
             await socket.prepare(request)
-            await publish_control(board, name)
+            await publish_control(board, key)
             await socket.send_json({"session": control.credential, "generation": board.generation})
             async for _ in socket:
                 break  # The connection holds control. Commands use the HTTP API.
         finally:
-            await stop_control(name, board, control, "control_stopped")
+            await stop_control(key, board, control, "control_stopped")
             sockets.discard(socket)
         return socket
 
@@ -360,7 +412,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         name = request.query.get("device", "")
         if not BOARD_NAME.fullmatch(name):
             return problem(400, "invalid_device_name")
-        if name in boards:
+        key = (request[OWNER], name)
+        if key in boards:
             return problem(409, "device_already_connected")
         socket = web.WebSocketResponse(heartbeat=20, max_msg_size=MAX_READ + 1)
         sockets.add(socket)
@@ -368,15 +421,15 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         try:
             await socket.prepare(request)
             message = await socket.receive_json(timeout=90)
-            if name in boards:
+            if key in boards:
                 raise ValueError("device_already_connected")
             identity = validate_identity(message)
             port_key = message.get("port_key")
             if port_key is not None and (not isinstance(port_key, str) or not re.fullmatch(r"[0-9a-f-]{36}", port_key)):
                 raise ValueError("invalid_port_key")
             board = Board(uuid.uuid4().hex, socket, identity, port_key=port_key)
-            boards[name] = board
-            await socket.send_json({"generation": board.generation, "has_token": name in tokens})
+            boards[key] = board
+            await socket.send_json({"generation": board.generation, "has_token": key in tokens})
             async for message in socket:
                 pending = board.pending
                 if message.type == WSMsgType.TEXT and message.data.startswith("{"):
@@ -428,13 +481,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         except (TypeError, ValueError, TimeoutError, ConnectionError):
             pass
         finally:
-            if boards.get(name) is board and board is not None:
-                del boards[name]
+            if boards.get(key) is board and board is not None:
+                del boards[key]
                 board.uart_changed.set()
                 if board.pending and not board.pending.future.done():
                     board.pending.future.set_result(None)
                 if board.control:
-                    await stop_control(name, board, board.control, "device_session_changed")
+                    await stop_control(key, board, board.control, "device_session_changed")
             await socket.close()
             sockets.discard(socket)
         return socket
@@ -458,6 +511,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                   "startedAt": datetime.now(timezone.utc).isoformat(), **fields}
         if campaign_id:
             record.update(campaign_id=campaign_id, generation=board.generation)
+            owners = [request[OWNER]]
+            if matches_token(request.headers.get("X-IDLab-API-Authorization", ""), token):
+                owners.append(None)
+            request.app[CAMPAIGNS].require_owner(campaign_id, *owners)
             request.app[CAMPAIGNS].enter(campaign_id, record)
         board.pending = operation
         board.operations.appendleft(record)
@@ -500,7 +557,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             return problem(400, "invalid_arguments")
         campaign_id = operation_campaign(payload)
         name = request.match_info["name"]
-        board = boards.get(name)
+        key = request[BOARD_KEY]
+        board = boards.get(key)
         if not board or board.socket.closed or payload["generation"] != board.generation:
             return problem(409, "device_session_changed")
         refusal = command_refusal(request, board)
@@ -551,13 +609,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             finish_operation(request, board, record, started, complete)
             if control and control.stopped and board.control is control:
                 board.control = None
-                await publish_control(board, name)
+                await publish_control(board, key)
             elif operation.cancelled and not control:
-                await publish_control(board, name)
+                await publish_control(board, key)
 
     async def read_uart(request):
-        name = request.match_info["name"]
-        board = boards.get(name)
+        key = request[BOARD_KEY]
+        board = boards.get(key)
         if not board or board.socket.closed:
             return problem(404, "device_disconnected")
         if request.query.get("generation") != board.generation:
@@ -579,7 +637,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 await asyncio.wait_for(board.uart_changed.wait(), timeout=wait_ms / 1000)
             except TimeoutError:
                 pass
-            if boards.get(name) is not board or board.socket.closed:
+            if boards.get(key) is not board or board.socket.closed:
                 return problem(404, "device_disconnected")
             if scoped and (board.control is not control or control.stopped):
                 return problem(403, "control_session_required")
@@ -590,7 +648,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                                  headers={"Cache-Control": "no-store"})
 
     async def read_activity(request):
-        board = boards.get(request.match_info["name"])
+        key = request[BOARD_KEY]
+        board = boards.get(key)
         if not board or board.socket.closed:
             return problem(404, "device_disconnected")
         if request.query.get("generation") != board.generation:
@@ -608,7 +667,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if not isinstance(params, dict) or not required <= params.keys() <= required | {"campaign_id"}:
             return problem(400, "invalid_arguments")
         campaign_id = operation_campaign(params)
-        board = boards.get(request.match_info["name"])
+        key = request[BOARD_KEY]
+        board = boards.get(key)
         if not board or board.socket.closed or params["generation"] != board.generation:
             return problem(409, "device_session_changed")
         control = board.control
@@ -673,9 +733,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 finish_operation(request, board, record, started, complete and not (control and control.stopped))
                 if control and control.stopped and board.control is control:
                     board.control = None
-                    await publish_control(board, request.match_info["name"])
+                    await publish_control(board, key)
                 elif operation.cancelled and not control:
-                    await publish_control(board, name)
+                    await publish_control(board, key)
         if control and control.stopped in {"control_stopped", "control_revoked"}:
             return problem(403, control.stopped)
         if isinstance(result, dict) and result.get("error") and not board.socket.closed:
@@ -685,7 +745,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         return problem(502, "read_incomplete_reconnect_required")
 
     async def identify(request):
-        board = boards.get(request.match_info["name"])
+        key = request[BOARD_KEY]
+        board = boards.get(key)
         return web.json_response(board.describe()) if board and not board.socket.closed else problem(404, "device_disconnected")
 
     async def close_agents(app):
@@ -694,12 +755,14 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     async def revalidate_browser_files(request, response):
         if request.path in {"/", "/esptool.js"} or request.path.startswith("/web/"):
             response.headers["Cache-Control"] = "no-cache"
+        elif request.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
 
     async def serial_module(request):
         return web.FileResponse(ROOT / request.path.rsplit("/", 1)[-1])
 
-    activity = ApiActivity()
-    app = web.Application(middlewares=[local_access, activity.track], client_max_size=4096)
+    activity = ApiActivity(lambda request: request.get(OWNER))
+    app = web.Application(middlewares=[authenticate, activity.track], client_max_size=4096)
     app.cleanup_ctx.append(campaign_storage)
     app.on_shutdown.append(close_agents)
     app.on_shutdown.append(activity.close)
@@ -707,6 +770,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     app.add_routes([
         web.get("/", index),
         web.get("/health", health),
+        web.get("/api/v1/web/session", web_session),
+        web.post("/api/v1/web/session", web_session),
         web.get("/api/v1/activity", activity.observe),
         web.get("/api/v1/campaigns", list_campaigns),
         web.post("/api/v1/campaigns", start_campaign),
@@ -736,10 +801,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
 
 if __name__ == "__main__":
     port = int(os.environ.get("IDLAB_PORT", "8080"))
-    forwarded = os.environ.get("IDLAB_LOOPBACK_FORWARDED") == "1"
     public_port = int(os.environ.get("IDLAB_PUBLIC_PORT", str(port)))
     state_dir = Path(os.environ.get("IDLAB_STATE_DIR", Path.home() / ".local/state/idlab"))
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     app = create_app(port=public_port, token=os.environ.get("IDLAB_TOKEN"),
-                     loopback_forwarded=forwarded, campaign_db=state_dir / "campaigns.sqlite3")
-    web.run_app(app, host="0.0.0.0" if forwarded else "127.0.0.1", port=port, shutdown_timeout=3)
+                     public_origin=os.environ.get("IDLAB_PUBLIC_ORIGIN"), campaign_db=state_dir / "campaigns.sqlite3")
+    web.run_app(app, host="127.0.0.1", port=port, shutdown_timeout=3)

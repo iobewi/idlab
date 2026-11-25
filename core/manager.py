@@ -8,8 +8,6 @@ import sys
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, WSMsgType, web
 
-from api_activity import ApiActivity
-
 SERVER = Path(__file__).resolve().with_name("server.py")
 WS_LIMIT = 4 * 1024 * 1024 + 1
 HOP_HEADERS = {
@@ -116,7 +114,6 @@ def create_app(*, token, port=8080, service=None):
         raise ValueError("Set IDLAB_MANAGER_TOKEN before starting the management API")
 
     service = HTTPService(public_port=port) if service is None else service
-    hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
     authorization = f"Bearer {token}".encode()
     lock = asyncio.Lock()
     stopping = False
@@ -126,8 +123,6 @@ def create_app(*, token, port=8080, service=None):
 
     @web.middleware
     async def authenticate(request, handler):
-        if request.host not in hosts:
-            return problem(403, "local_host_required")
         if not request.path.startswith("/api/v1/httpd/"):
             return await handler(request)
         if "Origin" in request.headers:
@@ -169,7 +164,8 @@ def create_app(*, token, port=8080, service=None):
 
         upstream = f"http://127.0.0.1:{service.port}{request.raw_path}"
         headers = proxy_headers(request.headers)
-        if (request.path == "/agent" or request.path.endswith("/control/connect")) and request.headers.get("Upgrade", "").lower() == "websocket":
+        if request.headers.get("Upgrade", "").lower() == "websocket" and (
+                request.path in {"/agent", "/api/v1/activity"} or request.path.endswith("/control/connect")):
             try:
                 async with request.app[UPSTREAM].ws_connect(
                     upstream, headers=headers, max_msg_size=WS_LIMIT, heartbeat=20,
@@ -211,14 +207,11 @@ def create_app(*, token, port=8080, service=None):
             await service.stop()
 
     UPSTREAM = web.AppKey("upstream", ClientSession)
-    activity = ApiActivity()
-    app = web.Application(middlewares=[authenticate, activity.track], client_max_size=4096)
+    app = web.Application(middlewares=[authenticate], client_max_size=4096)
     # Reserve the management namespace. Ordinary IDLab HTTP and WebSocket stay on this port.
     app.router.add_route("*", "/api/v1/httpd/{action:status|start|stop|restart}", dispatch)
-    app.router.add_get("/api/v1/activity", activity.observe)
     app.router.add_route("*", "/{path:.*}", relay)
     app.on_shutdown.append(stop_service)
-    app.on_shutdown.append(activity.close)
     app.cleanup_ctx.append(upstream_session)
     return app
 

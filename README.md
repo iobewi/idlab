@@ -86,17 +86,19 @@ Les versions du client sont distribuées dans les
 [releases GitHub](https://github.com/iobewi/idlab/releases). Installer le fichier
 `.whl` de la version souhaitée avec Python 3.12 ou plus récent.
 
-```powershell
-py -m pip install "https://github.com/iobewi/idlab/releases/download/python-client-v0.1.0/idlab_client-0.1.0-py3-none-any.whl"
-```
-
-Adapter la version dans l’URL à la release choisie. Pour essayer une version
+Pour essayer une version
 avant sa publication, télécharger `idlab-client-wheel` depuis une exécution
 réussie du [workflow Python client](https://github.com/iobewi/idlab/actions/workflows/python-client.yml),
 extraire le `.whl` et passer son chemin à `pip install`. Depuis un dépôt local,
-`python -m pip install ./clients/python` reste disponible. Utiliser la même
-valeur de `IDLAB_TOKEN` pour le serveur et le script, puis connecter la carte
-dans le navigateur.
+`python -m pip install ./clients/python` reste disponible.
+
+À partir du SDK 0.1.1, définir `IDLAB_URL` dans l’environnement du client avant
+d’appeler `IDLabClient()`, ou passer `base_url` au constructeur. Par exemple,
+pour un banc local depuis PowerShell, utiliser
+`$env:IDLAB_URL = 'http://127.0.0.1:8080'`. Les arguments explicites priment sur
+les variables d’environnement. `IDLAB_TOKEN` est facultatif pour le pilotage
+par jeton de carte et sert notamment à l’observation globale. Connecter la carte
+dans le navigateur avant de demander son jeton de pilotage.
 
 ```python
 from idlab_client import IDLabClient
@@ -126,14 +128,23 @@ et `lab.finish_campaign(campaign["id"], "PASS")` enregistre le verdict.
 Dans le web, **Utiliser cette campagne** applique ce même rattachement
 aux opérations lancées dans la page.
 
+Pour configurer et tester l’accès depuis `rust_dev`, voir le
+[test de connexion Docker](docs/service.md#connecter-un-client-depuis-docker).
+
 ## Appeler l'API HTTP
 
 La [référence API v1](docs/api.md) décrit les commandes HTTP, les opérations
 des cartes et le cycle de vie des campagnes.
 
-Définir `IDLAB_TOKEN` dans l'environnement du serveur et du script. Garder
-sa valeur hors du dépôt. Le navigateur local fonctionne avec son propre
-cookie de session. Le serveur écoute uniquement sur la boucle locale.
+L’interface s’ouvre sans connexion. Lorsque le navigateur ajoute une carte
+ou crée une campagne, le serveur ouvre une session privée par cookie
+`HttpOnly`. Chaque session a ses propres cartes, captures et campagnes.
+Le jeton **Autorisations** délègue une seule carte à Python.
+
+Définir `IDLAB_TOKEN` côté serveur et côté script pour consulter le banc ou
+gérer les campagnes de service. Garder sa valeur hors du dépôt. Le point
+d’entrée est publié sur la boucle locale par défaut. Voir les
+[paramètres du service HTTP](docs/service.md) pour une origine HTTPS externe.
 
 | Requête | Résultat |
 |---|---|

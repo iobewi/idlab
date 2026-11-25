@@ -90,5 +90,5 @@ jobs:
             fi
           fi
           gh release create "$tag" "$wheel" --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" --latest=false --title "IDLab Python client ${version}" \
+            --target "$GITHUB_SHA" --latest --title "IDLab Python client ${version}" \
             --notes "Install the attached wheel with Python 3.12 or newer."

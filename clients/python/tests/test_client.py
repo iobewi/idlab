@@ -1,9 +1,11 @@
 import asyncio
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 import socket
 import sys
 import unittest
+from unittest.mock import patch
 
 from aiohttp import ClientSession, ClientWSTimeout, CookieJar, web
 
@@ -11,6 +13,23 @@ from idlab_client import IDLabClient, IDLabHTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "core"))
 from server import create_app
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_url_is_required_and_explicit_arguments_override_environment(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "IDLAB_URL"):
+                IDLabClient()
+            IDLabClient("http://127.0.0.1:8080")
+        with patch.dict(os.environ, {"IDLAB_URL": "not a URL", "IDLAB_ALLOW_INSECURE_HTTP": "invalid"}):
+            IDLabClient("https://lab.example.test", allow_insecure_http=False)
+            with self.assertRaisesRegex(ValueError, "IDLAB_ALLOW_INSECURE_HTTP"):
+                IDLabClient("https://lab.example.test")
+        with patch.dict(os.environ, {"IDLAB_URL": "http://lab.example.test", "IDLAB_ALLOW_INSECURE_HTTP": "true"}):
+            with self.assertRaisesRegex(ValueError, "allow_insecure_http"):
+                IDLabClient(allow_insecure_http=False)
+            with self.assertRaisesRegex(ValueError, "HTTP or HTTPS origin"):
+                IDLabClient("")
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):
@@ -26,8 +45,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await web.SockSite(runner, self.listener).start()
         self.browser = ClientSession(cookie_jar=CookieJar(unsafe=True))
         self.addAsyncCleanup(self.browser.close)
-        async with self.browser.get(self.origin) as response:
-            self.assertEqual(response.status, 200)
+        async with self.browser.post(self.origin + "/api/v1/web/session", headers={"Origin": self.origin}) as response:
+            self.assertEqual(response.status, 204)
         self.client = IDLabClient(self.origin, token="test-token", timeout=3)
 
     async def connect(self, *, console=False):
@@ -45,19 +64,49 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         return socket
 
     @asynccontextmanager
-    async def control(self, socket):
+    async def control(self, socket, *, client=None):
         async with self.browser.post(self.origin + "/api/v1/devices/test-board/control/token",
                                      headers={"Origin": self.origin}) as response:
             self.assertEqual(response.status, 200)
             token = (await response.json())["token"]
         self.assertEqual((await socket.receive_json(timeout=2))["control"], "available")
-        context = self.client.control("test-board", token)
+        context = (client or self.client).control("test-board", token)
         board = await asyncio.to_thread(context.__enter__)
         self.assertEqual((await socket.receive_json(timeout=2))["control"], "external")
         try:
             yield board
         finally:
             await asyncio.to_thread(context.__exit__, None, None, None)
+
+    async def test_docker_http_allows_delegated_control_without_global_token(self):
+        origin = self.origin.replace("127.0.0.1", "host.docker.internal")
+        with patch.dict(os.environ, {"IDLAB_URL": origin}, clear=True):
+            with self.assertRaisesRegex(ValueError, "allow_insecure_http"):
+                IDLabClient()
+        with patch.dict(os.environ, {"IDLAB_URL": origin, "IDLAB_ALLOW_INSECURE_HTTP": "true"}, clear=True):
+            client = IDLabClient(timeout=3)
+        agent = await self.connect(console=True)
+        system_getaddrinfo = socket.getaddrinfo
+
+        def resolve(host, *args, **kwargs):
+            if host == "host.docker.internal":
+                host = "127.0.0.1"
+            return system_getaddrinfo(host, *args, **kwargs)
+
+        with patch("socket.getaddrinfo", side_effect=resolve):
+            with self.assertRaises(IDLabHTTPError) as anonymous:
+                await asyncio.to_thread(client.devices)
+            self.assertEqual(anonymous.exception.status, 401)
+            async with self.control(agent, client=client) as board:
+                await agent.send_json({"uart": b"ready\n".hex()})
+                async with asyncio.timeout(2):
+                    while True:
+                        data, cursor, dropped = await asyncio.to_thread(board.read_uart)
+                        if data:
+                            break
+                        await asyncio.sleep(0.01)
+                self.assertEqual((data, cursor, dropped), (b"ready\n", 6, 0))
+            self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
 
     async def test_list_identify_and_read(self):
         socket = await self.connect()

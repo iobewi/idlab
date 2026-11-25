@@ -67,14 +67,14 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await self.browser.start_server()
         self.local = {"Host": "127.0.0.1:0", "Origin": "http://127.0.0.1:0"}
         self.script = {"Host": "127.0.0.1:0", "Authorization": "Bearer test-token"}
-        response = await self.browser.get("/", headers=self.local)
-        self.assertEqual(response.status, 200)
+        response = await self.browser.post("/api/v1/web/session", headers=self.local)
+        self.assertEqual(response.status, 204)
 
     async def asyncTearDown(self):
         await self.browser.close()
 
-    async def board(self, name, loader="stub"):
-        ws = await self.browser.ws_connect("/agent?device=" + name, headers=self.local)
+    async def board(self, name, loader="stub", *, browser=None):
+        ws = await (browser or self.browser).ws_connect("/agent?device=" + name, headers=self.local)
         await ws.send_json({
             "chip": "esp32s3", "mac": "10:20:30:40:50:60",
             "loader": loader, "transport": "usb_serial_jtag",
@@ -82,11 +82,68 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         })
         return ws, (await ws.receive_json())["generation"]
 
+    async def test_browser_sessions_isolate_boards_campaigns_and_activity(self):
+        async with TestClient(self.server, cookie_jar=CookieJar(unsafe=True)) as visitor:
+            page = await visitor.get("/", headers=self.local)
+            self.assertNotIn("idlab_session", page.cookies)
+            self.assertEqual((await visitor.get("/api/v1/devices")).status, 401)
+            with self.assertRaises(WSServerHandshakeError) as anonymous:
+                await visitor.ws_connect("/agent?device=board", headers=self.local)
+            self.assertEqual(anonymous.exception.status, 403)
+            denied = await visitor.post("/api/v1/web/session", headers=self.local | {"Origin": "http://other.test"})
+            self.assertEqual(denied.status, 403)
+            created = await visitor.post("/api/v1/web/session", headers=self.local)
+            self.assertEqual(created.status, 204)
+            self.assertTrue(created.cookies["idlab_session"]["httponly"])
+
+            owner_board, generation = await self.board("board")
+            self.assertEqual(await (await visitor.get("/api/v1/devices")).json(), {})
+            path = "/api/v1/devices/board"
+            self.assertEqual((await visitor.get(path)).status, 404)
+            self.assertEqual((await visitor.post(path + "/control/token", headers=self.local)).status, 404)
+            _, other_generation = await self.board("board", browser=visitor)
+            self.assertNotEqual(generation, other_generation)
+            self.assertEqual((await (await visitor.get(path)).json())["generation"], other_generation)
+
+            campaign = await self.browser.post("/api/v1/campaigns", headers=self.local, json={"name": "Private"})
+            campaign_path = campaign.headers["Location"]
+            self.assertEqual((await visitor.get(campaign_path)).status, 404)
+            self.assertEqual((await visitor.get(campaign_path + "/operations")).status, 404)
+            self.assertEqual((await (await visitor.get("/api/v1/campaigns")).json())["total"], 0)
+
+            issued = await self.browser.post(path + "/control/token", headers=self.local)
+            token = (await issued.json())["token"]
+            await owner_board.receive_json(timeout=2)
+            async with visitor.ws_connect(path + "/control/connect", headers={"Authorization": "Bearer " + token}) as control:
+                session = await control.receive_json(timeout=2)
+                self.assertEqual(session["generation"], generation)
+                await owner_board.receive_json(timeout=2)
+                read = asyncio.create_task(self.read("board", generation, headers={"Authorization": "Bearer " + session["session"]}))
+                await owner_board.receive_json(timeout=2)
+                async with visitor.ws_connect("/api/v1/activity", headers=self.local) as stream:
+                    self.assertEqual(await stream.receive_json(timeout=2), {"active": False})
+                await owner_board.send_bytes(b"data")
+                self.assertEqual(await (await read).read(), b"data")
+
     def read(self, name, generation, *, address=0, size=4, headers=None):
         return self.browser.post(
             f"/api/v1/devices/{name}/flash/read", headers=headers or self.local,
             json={"generation": generation, "address": address, "size": size},
         )
+
+    async def test_public_origin_uses_secure_cookie_and_bearer_does_not_depend_on_host(self):
+        origin = "https://lab.example.test"
+        async with TestClient(TestServer(create_app(public_origin=origin, token="test-token"))) as client:
+            headers = {"Host": "lab.example.test", "Origin": origin}
+            web_session = await client.post("/api/v1/web/session", headers=headers)
+            self.assertEqual(web_session.status, 204)
+            self.assertTrue(web_session.cookies["idlab_session"]["secure"])
+            self.assertEqual(web_session.cookies["idlab_session"]["samesite"], "Strict")
+            rejected = await client.post("/api/v1/web/session", headers=headers | {"Host": "elsewhere.test"})
+            self.assertEqual(rejected.status, 403)
+            bearer = {"Host": "docker.internal", "Authorization": "Bearer test-token"}
+            self.assertEqual((await client.get("/api/v1/devices", headers=bearer)).status, 200)
+            self.assertEqual((await client.get("/api/v1/web/session", headers=bearer)).status, 401)
 
     async def test_workbench_files_are_revalidated_after_deploy(self):
         for path in ("/", "/web/app.js", "/web/board-connector.js", "/web/style.css"):
@@ -290,7 +347,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await stream.receive_json(timeout=2), {"active": False})
 
         self.assertEqual((await self.browser.get("/api/v1/devices", headers=self.script)).status, 200)
-        response = await self.browser.get("/api/v1/campaigns", headers=self.script | {"X-IDLab-Action": "1"})
+        response = await self.browser.get("/api/v1/campaigns", headers=self.local | {"X-IDLab-Action": "1"})
         self.assertEqual(response.status, 200)
         self.assertEqual(await stream.receive_json(timeout=2), {"active": True})
         self.assertEqual(await stream.receive_json(timeout=2), {"active": False})
@@ -386,7 +443,9 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_abort_blocks_new_reads_but_drains_in_flight_reads(self):
         a, ga = await self.board("a")
         _, gb = await self.board("b")
-        campaign = await self.start_campaign()
+        created = await self.browser.post("/api/v1/campaigns", headers=self.local, json={"name": "Readback"})
+        self.assertEqual(created.status, 201)
+        campaign = await created.json()
         campaign_id = campaign["id"]
         base = f"/api/v1/campaigns/{campaign_id}"
 
@@ -398,9 +457,9 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
 
         active = asyncio.create_task(read("a", ga))
         await a.receive_json(timeout=2)
-        finish = await self.browser.post(base + "/finish", headers=self.script, json={"verdict": "PASS"})
+        finish = await self.browser.post(base + "/finish", headers=self.local, json={"verdict": "PASS"})
         self.assertEqual((finish.status, await finish.json()), (409, {"error": "campaign_busy"}))
-        abort = await self.browser.post(base + "/abort", headers=self.script, json={"reason": "operator stop"})
+        abort = await self.browser.post(base + "/abort", headers=self.local, json={"reason": "operator stop"})
         self.assertEqual(abort.status, 202)
         self.assertEqual((await abort.json())["state"], "abort_requested")
 
@@ -409,7 +468,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await a.send_bytes(b"data")
         self.assertEqual(await (await active).read(), b"data")
 
-        response = await self.browser.get(base, headers=self.script)
+        response = await self.browser.get(base, headers=self.local)
         final = await response.json()
         self.assertEqual((final["state"], final["in_flight"], final["reason"]), ("aborted", 0, "operator stop"))
         self.assertIsNotNone(final["ended_at"])

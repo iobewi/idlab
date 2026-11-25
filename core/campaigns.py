@@ -78,6 +78,9 @@ class Campaigns:
             columns = {row["name"] for row in self.db.execute("PRAGMA table_info(campaigns)")}
             if "metadata" not in columns:
                 self.db.execute("ALTER TABLE campaigns ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+            if "owner" not in columns:
+                self.db.execute("ALTER TABLE campaigns ADD COLUMN owner TEXT")
+            self.db.execute("CREATE TABLE IF NOT EXISTS web_sessions (id TEXT PRIMARY KEY)")
             self.db.execute("""
                 CREATE TABLE IF NOT EXISTS campaign_operations (
                     id TEXT PRIMARY KEY,
@@ -101,6 +104,18 @@ class Campaigns:
     def close(self):
         self.db.close()
 
+    def save_session(self, session_id):
+        with self.db:
+            self.db.execute("INSERT INTO web_sessions (id) VALUES (?)", (session_id,))
+
+    def has_session(self, session_id):
+        return self.db.execute("SELECT 1 FROM web_sessions WHERE id = ?", (session_id,)).fetchone() is not None
+
+    def require_owner(self, campaign_id, *owners):
+        row = self.db.execute("SELECT owner FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
+        if row is None or row["owner"] not in owners:
+            raise CampaignError(404, "campaign_not_found")
+
     def get(self, campaign_id):
         row = self.db.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,)).fetchone()
         if row is None:
@@ -108,10 +123,12 @@ class Campaigns:
         return self._describe(row)
 
     def _describe(self, row):
-        return dict(row) | {"metadata": json.loads(row["metadata"]), "in_flight": self.in_flight.get(row["id"], 0)}
+        values = dict(row)
+        values.pop("owner", None)
+        return values | {"metadata": json.loads(row["metadata"]), "in_flight": self.in_flight.get(row["id"], 0)}
 
-    def search(self, *, q, states, verdict, start, end, limit, offset):
-        filters, parameters = [], []
+    def search(self, *, q, states, verdict, start, end, limit, offset, owner=None):
+        filters, parameters = ["owner IS ?"], [owner]
         if q:
             filters.append("(instr(casefold(name), ?) > 0 OR instr(id, ?) > 0)")
             parameters.extend((q.casefold(), q.casefold()))
@@ -146,12 +163,12 @@ class Campaigns:
             "counts": counts, "total": sum(counts.values()), "limit": limit, "offset": offset,
         }
 
-    def start(self, name, metadata):
+    def start(self, name, metadata, *, owner=None):
         campaign_id = uuid.uuid4().hex
         with self.db:
             self.db.execute(
-                "INSERT INTO campaigns (id, name, state, started_at, metadata) VALUES (?, ?, 'active', ?, ?)",
-                (campaign_id, name, timestamp(), json.dumps(metadata)),
+                "INSERT INTO campaigns (id, name, state, started_at, metadata, owner) VALUES (?, ?, 'active', ?, ?, ?)",
+                (campaign_id, name, timestamp(), json.dumps(metadata), owner),
             )
         return self.get(campaign_id)
 

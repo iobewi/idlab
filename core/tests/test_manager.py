@@ -56,6 +56,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         async with self.client.get("/", headers=self.web) as page:
             self.assertEqual(page.status, 200)
         browser_headers = self.web | {"Origin": "http://127.0.0.1:8080"}
+        self.assertEqual((await self.client.post("/api/v1/web/session", headers=browser_headers)).status, 204)
         created = await self.client.post(
             "/api/v1/campaigns", headers=browser_headers,
             json={"name": "Readback", "metadata": {"scenario": "backup"}},
@@ -108,7 +109,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(first, self.service.process)
         await self.wait_ready()
         self.assertEqual((await agent.receive(timeout=2)).type.name, "CLOSE")
-        # The web session changes on restart, while campaign records survive.
+        # The browser keeps its campaign scope across a server restart.
         await self.client.get("/", headers=self.web)
         retained = await self.client.get("/api/v1/campaigns/" + campaign["id"], headers=browser_headers)
         self.assertEqual(await retained.json(), campaign)
@@ -131,7 +132,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         for method, path, kwargs, status in [
             ("POST", "start", {"headers": {"Authorization": "Bearer wrong"}}, 401),
             ("POST", "stop", {"headers": {"Origin": "http://127.0.0.1:8080"}}, 403),
-            ("GET", "status", {"headers": {"Host": "other.test"}}, 403),
+            ("GET", "status", {"headers": {"Host": "other.test"}}, 200),
             ("POST", "start", {"json": {"service": "another"}}, 400),
             ("GET", "restart", {}, 405),
             ("POST", "remove", {}, 404),

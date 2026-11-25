@@ -13,6 +13,47 @@ l'API du banc. Le gestionnaire, l’interface, l’API et Web Serial utilisent l
 Compose le publie sur `127.0.0.1` de l’hôte. Le serveur HTTP enfant écoute
 sur un port privé du conteneur. Utiliser Docker Engine 28 ou plus récent.
 
+Pour servir IDLab sur une autre machine, placer un reverse proxy HTTPS devant
+le port du gestionnaire et définir `IDLAB_PUBLIC_ORIGIN` avec l’origine exacte,
+par exemple `https://lab.example.org`. Le proxy doit conserver `Host` et
+transmettre les WebSockets. Le SDK Python accepte cette URL HTTPS. Pour une
+interface publique, réserver `/api/v1/httpd/` à l’accès d’administration dans
+la configuration du proxy.
+
+## Connecter un client depuis Docker
+
+Depuis le conteneur client, vérifier d’abord la connectivité avec
+`curl --fail --connect-timeout 3 http://host.docker.internal:8080/health`.
+Si la publication sur la boucle locale de l’hôte est inaccessible depuis
+ce conteneur, utiliser un réseau Docker partagé et l’alias du service sur
+ce réseau comme adresse du SDK.
+
+Dans l’environnement du conteneur client, définir l’adresse du service.
+Pour un hôte Docker joignable à l’adresse ci-dessus, utiliser par exemple
+
+```bash
+export IDLAB_URL="http://host.docker.internal:8080"
+export IDLAB_ALLOW_INSECURE_HTTP=true
+```
+
+Avec le SDK 0.1.1 ou plus récent et une carte connectée dans l’interface,
+générer son jeton via **Autorisations**, puis lire la capture UART depuis
+le conteneur client. Le bloc `with` libère le pilotage en sortant.
+
+```python
+from getpass import getpass
+from idlab_client import IDLabClient
+
+lab = IDLabClient()
+with lab.control("board_1", getpass("Jeton de pilotage : ")) as board:
+    data, cursor, dropped = board.read_uart()
+    print(f"{len(data)} octets, curseur {cursor}, {dropped} octets perdus")
+```
+
+Réserver `IDLAB_ALLOW_INSECURE_HTTP=true` aux réseaux privés de confiance.
+Sur HTTP, les jetons circulent en clair. Pour une instance HTTPS, utiliser
+l’URL HTTPS sans cette option.
+
 ## Depuis VS Code sur Windows
 
 Ouvrir le dépôt dans une **fenêtre locale Windows** de VS Code. Si la fenêtre

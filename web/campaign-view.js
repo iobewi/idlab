@@ -1,4 +1,5 @@
 import { element } from './dom.js';
+import { ensureWebSession } from './web-session.js';
 
 const labels = {
   active: 'Active',
@@ -95,8 +96,8 @@ function campaignList(section, emptyMessage, onResult = () => {}) {
       const response = await fetch('/api/v1/campaigns?' + query, {
         signal: controller.signal, headers: userAction ? actionHeaders : undefined,
       });
-      if (!response.ok) throw new Error('Campagnes indisponibles (' + response.status + ').');
-      const data = await response.json();
+      if (!response.ok && response.status !== 401) throw new Error('Campagnes indisponibles (' + response.status + ').');
+      const data = response.status === 401 ? {items: [], counts: {active: 0, abort_requested: 0}, total: 0} : await response.json();
       if (controller.signal.aborted) return;
       if (offset > 0 && offset >= data.total) {
         offset = Math.floor(Math.max(0, data.total - 1) / pageSize) * pageSize;
@@ -172,6 +173,7 @@ create.onsubmit = async event => {
     const payload = {name: fields.get('name').trim()};
     const metadata = fields.get('metadata').trim();
     if (metadata) payload.metadata = JSON.parse(metadata);
+    await ensureWebSession();
     const response = await fetch('/api/v1/campaigns', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
     });
