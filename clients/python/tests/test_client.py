@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 import socket
 import sys
@@ -12,6 +13,23 @@ from idlab_client import IDLabClient, IDLabHTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "core"))
 from server import create_app
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_url_is_required_and_explicit_arguments_override_environment(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "IDLAB_URL"):
+                IDLabClient()
+            IDLabClient("http://127.0.0.1:8080")
+        with patch.dict(os.environ, {"IDLAB_URL": "not a URL", "IDLAB_ALLOW_INSECURE_HTTP": "invalid"}):
+            IDLabClient("https://lab.example.test", allow_insecure_http=False)
+            with self.assertRaisesRegex(ValueError, "IDLAB_ALLOW_INSECURE_HTTP"):
+                IDLabClient("https://lab.example.test")
+        with patch.dict(os.environ, {"IDLAB_URL": "http://lab.example.test", "IDLAB_ALLOW_INSECURE_HTTP": "true"}):
+            with self.assertRaisesRegex(ValueError, "allow_insecure_http"):
+                IDLabClient(allow_insecure_http=False)
+            with self.assertRaisesRegex(ValueError, "HTTP or HTTPS origin"):
+                IDLabClient("")
 
 
 class ClientTests(unittest.IsolatedAsyncioTestCase):
@@ -62,9 +80,11 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_docker_http_requires_opt_in_and_can_delegate_control(self):
         origin = self.origin.replace("127.0.0.1", "host.docker.internal")
-        with self.assertRaisesRegex(ValueError, "allow_insecure_http"):
-            IDLabClient(origin)
-        client = IDLabClient(origin, timeout=3, allow_insecure_http=True)
+        with patch.dict(os.environ, {"IDLAB_URL": origin}, clear=True):
+            with self.assertRaisesRegex(ValueError, "allow_insecure_http"):
+                IDLabClient()
+        with patch.dict(os.environ, {"IDLAB_URL": origin, "IDLAB_ALLOW_INSECURE_HTTP": "true", "IDLAB_TOKEN": "test-token"}):
+            client = IDLabClient(timeout=3)
         agent = await self.connect(console=True)
         system_getaddrinfo = socket.getaddrinfo
 
@@ -74,6 +94,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             return system_getaddrinfo(host, *args, **kwargs)
 
         with patch("socket.getaddrinfo", side_effect=resolve):
+            listed = await asyncio.to_thread(client.devices)
+            self.assertIn("test-board", listed)
             async with self.control(agent, client=client) as board:
                 await agent.send_json({"uart": b"ready\n".hex()})
                 async with asyncio.timeout(2):

@@ -28,6 +28,14 @@ Si la publication sur la boucle locale de l’hôte est inaccessible depuis
 ce conteneur, utiliser un réseau Docker partagé et l’alias du service sur
 ce réseau comme adresse du SDK.
 
+Dans l’environnement du conteneur client, définir l’adresse du service.
+Pour un hôte Docker joignable à l’adresse ci-dessus, utiliser par exemple
+
+```bash
+export IDLAB_URL="http://host.docker.internal:8080"
+export IDLAB_ALLOW_INSECURE_HTTP=true
+```
+
 Avec le SDK 0.1.1 ou plus récent et une carte connectée dans l’interface,
 générer son jeton via **Autorisations**, puis lire la capture UART depuis
 le conteneur client. Le bloc `with` libère le pilotage en sortant.
@@ -36,13 +44,13 @@ le conteneur client. Le bloc `with` libère le pilotage en sortant.
 from getpass import getpass
 from idlab_client import IDLabClient
 
-lab = IDLabClient("http://host.docker.internal:8080", allow_insecure_http=True)
+lab = IDLabClient()
 with lab.control("board_1", getpass("Jeton de pilotage : ")) as board:
     data, cursor, dropped = board.read_uart()
     print(f"{len(data)} octets, curseur {cursor}, {dropped} octets perdus")
 ```
 
-Réserver `allow_insecure_http=True` aux réseaux privés de confiance.
+Réserver `IDLAB_ALLOW_INSECURE_HTTP=true` aux réseaux privés de confiance.
 Sur HTTP, les jetons circulent en clair. Pour une instance HTTPS, utiliser
 l’URL HTTPS sans cette option.
 

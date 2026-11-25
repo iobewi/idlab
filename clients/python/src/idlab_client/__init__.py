@@ -150,9 +150,18 @@ class Board:
 
 
 class IDLabClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:8080", *, token: str | None = None,
-                 timeout: float = 630, allow_insecure_http: bool = False):
-        """Connect to IDLab. Enable plaintext HTTP remotely only on a trusted network."""
+    def __init__(self, base_url: str | None = None, *, token: str | None = None,
+                 timeout: float = 630, allow_insecure_http: bool | None = None):
+        """Configure the client from explicit arguments or the IDLAB environment."""
+        if base_url is None:
+            base_url = os.environ.get("IDLAB_URL")
+            if not base_url:
+                raise ValueError("Set IDLAB_URL or pass base_url to IDLabClient")
+        if allow_insecure_http is None:
+            setting = os.environ.get("IDLAB_ALLOW_INSECURE_HTTP", "false").strip().lower()
+            if setting not in {"true", "false"}:
+                raise ValueError("IDLAB_ALLOW_INSECURE_HTTP must be true or false")
+            allow_insecure_http = setting == "true"
         endpoint = urlsplit(base_url)
         loopback = endpoint.hostname in {"localhost", "127.0.0.1", "::1"}
         if (endpoint.scheme not in {"http", "https"} or not endpoint.hostname
