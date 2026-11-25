@@ -74,7 +74,7 @@ export function renderOperations(card) {
   renderOperationHistory(card);
   $('dump-state').textContent = card?.dump?.summary ?? 'Aucune relecture.';
   $('hex-dump').textContent = card?.dump?.preview ?? 'Aucune donnée lue.';
-  $('download-dump').hidden = !card?.dump;
+  $('download-dump').disabled = !card?.dump;
 }
 
 export function renderPartitions(card, loader) {
@@ -151,8 +151,7 @@ export function wireOperations({getSelected, render, observeCard}) {
       card.dump = {blob, filename: card.name + '-0x' + address.toString(16) + '.bin',
         summary: blob.size + ' octets lus • aperçu des ' + preview.length + ' premiers octets',
         preview: Array.from(preview, byte => byte.toString(16).padStart(2, '0')).join(' ')};
-      download(card.dump.blob, card.dump.filename);
-      if (card === getSelected()) say('Lecture flash terminée. Téléchargement lancé.', {temporary: true});
+      if (card === getSelected()) say('Lecture flash terminée. Le fichier est prêt à télécharger.', {temporary: true});
     } catch (error) {
       say(error.message);
     } finally {
