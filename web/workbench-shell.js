@@ -3,8 +3,15 @@ import { updateHelp } from './control-help.js';
 
 export const externallyControlled = card => Boolean(card?.identity && card.observation?.external_control);
 
-function wireTabs(attribute) {
+function wireTabs(attribute, verticalLayout) {
   const tabs = [...document.querySelectorAll('[' + attribute + ']')];
+  if (verticalLayout) {
+    const tablist = tabs[0]?.closest('[role="tablist"]');
+    const updateOrientation = () => tablist?.setAttribute('aria-orientation',
+      verticalLayout.matches ? 'vertical' : 'horizontal');
+    updateOrientation();
+    verticalLayout.addEventListener('change', updateOrientation);
+  }
   function select(tab) {
     if (tab.disabled) return;
     for (const element of tabs) {
@@ -21,7 +28,9 @@ function wireTabs(attribute) {
       const index = enabled.indexOf(tab);
       if (index === -1) return;
       const last = enabled.length - 1;
-      const target = {ArrowLeft: (index + last) % enabled.length, ArrowRight: (index + 1) % enabled.length,
+      const previous = verticalLayout?.matches ? 'ArrowUp' : 'ArrowLeft';
+      const next = verticalLayout?.matches ? 'ArrowDown' : 'ArrowRight';
+      const target = {[previous]: (index + last) % enabled.length, [next]: (index + 1) % enabled.length,
         Home: 0, End: last}[event.key];
       if (target === undefined) return;
       event.preventDefault();
@@ -113,7 +122,7 @@ export function wireWorkbenchShell(cards, stopTarget) {
   }
 
   wireTabs('data-workspace-tab');
-  wireTabs('data-tab');
+  wireTabs('data-tab', window.matchMedia('(width > 980px)'));
 
   const bankInfo = $('bank-info');
   document.addEventListener('pointerdown', event => {
