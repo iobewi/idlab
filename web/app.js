@@ -76,7 +76,6 @@ function renderIdentification() {
       usb_uart: 'Pont USB–UART'}[transport], card?.portLabel].filter(Boolean).join(' · ') || null,
     'serial-speed-info': activeBaud ? (nativeUsb ? 'USB natif' : number.format(activeBaud) + ' bauds') : null,
     'transfer-rate-info': rate ? number.format(rate / 1024) + ' Kio/s' : null,
-    'footer-target': card?.name,
   })) $(id).textContent = value ?? '—';
 
   const hint = $('identity-source');
