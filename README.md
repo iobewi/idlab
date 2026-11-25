@@ -191,6 +191,10 @@ python -m pip install -e ./clients/python
 python -m unittest discover -s clients/python/tests -v
 ```
 
-Pour publier une version du client, pousser un tag `python-client-v<VERSION>`
-sur le commit de `main` contenant cette version dans `clients/python/pyproject.toml`.
-La CI installe et teste le `.whl` avant de le joindre à la release GitHub.
+Pour publier une version du client, ouvrir **Actions → Python client → Run workflow**
+et sélectionner la branche `main`. La version est lue dans
+`clients/python/pyproject.toml`. La CI construit, installe et teste le `.whl`,
+puis crée le tag `python-client-v<VERSION>` sur le commit testé et publie le wheel
+dans une release GitHub. Une release existante n'est jamais remplacée : augmenter
+la version du paquet avant une nouvelle publication. Les PR et les pushes sur
+`main` valident le paquet sans le publier.
