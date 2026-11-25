@@ -78,12 +78,12 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await asyncio.to_thread(context.__exit__, None, None, None)
 
-    async def test_docker_http_requires_opt_in_and_can_delegate_control(self):
+    async def test_docker_http_allows_delegated_control_without_global_token(self):
         origin = self.origin.replace("127.0.0.1", "host.docker.internal")
         with patch.dict(os.environ, {"IDLAB_URL": origin}, clear=True):
             with self.assertRaisesRegex(ValueError, "allow_insecure_http"):
                 IDLabClient()
-        with patch.dict(os.environ, {"IDLAB_URL": origin, "IDLAB_ALLOW_INSECURE_HTTP": "true", "IDLAB_TOKEN": "test-token"}):
+        with patch.dict(os.environ, {"IDLAB_URL": origin, "IDLAB_ALLOW_INSECURE_HTTP": "true"}, clear=True):
             client = IDLabClient(timeout=3)
         agent = await self.connect(console=True)
         system_getaddrinfo = socket.getaddrinfo
@@ -94,8 +94,9 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             return system_getaddrinfo(host, *args, **kwargs)
 
         with patch("socket.getaddrinfo", side_effect=resolve):
-            listed = await asyncio.to_thread(client.devices)
-            self.assertIn("test-board", listed)
+            with self.assertRaises(IDLabHTTPError) as anonymous:
+                await asyncio.to_thread(client.devices)
+            self.assertEqual(anonymous.exception.status, 401)
             async with self.control(agent, client=client) as board:
                 await agent.send_json({"uart": b"ready\n".hex()})
                 async with asyncio.timeout(2):
