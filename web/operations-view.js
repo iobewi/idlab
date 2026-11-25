@@ -82,10 +82,10 @@ export function renderOperations(card) {
   $('download-dump').disabled = !card?.dump;
 }
 
-export function renderPartitions(card, loader) {
+export function renderPartitions(card, canRead) {
   const table = card?.partitions;
-  $('read-partitions').disabled = !loader;
-  $('try-partition-address').disabled = !loader;
+  $('read-partitions').disabled = !canRead;
+  $('try-partition-address').disabled = !canRead;
   $('partition-suggestion').hidden = !card?.suggestPartition;
   $('partition-state').textContent = card?.partitionStatus ?? 'Aucune table lue.';
   $('partitions-body').replaceChildren(...(table ?? []).map(part => {
@@ -94,12 +94,15 @@ export function renderPartitions(card, loader) {
     for (const value of [part.label, hex(part.type) + ' / ' + hex(part.subtype),
       hex(part.address), hex(part.size), hex(part.address + part.size)]) row.append(element('td', value));
     const action = element('td');
-    const read = iconAction('read', 'Sélectionner la plage de ' + part.label,
-      'Ouvre Lecture mémoire avec l’adresse et la taille de cette partition.');
+    const read = iconAction('read', 'Lire la partition ' + part.label,
+      'Ouvre Lecture mémoire et lance la lecture de cette partition.');
+    read.disabled = !canRead;
     read.onclick = () => {
       $('address').value = hex(part.address);
       $('size').value = hex(part.size);
       $('tab-memory').click();
+      $('tab-memory').focus();
+      $('read').click();
     };
     action.append(read);
     row.append(action);
