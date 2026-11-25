@@ -117,7 +117,17 @@ export function wireWorkbenchShell(cards) {
   for (const button of document.querySelectorAll('[data-close-status]')) {
     button.onclick = () => { selectBand(null); $('status-' + button.dataset.closeStatus).focus(); };
   }
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') selectBand(null); });
+  const bankInfo = $('bank-info');
+  document.addEventListener('pointerdown', event => {
+    if (bankInfo.open && !bankInfo.contains(event.target)) bankInfo.open = false;
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    if (bankInfo.open) {
+      bankInfo.open = false;
+      bankInfo.querySelector('summary').focus();
+    } else selectBand(null);
+  });
   void checkServer();
   watchApiActivity();
 
