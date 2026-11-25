@@ -65,7 +65,7 @@ export class BoardConnector {
     this.onChange();
   }
 
-  async connect({romOnly = false} = {}) {
+  async connect({romOnly = false, identifyOnConnect = false} = {}) {
     if (this.mode !== 'disconnected') return;
     this.lost = false;
     this.#setMode('connecting');
@@ -84,6 +84,21 @@ export class BoardConnector {
     } catch (error) {
       await this.#clearSession();
       throw error;
+    }
+    if (!identifyOnConnect) return;
+    if (this.mode === 'console' && !this.lastIdentity?.flash_size && this.canEnterLoader) {
+      try {
+        await this.identify();
+      } catch (error) {
+        if (this.mode !== 'console' || this.lost || this.socket?.readyState !== 1) throw error;
+        return error.message === 'Failed to connect with the device'
+          ? 'La carte ne répond pas en mode téléchargement.' : error.message;
+      }
+    }
+    if (!this.lastIdentity?.flash_size) {
+      return this.mode === 'console' && !this.canEnterLoader
+        ? 'Ce port exige une entrée manuelle en téléchargement avec BOOT et RESET.'
+        : 'La capacité de la flash n’a pas pu être mesurée.';
     }
   }
 
@@ -244,7 +259,7 @@ export class BoardConnector {
         socket.send(command.command === 'flash.read' && !command.stream ? command.id
           : JSON.stringify({result: command.id, error: error.message === 'invalid_flash_range'
             ? 'invalid_flash_range' : 'device_command_failed', console_restored: this.mode === 'console',
-            detail: command.command === 'mode.loader' ? error.message : undefined}));
+            detail: ['mode.loader', 'identify'].includes(command.command) ? error.message : undefined}));
       }
       this.#log(error.message);
     } finally {
@@ -332,11 +347,11 @@ export class BoardConnector {
     }
   }
 
-  async #clearSession() {
+  async #clearSession({keepIdentity = false} = {}) {
     try {
       await this.#closeSession();
     } finally {
-      this.lastIdentity = null;
+      if (!keepIdentity || this.lost) this.lastIdentity = null;
       this.#setMode('disconnected');
     }
   }
@@ -345,12 +360,13 @@ export class BoardConnector {
     if (lost) {
       if (this.identity && !this.lost && this.mode !== 'closing') this.onLinkLost();
       this.lost = true;
+      this.lastIdentity = null;
       this.socket?.close();
     }
     if (this.mode === 'connecting' || this.mode === 'closing' || this.requesting || this.busy) return;
     if (this.mode === 'disconnected' && !this.session) return;
     this.#setMode('closing');
-    await this.#clearSession();
+    await this.#clearSession({keepIdentity: !lost});
     this.#log('Port fermé');
   }
 

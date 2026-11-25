@@ -49,15 +49,19 @@ puis reconnecte-la depuis la liste des cartes.
 Si IDLab a ouvert le chargeur depuis une console déjà active, le même
 bouton devient **Revenir à la console**. Le retour est disponible sur les
 ports à reset automatique quand le web a la main.
-Le panneau Identification reprend les indices du démarrage ESP-IDF visibles
-sur l’UART, dont la puce, la révision et la taille flash configurée.
-**Identifier**, **Relire la table** et **Lire la flash** passent par le
-connecteur de la carte. Sur un pont UART reconnu ou USB Serial/JTAG, elles
-ouvrent le chargeur si nécessaire, puis rétablissent le mode de départ.
-La carte peut redémarrer et la capture UART est suspendue pendant
-l’opération. Si le port exige une entrée manuelle, place la carte en mode
-téléchargement et reconnecte-la avant la lecture.
-L’identité mesurée et la capture restent affichées au retour en console.
+À l’ajout d’une carte, IDLab complète automatiquement son identification
+via le chargeur. Si la carte était en console et que le port permet la
+bascule automatique, le firmware redémarre et IDLab revient en console.
+Les mesures sont conservées lors d’une reconnexion au même port dans
+la page et effacées si la carte est débranchée. Si l’identification
+complète est impossible, la console affiche les indices disponibles
+dans les logs UART. Le bouton **Ouvrir le chargeur flash** permet
+de réessayer sur un port à bascule automatique.
+
+**Relire la table** et **Lire la flash** ouvrent le chargeur si nécessaire,
+puis rétablissent le mode de départ. Si le port exige une entrée
+manuelle, place la carte en téléchargement avec BOOT et RESET avant de
+la reconnecter.
 Une lecture couvrant une grande plage reste une seule requête API et une
 seule opération dans l’historique. Le connecteur transmet les données au
 serveur par blocs de 4 Mio maximum.

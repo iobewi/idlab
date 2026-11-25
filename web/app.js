@@ -52,7 +52,7 @@ setInterval(() => { for (const card of cards.values()) void observeCard(card); }
 function renderIdentification() {
   const card = selected;
   const current = card?.mode === 'loader' ? card.identity : null;
-  const info = current ?? card?.lastIdentity;
+  const info = current ?? (card?.mode === 'console' ? card.lastIdentity : null);
   const transport = info?.transport ?? card?.transport;
   const nativeUsb = transport === 'usb_otg' || transport === 'usb_serial_jtag';
   const activeBaud = card?.activeBaud;
@@ -82,7 +82,7 @@ function renderIdentification() {
   const hint = $('identity-source');
   hint.textContent = card?.mode === 'console'
     ? (info ? 'Mesures conservées du dernier passage en chargeur sur ce port.'
-      : card.canEnterLoader ? 'Identifier mesure la flash, la MAC et le RDID via le chargeur.'
+      : card.canEnterLoader ? 'Identification partielle à partir des logs UART.'
       : 'Pour mesurer l’identité complète, place la carte en téléchargement puis reconnecte-la dans IDLab.')
     : card?.consoleUnavailable && !card.canReturnToConsole
       ? manualConsoleReturn : (current ? 'Identité lue par le chargeur.' : '');
@@ -155,7 +155,6 @@ function render() {
   reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
   reset.title = consoleUnavailable ? consolesTab.title : 'Redémarre la carte depuis la console.';
-  $('identify-live').disabled = !(loader || autoLoader);
   const modeButton = $('enter-loader');
   modeButton.textContent = selected?.mode === 'loader' ? 'Revenir à la console' : 'Ouvrir le chargeur flash';
   modeButton.disabled = !(autoLoader || (available && selected.canReturnToConsole));
@@ -281,9 +280,10 @@ $('control-token-dialog').onclose = () => {
 
 async function connectCard(card) {
   if (card === selected) say('Détection de « ' + card.name + ' »…');
-  await card.connect();
+  const identificationWarning = await card.connect({identifyOnConnect: true});
   if (card !== selected) return;
-  say(card.name + ' connectée.', {temporary: true});
+  if (identificationWarning) say('Identification partielle de « ' + card.name + ' ». ' + identificationWarning);
+  else say(card.name + ' connectée.', {temporary: true});
   $(card.mode === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
   if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
 }
@@ -360,11 +360,6 @@ $('enter-loader').onclick = () => run(async () => {
     $('tab-memory').click();
   }
 });
-$('identify-live').onclick = () => run(async () => {
-  const identity = await selected?.identify();
-  if (identity) say((identity.model ?? identity.chip) + ' · MAC ' + identity.mac, {temporary: true});
-});
-
 const getSelected = () => selected;
 const syncConsole = watchConsole(card => {
   renderIdentification();

@@ -116,6 +116,8 @@ En cas d’échec de `mode.loader`, le connecteur tente de rétablir la
 console si le port et la session sont encore actifs. La réponse
 `502 device_command_failed` peut inclure un champ `detail` avec la
 cause de l’échec.
+La commande `identify`, utilisée à la connexion par l’interface web,
+peut renvoyer le même champ `detail` en cas d’échec.
 Si le connecteur ne rend aucun résultat dans le délai de la commande,
 l’API renvoie `504 device_command_timeout` et ferme la session de la carte.
 
