@@ -30,6 +30,7 @@ export function wireRomDialog({getSelected, hasCard}) {
   $('open-rom').onclick = () => {
     const card = getSelected();
     if (!card || romDialog.open) return;
+    say('');
     romTarget = card;
     romAutomatic = romTarget.canResetIntoRom;
     $('rom-reset-device').textContent = 'Carte : ' + romTarget.name;
@@ -67,7 +68,6 @@ export function wireRomDialog({getSelected, hasCard}) {
       const identity = await card.enterRom({reset: romAutomatic});
       if (identity?.loader !== 'rom') throw new Error('La session ROM n’a pas été confirmée.');
       romDialog.close('connected');
-      say('Session ROM ouverte sur ' + (identity.model ?? identity.chip) + '.');
     } catch (error) {
       romProgress.textContent = 'Connexion ROM impossible : ' + error.message;
     } finally {

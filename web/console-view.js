@@ -122,6 +122,7 @@ export function wireConsole({getSelected, render, observeCard}) {
     const card = getSelected();
     if (!card || card.mode !== 'console' || sending) return;
     sending = true;
+    say('');
     try {
       const value = $('uart').value;
       let payload = value + '\n';

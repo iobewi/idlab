@@ -7,11 +7,13 @@ import { renderConsole, renderConsoleControls, renderFlashProgress, renderJourna
 import { renderOperationHistory, renderOperations, renderPartitions, wireOperations } from './operations-view.js';
 import { renderRom, wireRomDialog } from './rom-dialog.js';
 import { externallyControlled, wireWorkbenchShell } from './workbench-shell.js';
+import { renderGuide } from './context-guide.js';
 
 const cards = new Map();
 let nextBoardNumber = 1;
 let selected = null;
 let adding = false;
+let choosingPort = false;
 const manualConsoleReturn = 'Pour retrouver la console, déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.';
 
 async function observeCard(card) {
@@ -169,6 +171,7 @@ function render() {
   renderConsole(selected);
   renderOperations(selected);
   renderJournal(selected);
+  renderGuide(selected, choosingPort);
 }
 
 function addCard(name, port, flashBaud) {
@@ -188,7 +191,12 @@ function addCard(name, port, flashBaud) {
   card.nameButton = element('button', name, 'board-name');
   card.status = element('button', '', 'board-status');
   card.remove = element('button', 'Retirer');
-  card.nameButton.onclick = () => { selected = card; render(); void observeCard(card); };
+  card.nameButton.onclick = () => {
+    if (selected !== card) say('');
+    selected = card;
+    render();
+    void observeCard(card);
+  };
   card.status.onclick = () => run(() => card.mode === 'disconnected' ? connectCard(card) : card.disconnect());
   card.remove.onclick = () => run(async () => {
     await card.disconnect();
@@ -246,7 +254,6 @@ $('control-token-dialog').onclose = () => {
 async function connectCard(card) {
   await card.connect();
   if (card !== selected) return;
-  say(card.name + ' connectée.');
   $(card.mode === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
   if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
 }
@@ -272,10 +279,13 @@ async function addFromPicker() {
   if (!navigator.serial) return feedback('Web Serial est indisponible dans ce navigateur.');
   adding = $('add-device').disabled = true;
   try {
-    feedback('Choisis le port de la carte dans le sélecteur du navigateur.');
+    say('');
+    $('add-card-feedback').textContent = '';
+    choosingPort = true;
+    renderGuide(selected, choosingPort);
     const port = await navigator.serial.requestPort();
+    choosingPort = false;
     if ([...cards.values()].some(card => card.port === port)) return feedback('Ce port est déjà associé à une carte.');
-    feedback('Détection de la carte…');
     const card = addCard(name, port, flashBaud);
     if (input.value === enteredName) input.value = suggestBoardName();
     await connectCard(card);
@@ -284,6 +294,8 @@ async function addFromPicker() {
     feedback(error.name === 'NotFoundError' ? 'Aucun port sélectionné.' : error.message);
   } finally {
     adding = $('add-device').disabled = false;
+    choosingPort = false;
+    renderGuide(selected, choosingPort);
   }
 }
 $('add-device').onclick = addFromPicker;
@@ -302,7 +314,6 @@ $('enter-loader').onclick = () => run(async () => {
     await card.returnConsole();
     if (card === selected) $('workspace-tab-consoles').click();
   } else {
-    say('Ouverture du chargeur flash sur « ' + card.name + ' »…');
     try {
       await card.enterLoader();
     } catch (error) {
@@ -316,7 +327,6 @@ $('enter-loader').onclick = () => run(async () => {
       throw new Error('Impossible d’ouvrir le chargeur sur « ' + card.name + ' ». ' + detail);
     }
     if (card !== selected) return;
-    say('Chargeur flash ouvert sur « ' + card.name + ' ».');
     $('workspace-tab-operations').click();
     $('tab-memory').click();
   }
@@ -341,5 +351,4 @@ emptyCards.id = 'empty-cards';
 $('active-cards').replaceChildren(emptyCards);
 $('add-device-id').value = suggestBoardName();
 $('server-origin').textContent = location.origin;
-say('Ajoute une carte pour ouvrir une console ou une session chargeur.');
 render();

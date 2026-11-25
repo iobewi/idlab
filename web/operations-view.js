@@ -101,6 +101,7 @@ export function wireOperations({getSelected, render, observeCard}) {
   async function readPartitions() {
     const card = getSelected();
     if (!card || card.busy || card.requesting || $('read').disabled) return;
+    say('');
     card.partitions = [];
     card.suggestPartition = false;
     card.partitionStatus = 'Lecture de la table…';
@@ -124,6 +125,7 @@ export function wireOperations({getSelected, render, observeCard}) {
   $('read').onclick = async () => {
     const card = getSelected();
     if (!card || card.busy || card.requesting || $('read').disabled) return;
+    say('');
     card.dump = null;
     $('read').disabled = true;
     renderOperations(card);
@@ -135,7 +137,6 @@ export function wireOperations({getSelected, render, observeCard}) {
       card.dump = {blob, filename: card.name + '-0x' + address.toString(16) + '.bin',
         summary: blob.size + ' octets lus • aperçu des ' + preview.length + ' premiers octets',
         preview: Array.from(preview, byte => byte.toString(16).padStart(2, '0')).join(' ')};
-      say(card.dump.summary);
     } catch (error) {
       say(error.message);
     } finally {

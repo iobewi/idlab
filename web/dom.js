@@ -11,6 +11,7 @@ export function element(tag, content, cls) {
 }
 
 export async function run(action) {
+  say('');
   try {
     return await action();
   } catch (error) {
