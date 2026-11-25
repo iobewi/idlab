@@ -3,7 +3,7 @@ import { $ } from './dom.js';
 let hoveredControl;
 let focusedControl;
 let explainedControl;
-function updateHelp() {
+export function updateHelp() {
   const control = [hoveredControl, focusedControl]
     .find(candidate => candidate?.isConnected && !candidate.closest('[hidden]'));
   if (explainedControl !== control) {

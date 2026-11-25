@@ -7,7 +7,7 @@ import { renderConsole, renderConsoleControls, renderFlashProgress, renderJourna
 import { renderOperationHistory, renderOperations, renderPartitions, wireOperations } from './operations-view.js';
 import { renderRom, wireRomDialog } from './rom-dialog.js';
 import { externallyControlled, wireWorkbenchShell } from './workbench-shell.js';
-import { wireControlHelp } from './control-help.js';
+import { updateHelp, wireControlHelp } from './control-help.js';
 
 const cards = new Map();
 let nextBoardNumber = 1;
@@ -162,10 +162,8 @@ function render() {
   renderConsoleControls(selected, available);
   $('control-state').textContent = selected?.observation?.device.control === 'stopping' ? 'Arrêt en cours'
     : selected?.observation?.device.control === 'busy' || selected?.requesting ? 'Opération en cours' : external ? 'Pilotage externe' : 'Disponible';
-  $('grant').disabled = !selected?.identity || selected.hasControlToken || !['console', 'loader'].includes(selected.mode);
-  $('revoke').disabled = !selected?.hasControlToken;
+  renderControlToken(selected);
   $('release-control').disabled = !external || selected?.observation?.device.control === 'stopping';
-  $('grant-state').textContent = selected?.hasControlToken ? 'Jeton émis' : 'Aucun jeton';
   void updateWakeLock();
   renderConsole(selected);
   renderOperations(selected);
@@ -214,24 +212,52 @@ function addCard(name, port, flashBaud) {
   return card;
 }
 
-async function controlAction(action) {
-  const card = selected;
+function renderControlToken(card) {
+  const button = $('control-token-toggle');
+  const issued = Boolean(card?.hasControlToken);
+  const canIssue = Boolean(card?.identity && ['console', 'loader'].includes(card.mode));
+  button.disabled = Boolean(card?.changingToken) || (!issued && !canIssue);
+  button.dataset.issued = String(issued);
+  button.setAttribute('aria-label', issued ? 'Révoquer le jeton de pilotage' : 'Créer un jeton de pilotage');
+  $('control-token-icon').setAttribute('href', issued ? '#icon-key-issued' : '#icon-key');
+  const help = issued ? 'Jeton émis. Clique pour le révoquer et arrêter tout pilotage externe en cours.'
+    : canIssue ? 'Aucun jeton émis. Clique pour créer un jeton de pilotage pour cette carte.'
+    : 'Connecte la carte pour créer un jeton de pilotage.';
+  if (button.dataset.guideHelp !== help) {
+    button.dataset.guideHelp = help;
+    updateHelp();
+  }
+}
+
+async function controlAction(action, card = selected) {
   if (!card) return;
   const response = await fetch('/api/v1/devices/' + card.name + '/control/' + action, {method: 'POST'});
   const result = await response.json();
   if (!response.ok) throw new Error(result.error ?? ('HTTP ' + response.status));
   if (result.token) {
+    card.hasControlToken = true;
     $('control-token-card').textContent = card.name;
     $('control-token').value = result.token;
     $('control-token-feedback').textContent = '';
     $('control-token-dialog').showModal();
-  } else if (action === 'revoke' && card.mode === 'disconnected') {
+  } else if (action === 'revoke') {
     card.hasControlToken = false;
-    render();
+    say('Jeton de « ' + card.name + ' » révoqué.', {temporary: true});
   }
 }
-$('grant').onclick = () => run(() => controlAction('token'));
-$('revoke').onclick = () => run(() => controlAction('revoke'));
+$('control-token-toggle').onclick = () => run(async () => {
+  const card = selected;
+  if (!card || $('control-token-toggle').disabled) return;
+  const action = card.hasControlToken ? 'revoke' : 'token';
+  card.changingToken = true;
+  renderControlToken(card);
+  try {
+    await controlAction(action, card);
+  } finally {
+    card.changingToken = false;
+    renderControlToken(selected);
+  }
+});
 $('release-control').onclick = () => run(() => controlAction('stop'));
 $('control-token-copy').onclick = async () => {
   const dialog = $('control-token-dialog');
