@@ -133,7 +133,9 @@
 @media (max-width: 720px) { .app-brand p { font-size:0.65rem; } }
 
 
-#control-token-toggle { padding: 4px; aspect-ratio: 1; color: var(--muted); }
+.card-authorization { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-authorization h3 { margin: 0; }
+#control-token-toggle { width: auto; margin: 0; padding: 4px; aspect-ratio: 1; color: var(--muted); }
 #control-token-toggle[data-issued="true"] {
   color: var(--positive); border-color: var(--positive); background: var(--selected);
 }

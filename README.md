@@ -95,9 +95,9 @@ with lab.control("ma-carte", token_de_pilotage) as board:
         board = board.return_console()
 ```
 
-Dans l’interface, l’icône de clé à côté du nom de la carte crée un jeton
-de pilotage. Une clé cochée indique que le jeton est émis. Clique à
-nouveau sur la clé pour le révoquer. Le bloc `with` tient la session exclusive et rend
+Dans **Autorisations**, le bouclier avec un plus crée un jeton de pilotage.
+Le bouclier coché indique que le jeton est émis. Clique à nouveau sur
+l’icône pour le révoquer. Le bloc `with` tient la session exclusive et rend
 la main en sortant. Utiliser `IDLAB_TOKEN` pour `devices()` et
 `identify()` en observation. Le client transmet les refus du serveur
 avec `IDLabHTTPError.status` et `IDLabHTTPError.code`.

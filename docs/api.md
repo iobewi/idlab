@@ -75,8 +75,8 @@ physiquement sur RESET sans maintenir BOOT, puis reconnecter la carte.
 ### Pilotage exclusif
 
 Pour une carte connectée en console ou en téléchargement, le web peut
-créer un jeton avec l’icône de clé à côté du nom de la carte. Une clé
-cochée indique que le jeton est émis et permet de le révoquer. Le jeton
+créer un jeton avec le bouclier dans **Autorisations**. Le bouclier
+coché indique que le jeton est émis et permet de le révoquer. Le jeton
 est réutilisable tant que la carte
 reste associée au même connecteur, y compris après une reconnexion dans
 la même page. En cas de retrait de la carte ou de rechargement de la page,

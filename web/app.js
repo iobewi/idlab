@@ -219,7 +219,7 @@ function renderControlToken(card) {
   button.disabled = Boolean(card?.changingToken) || (!issued && !canIssue);
   button.dataset.issued = String(issued);
   button.setAttribute('aria-label', issued ? 'Révoquer le jeton de pilotage' : 'Créer un jeton de pilotage');
-  $('control-token-icon').setAttribute('href', issued ? '#icon-key-issued' : '#icon-key');
+  $('control-token-icon').setAttribute('href', issued ? '#icon-authorization-issued' : '#icon-authorization-add');
   const help = issued ? 'Jeton émis. Clique pour le révoquer et arrêter tout pilotage externe en cours.'
     : canIssue ? 'Aucun jeton émis. Clique pour créer un jeton de pilotage pour cette carte.'
     : 'Connecte la carte pour créer un jeton de pilotage.';
