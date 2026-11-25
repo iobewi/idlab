@@ -82,9 +82,21 @@ disponible via **Essayer la connexion**.
 
 ## Piloter depuis Python
 
-Installer le client avec `python -m pip install ./clients/python`. Utiliser la
-même valeur de `IDLAB_TOKEN` pour le serveur et le script, puis connecter la
-carte dans le navigateur.
+Les versions du client sont distribuées dans les
+[releases GitHub](https://github.com/iobewi/idlab/releases). Installer le fichier
+`.whl` de la version souhaitée avec Python 3.12 ou plus récent.
+
+```powershell
+py -m pip install "https://github.com/iobewi/idlab/releases/download/python-client-v0.1.0/idlab_client-0.1.0-py3-none-any.whl"
+```
+
+Adapter la version dans l’URL à la release choisie. Pour essayer une version
+avant sa publication, télécharger `idlab-client-wheel` depuis une exécution
+réussie du [workflow Python client](https://github.com/iobewi/idlab/actions/workflows/python-client.yml),
+extraire le `.whl` et passer son chemin à `pip install`. Depuis un dépôt local,
+`python -m pip install ./clients/python` reste disponible. Utiliser la même
+valeur de `IDLAB_TOKEN` pour le serveur et le script, puis connecter la carte
+dans le navigateur.
 
 ```python
 from idlab_client import IDLabClient
@@ -178,3 +190,7 @@ racine après installation des dépendances de `core/` :
 python -m pip install -e ./clients/python
 python -m unittest discover -s clients/python/tests -v
 ```
+
+Pour publier une version du client, pousser un tag `python-client-v<VERSION>`
+sur le commit de `main` contenant cette version dans `clients/python/pyproject.toml`.
+La CI installe et teste le `.whl` avant de le joindre à la release GitHub.
