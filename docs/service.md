@@ -13,6 +13,13 @@ l'API du banc. Le gestionnaire, l’interface, l’API et Web Serial utilisent l
 Compose le publie sur `127.0.0.1` de l’hôte. Le serveur HTTP enfant écoute
 sur un port privé du conteneur. Utiliser Docker Engine 28 ou plus récent.
 
+Pour servir IDLab sur une autre machine, placer un reverse proxy HTTPS devant
+le port du gestionnaire et définir `IDLAB_PUBLIC_ORIGIN` avec l’origine exacte,
+par exemple `https://lab.example.org`. Le proxy doit conserver `Host` et
+transmettre les WebSockets. Le SDK Python accepte cette URL HTTPS. Pour une
+interface publique, réserver `/api/v1/httpd/` à l’accès d’administration dans
+la configuration du proxy.
+
 ## Depuis VS Code sur Windows
 
 Ouvrir le dépôt dans une **fenêtre locale Windows** de VS Code. Si la fenêtre

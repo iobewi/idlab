@@ -7,23 +7,34 @@ L’interface web, l’API et l’agent WebSocket utilisent le même point d’e
 | Famille | Rôle | Jeton pour les scripts |
 |---|---|---|
 | `/api/v1/httpd/*` | Cycle de vie du processus HTTP | `IDLAB_MANAGER_TOKEN` |
-| `/api/v1/devices/*` | Identification et lectures flash | `IDLAB_TOKEN` |
+| `/api/v1/web/session` | Ouverture et vérification de la session du navigateur | Cookie `idlab_session` |
+| `/api/v1/devices/*` | Observation et pilotage des cartes | `IDLAB_TOKEN` pour l’observation, jeton de session de pilotage pour les commandes |
 | `/api/v1/campaigns/*` | Suivi des campagnes pilotées par les scripts | `IDLAB_TOKEN` |
 | `/health` | Vérification de la disponibilité HTTP | Aucun depuis le point d’entrée local |
 
 Envoyer le jeton avec `Authorization: Bearer <jeton>`. Les requêtes JSON
-utilisent `Content-Type: application/json`. Le navigateur utilise son
-cookie local pour les opérations des cartes et des campagnes. Ses requêtes de modification
-doivent porter un en-tête `Origin` correspondant à l’hôte IDLab. Les routes
+utilisent `Content-Type: application/json`. La page d’accueil est accessible sans
+cookie. `POST /api/v1/web/session` remet un cookie `HttpOnly`, `SameSite=Strict`
+et `Secure` sur HTTPS. `GET /api/v1/web/session` répond `204` avec ce cookie et
+`401` en l’absence de session. Les modifications et WebSockets du navigateur
+exigent un en-tête `Origin` correspondant à une origine Web configurée. Les routes
 `httpd` sont réservées aux scripts authentifiés et refusent les requêtes
 avec `Origin`.
 
 Le WebSocket `/api/v1/activity` indique à l’interface si une action API est
 en cours. Il envoie `{"active": true}` à la première action et
 `{"active": false}` à la fin de la dernière. Le maintien de l’écran suit
-cet état pour tous les clients. Les requêtes de consultation restent
+les actions du navigateur et des clients qui pilotent ses cartes. Les requêtes de consultation restent
 passives par défaut. Un client peut signaler une lecture ponctuelle avec
 `X-IDLab-Action: 1`.
+
+Les noms de cartes et les campagnes sont propres à chaque session Web. Avec
+`IDLAB_TOKEN`, l’observation globale omet les noms de cartes ambigus et les
+routes de campagne accèdent à l’espace des scripts, qui contient aussi les
+campagnes créées avant l’isolation. Pour rattacher une opération déléguée à
+une campagne de cet espace, joindre `X-IDLab-API-Authorization: Bearer <IDLAB_TOKEN>`
+avec le jeton de pilotage habituel dans `Authorization`. Le SDK ajoute cet en-tête
+aux opérations avec `campaign_id` quand `IDLAB_TOKEN` est configuré.
 
 ## Processus HTTP
 

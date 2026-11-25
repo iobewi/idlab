@@ -6,15 +6,18 @@ from aiohttp import web
 
 
 class ApiActivity:
-    def __init__(self):
-        self.pending = 0
+    def __init__(self, scope):
+        self.scope = scope
+        self.pending = {}
         self.observers = {}
 
-    def notify(self):
-        for queue in self.observers.values():
+    def notify(self, scope, active):
+        for owner, queue in self.observers.values():
+            if owner != scope:
+                continue
             if queue.full():
                 queue.get_nowait()
-            queue.put_nowait(bool(self.pending))
+            queue.put_nowait(active)
 
     @web.middleware
     async def track(self, request, handler):
@@ -23,24 +26,25 @@ class ApiActivity:
         if (not action or not request.path.startswith("/api/v1/")
                 or request.path == "/api/v1/activity" or request.headers.get("Upgrade")):
             return await handler(request)
-        self.pending += 1
-        if self.pending == 1:
-            self.notify()
+        scope = self.scope(request)
+        self.pending[scope] = self.pending.get(scope, 0) + 1
+        if self.pending[scope] == 1:
+            self.notify(scope, True)
         try:
             return await handler(request)
         finally:
-            self.pending -= 1
-            if not self.pending:
-                self.notify()
+            self.pending[scope] -= 1
+            if not self.pending[scope]:
+                del self.pending[scope]
+                self.notify(scope, False)
 
     async def observe(self, request):
-        if request.headers.get("Origin") != f"http://{request.host}":
-            raise web.HTTPForbidden()
+        scope = self.scope(request)
         socket = web.WebSocketResponse(heartbeat=20)
         await socket.prepare(request)
         queue = asyncio.Queue(maxsize=2)
-        self.observers[socket] = queue
-        queue.put_nowait(bool(self.pending))
+        self.observers[socket] = (scope, queue)
+        queue.put_nowait(bool(self.pending.get(scope)))
 
         async def send():
             while not socket.closed:

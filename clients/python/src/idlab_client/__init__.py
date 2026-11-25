@@ -153,15 +153,18 @@ class IDLabClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8080", *, token: str | None = None,
                  timeout: float = 630):
         endpoint = urlsplit(base_url)
-        if (endpoint.scheme != "http" or endpoint.hostname not in {"localhost", "127.0.0.1"}
+        loopback = endpoint.hostname in {"localhost", "127.0.0.1", "::1"}
+        secure = endpoint.scheme == "https" and endpoint.hostname
+        if (not (secure or (endpoint.scheme == "http" and loopback))
                 or endpoint.username is not None or endpoint.password is not None
                 or endpoint.path not in {"", "/"} or endpoint.query or endpoint.fragment):
-            raise ValueError("Expected the loopback HTTP address of the IDLab server")
+            raise ValueError("Expected an HTTPS or loopback HTTP address of the IDLab server")
         port = endpoint.port
         if port == 0:
             raise ValueError("Expected a nonzero server port")
         self._base = base_url.rstrip("/") + "/api/v1"
         self._token = os.environ.get("IDLAB_TOKEN") if token is None else token
+        self._campaign_token = None
         self._timeout = timeout
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
 
@@ -226,6 +229,7 @@ class IDLabClient:
             except (KeyError, TypeError, ValueError, TimeoutError, ConnectionClosed) as error:
                 raise IDLabError("Invalid IDLab control session") from error
             client = IDLabClient(self._base.removesuffix("/api/v1"), token=credential, timeout=self._timeout)
+            client._campaign_token = self._token
             board = client.identify(name)
             if board.generation != generation:
                 raise IDLabHTTPError(409, "device_session_changed")
@@ -247,6 +251,8 @@ class IDLabClient:
         body = None
         if arguments is not None:
             headers["Content-Type"] = "application/json"
+            if self._campaign_token and "campaign_id" in arguments:
+                headers["X-IDLab-API-Authorization"] = f"Bearer {self._campaign_token}"
             body = json.dumps(arguments).encode("utf-8")
         request = Request(self._base + path, data=body, headers=headers, method=method)
         try:

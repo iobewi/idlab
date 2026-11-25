@@ -1,5 +1,6 @@
 import { $ } from './dom.js';
 import { updateHelp } from './control-help.js';
+import { hasWebSession } from './web-session.js';
 
 export const externallyControlled = card => Boolean(card?.identity && card.observation?.external_control);
 
@@ -106,19 +107,31 @@ export function wireWorkbenchShell(cards, stopTarget) {
   }
   document.addEventListener('visibilitychange', updateWakeLock);
 
+  let activitySocket;
   function watchApiActivity() {
+    if (activitySocket) return;
     const url = new URL('/api/v1/activity', location.href);
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(url);
+    activitySocket = socket;
     socket.onmessage = event => {
       apiActive = JSON.parse(event.data).active === true;
       void updateWakeLock();
     };
     socket.onclose = () => {
+      activitySocket = null;
       apiActive = false;
       void updateWakeLock();
-      setTimeout(watchApiActivity, 2000);
+      setTimeout(checkActivitySession, 2000);
     };
+  }
+
+  async function checkActivitySession() {
+    try {
+      if (await hasWebSession()) watchApiActivity();
+    } catch {
+      setTimeout(checkActivitySession, 2000);
+    }
   }
 
   wireTabs('data-workspace-tab');
@@ -136,7 +149,8 @@ export function wireWorkbenchShell(cards, stopTarget) {
     }
   });
   void checkServer();
-  watchApiActivity();
+  window.addEventListener('idlab-session-ready', watchApiActivity);
+  void checkActivitySession();
 
   return updateWakeLock;
 }

@@ -7,6 +7,7 @@ import { renderConsole, renderConsoleControls, renderFlashProgress, renderJourna
 import { renderOperationHistory, renderOperations, renderPartitions, wireOperations } from './operations-view.js';
 import { renderRom, wireRomDialog } from './rom-dialog.js';
 import { externallyControlled, wireWorkbenchShell } from './workbench-shell.js';
+import { ensureWebSession } from './web-session.js';
 import { updateHelp, wireControlHelp } from './control-help.js';
 
 const cards = new Map();
@@ -300,6 +301,7 @@ $('control-token-dialog').onclose = () => {
 
 async function connectCard(card) {
   if (card === selected) say('Détection de « ' + card.name + ' »…');
+  await ensureWebSession();
   const identificationWarning = await card.connect({identifyOnConnect: true});
   if (card !== selected) return;
   if (identificationWarning) say('Identification partielle de « ' + card.name + ' ». ' + identificationWarning);

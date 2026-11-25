@@ -26,8 +26,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await web.SockSite(runner, self.listener).start()
         self.browser = ClientSession(cookie_jar=CookieJar(unsafe=True))
         self.addAsyncCleanup(self.browser.close)
-        async with self.browser.get(self.origin) as response:
-            self.assertEqual(response.status, 200)
+        async with self.browser.post(self.origin + "/api/v1/web/session", headers={"Origin": self.origin}) as response:
+            self.assertEqual(response.status, 204)
         self.client = IDLabClient(self.origin, token="test-token", timeout=3)
 
     async def connect(self, *, console=False):

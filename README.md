@@ -131,9 +131,15 @@ aux opérations lancées dans la page.
 La [référence API v1](docs/api.md) décrit les commandes HTTP, les opérations
 des cartes et le cycle de vie des campagnes.
 
-Définir `IDLAB_TOKEN` dans l'environnement du serveur et du script. Garder
-sa valeur hors du dépôt. Le navigateur local fonctionne avec son propre
-cookie de session. Le serveur écoute uniquement sur la boucle locale.
+L’interface s’ouvre sans connexion. Lorsque le navigateur ajoute une carte
+ou crée une campagne, le serveur ouvre une session privée par cookie
+`HttpOnly`. Chaque session a ses propres cartes, captures et campagnes.
+Le jeton **Autorisations** délègue une seule carte à Python.
+
+Définir `IDLAB_TOKEN` côté serveur et côté script pour consulter le banc ou
+gérer les campagnes de service. Garder sa valeur hors du dépôt. Le point
+d’entrée est publié sur la boucle locale par défaut. Voir les
+[paramètres du service HTTP](docs/service.md) pour une origine HTTPS externe.
 
 | Requête | Résultat |
 |---|---|
