@@ -151,14 +151,16 @@ class Board:
 
 class IDLabClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8080", *, token: str | None = None,
-                 timeout: float = 630):
+                 timeout: float = 630, allow_insecure_http: bool = False):
+        """Connect to IDLab. Enable plaintext HTTP remotely only on a trusted network."""
         endpoint = urlsplit(base_url)
         loopback = endpoint.hostname in {"localhost", "127.0.0.1", "::1"}
-        secure = endpoint.scheme == "https" and endpoint.hostname
-        if (not (secure or (endpoint.scheme == "http" and loopback))
+        if (endpoint.scheme not in {"http", "https"} or not endpoint.hostname
                 or endpoint.username is not None or endpoint.password is not None
                 or endpoint.path not in {"", "/"} or endpoint.query or endpoint.fragment):
-            raise ValueError("Expected an HTTPS or loopback HTTP address of the IDLab server")
+            raise ValueError("Expected an HTTP or HTTPS origin for the IDLab server")
+        if endpoint.scheme == "http" and not (loopback or allow_insecure_http):
+            raise ValueError("Use HTTPS or explicitly enable allow_insecure_http for a trusted network")
         port = endpoint.port
         if port == 0:
             raise ValueError("Expected a nonzero server port")
@@ -166,6 +168,7 @@ class IDLabClient:
         self._token = os.environ.get("IDLAB_TOKEN") if token is None else token
         self._campaign_token = None
         self._timeout = timeout
+        self._allow_insecure_http = allow_insecure_http
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
 
     def devices(self) -> dict[str, Board]:
@@ -228,7 +231,8 @@ class IDLabClient:
                 generation = session["generation"]
             except (KeyError, TypeError, ValueError, TimeoutError, ConnectionClosed) as error:
                 raise IDLabError("Invalid IDLab control session") from error
-            client = IDLabClient(self._base.removesuffix("/api/v1"), token=credential, timeout=self._timeout)
+            client = IDLabClient(self._base.removesuffix("/api/v1"), token=credential, timeout=self._timeout,
+                                 allow_insecure_http=self._allow_insecure_http)
             client._campaign_token = self._token
             board = client.identify(name)
             if board.generation != generation:

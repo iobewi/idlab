@@ -36,6 +36,13 @@ une campagne de cet espace, joindre `X-IDLab-API-Authorization: Bearer <IDLAB_TO
 avec le jeton de pilotage habituel dans `Authorization`. Le SDK ajoute cet en-tête
 aux opérations avec `campaign_id` quand `IDLAB_TOKEN` est configuré.
 
+L’ouverture de session crée un espace anonyme. Le cookie reconnaît cet
+espace et permet de retrouver ses campagnes après redémarrage du serveur.
+Si le navigateur supprime le cookie ou termine sa session sans le restaurer,
+les campagnes restent en base et la session anonyme n’a pas de mécanisme de
+récupération. L’expiration et la révocation des sessions Web ne sont pas
+encore implémentées.
+
 ## Processus HTTP
 
 Ces routes sont disponibles lorsque le gestionnaire est démarré, y compris

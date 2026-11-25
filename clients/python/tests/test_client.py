@@ -4,6 +4,7 @@ from pathlib import Path
 import socket
 import sys
 import unittest
+from unittest.mock import patch
 
 from aiohttp import ClientSession, ClientWSTimeout, CookieJar, web
 
@@ -45,19 +46,44 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         return socket
 
     @asynccontextmanager
-    async def control(self, socket):
+    async def control(self, socket, *, client=None):
         async with self.browser.post(self.origin + "/api/v1/devices/test-board/control/token",
                                      headers={"Origin": self.origin}) as response:
             self.assertEqual(response.status, 200)
             token = (await response.json())["token"]
         self.assertEqual((await socket.receive_json(timeout=2))["control"], "available")
-        context = self.client.control("test-board", token)
+        context = (client or self.client).control("test-board", token)
         board = await asyncio.to_thread(context.__enter__)
         self.assertEqual((await socket.receive_json(timeout=2))["control"], "external")
         try:
             yield board
         finally:
             await asyncio.to_thread(context.__exit__, None, None, None)
+
+    async def test_docker_http_requires_opt_in_and_can_delegate_control(self):
+        origin = self.origin.replace("127.0.0.1", "host.docker.internal")
+        with self.assertRaisesRegex(ValueError, "allow_insecure_http"):
+            IDLabClient(origin)
+        client = IDLabClient(origin, timeout=3, allow_insecure_http=True)
+        agent = await self.connect(console=True)
+        system_getaddrinfo = socket.getaddrinfo
+
+        def resolve(host, *args, **kwargs):
+            if host == "host.docker.internal":
+                host = "127.0.0.1"
+            return system_getaddrinfo(host, *args, **kwargs)
+
+        with patch("socket.getaddrinfo", side_effect=resolve):
+            async with self.control(agent, client=client) as board:
+                await agent.send_json({"uart": b"ready\n".hex()})
+                async with asyncio.timeout(2):
+                    while True:
+                        data, cursor, dropped = await asyncio.to_thread(board.read_uart)
+                        if data:
+                            break
+                        await asyncio.sleep(0.01)
+                self.assertEqual((data, cursor, dropped), (b"ready\n", 6, 0))
+            self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
 
     async def test_list_identify_and_read(self):
         socket = await self.connect()

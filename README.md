@@ -126,6 +126,11 @@ et `lab.finish_campaign(campaign["id"], "PASS")` enregistre le verdict.
 Dans le web, **Utiliser cette campagne** applique ce même rattachement
 aux opérations lancées dans la page.
 
+Depuis un conteneur `rust_dev`, si IDLab est joignable sur l’hôte Docker,
+utiliser `IDLabClient("http://host.docker.internal:8080", allow_insecure_http=True)`
+avec le SDK 0.1.1 ou plus récent. Voir le
+[test de connexion Docker](docs/service.md#connecter-un-client-depuis-docker).
+
 ## Appeler l'API HTTP
 
 La [référence API v1](docs/api.md) décrit les commandes HTTP, les opérations

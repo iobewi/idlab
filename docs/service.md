@@ -20,6 +20,32 @@ transmettre les WebSockets. Le SDK Python accepte cette URL HTTPS. Pour une
 interface publique, réserver `/api/v1/httpd/` à l’accès d’administration dans
 la configuration du proxy.
 
+## Connecter un client depuis Docker
+
+Depuis le conteneur client, vérifier d’abord la connectivité avec
+`curl --fail --connect-timeout 3 http://host.docker.internal:8080/health`.
+Si la publication sur la boucle locale de l’hôte est inaccessible depuis
+ce conteneur, utiliser un réseau Docker partagé et l’alias du service sur
+ce réseau comme adresse du SDK.
+
+Avec le SDK 0.1.1 ou plus récent et une carte connectée dans l’interface,
+générer son jeton via **Autorisations**, puis lire la capture UART depuis
+le conteneur client. Le bloc `with` libère le pilotage en sortant.
+
+```python
+from getpass import getpass
+from idlab_client import IDLabClient
+
+lab = IDLabClient("http://host.docker.internal:8080", allow_insecure_http=True)
+with lab.control("board_1", getpass("Jeton de pilotage : ")) as board:
+    data, cursor, dropped = board.read_uart()
+    print(f"{len(data)} octets, curseur {cursor}, {dropped} octets perdus")
+```
+
+Réserver `allow_insecure_http=True` aux réseaux privés de confiance.
+Sur HTTP, les jetons circulent en clair. Pour une instance HTTPS, utiliser
+l’URL HTTPS sans cette option.
+
 ## Depuis VS Code sur Windows
 
 Ouvrir le dépôt dans une **fenêtre locale Windows** de VS Code. Si la fenêtre
