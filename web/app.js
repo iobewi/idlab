@@ -67,7 +67,7 @@ function renderIdentification() {
   for (const [id, value] of Object.entries({
     'status-label-card': card?.name,
     'card-mode-info': card?.mode === 'loader'
-      ? (current?.loader === 'stub' ? 'Téléchargement · stub actif' : 'Téléchargement · ROM seule')
+      ? (current?.loader === 'stub' ? 'Chargeur · stub' : 'ROM seule')
       : {console: 'Console série', connecting: 'Détection…', disconnected: 'Déconnectée', closing: 'Déconnexion…'}[card?.mode],
     'chip-info': info?.model ?? info?.chip ?? (chipHint ? chipHint + ' (logs UART)' : null),
     'mac-info': info?.mac,
@@ -103,7 +103,9 @@ function render() {
     card.remove.hidden = card.mode !== 'disconnected';
   }
   $('empty-cards').hidden = cards.size !== 0;
-  $('card-details').hidden = !selected;
+  const details = $('card-details');
+  details.hidden = !selected;
+  details.dataset.mode = selected?.mode ?? '';
   const info = selected?.identity;
   const romActive = selected?.mode === 'loader' && info?.loader === 'rom';
   const romTab = $('tab-rom');
