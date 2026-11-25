@@ -7,13 +7,12 @@ import { renderConsole, renderConsoleControls, renderFlashProgress, renderJourna
 import { renderOperationHistory, renderOperations, renderPartitions, wireOperations } from './operations-view.js';
 import { renderRom, wireRomDialog } from './rom-dialog.js';
 import { externallyControlled, wireWorkbenchShell } from './workbench-shell.js';
-import { renderGuide, wireGuideHelp } from './context-guide.js';
+import { wireControlHelp } from './control-help.js';
 
 const cards = new Map();
 let nextBoardNumber = 1;
 let selected = null;
 let adding = false;
-let choosingPort = false;
 const manualConsoleReturn = 'Pour retrouver la console, déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.';
 
 async function observeCard(card) {
@@ -171,7 +170,6 @@ function render() {
   renderConsole(selected);
   renderOperations(selected);
   renderJournal(selected);
-  renderGuide(selected, choosingPort);
 }
 
 function addCard(name, port, flashBaud) {
@@ -197,7 +195,11 @@ function addCard(name, port, flashBaud) {
     render();
     void observeCard(card);
   };
-  card.status.onclick = () => run(() => card.mode === 'disconnected' ? connectCard(card) : card.disconnect());
+  card.status.onclick = () => run(async () => {
+    if (card.mode === 'disconnected') return connectCard(card);
+    await card.disconnect();
+    if (card === selected) say(card.name + ' déconnectée.', {temporary: true});
+  });
   card.remove.onclick = () => run(async () => {
     await card.disconnect();
     cards.delete(name);
@@ -252,8 +254,10 @@ $('control-token-dialog').onclose = () => {
 };
 
 async function connectCard(card) {
+  if (card === selected) say('Détection de « ' + card.name + ' »…');
   await card.connect();
   if (card !== selected) return;
+  say(card.name + ' connectée.', {temporary: true});
   $(card.mode === 'console' ? 'workspace-tab-consoles' : 'workspace-tab-operations').click();
   if (card.identity?.capabilities.includes('flash.read')) $('tab-memory').click();
 }
@@ -279,12 +283,9 @@ async function addFromPicker() {
   if (!navigator.serial) return feedback('Web Serial est indisponible dans ce navigateur.');
   adding = $('add-device').disabled = true;
   try {
-    say('');
     $('add-card-feedback').textContent = '';
-    choosingPort = true;
-    renderGuide(selected, choosingPort);
+    say('Choisis le port de la carte dans le sélecteur du navigateur.');
     const port = await navigator.serial.requestPort();
-    choosingPort = false;
     if ([...cards.values()].some(card => card.port === port)) return feedback('Ce port est déjà associé à une carte.');
     const card = addCard(name, port, flashBaud);
     if (input.value === enteredName) input.value = suggestBoardName();
@@ -294,8 +295,6 @@ async function addFromPicker() {
     feedback(error.name === 'NotFoundError' ? 'Aucun port sélectionné.' : error.message);
   } finally {
     adding = $('add-device').disabled = false;
-    choosingPort = false;
-    renderGuide(selected, choosingPort);
   }
 }
 $('add-device').onclick = addFromPicker;
@@ -312,7 +311,10 @@ $('enter-loader').onclick = () => run(async () => {
   if (!card || $('enter-loader').disabled) return;
   if (card.mode === 'loader') {
     await card.returnConsole();
-    if (card === selected) $('workspace-tab-consoles').click();
+    if (card === selected) {
+      say('Console série ouverte.', {temporary: true});
+      $('workspace-tab-consoles').click();
+    }
   } else {
     try {
       await card.enterLoader();
@@ -327,13 +329,14 @@ $('enter-loader').onclick = () => run(async () => {
       throw new Error('Impossible d’ouvrir le chargeur sur « ' + card.name + ' ». ' + detail);
     }
     if (card !== selected) return;
+    say('Chargeur flash ouvert.', {temporary: true});
     $('workspace-tab-operations').click();
     $('tab-memory').click();
   }
 });
 $('identify-live').onclick = () => run(async () => {
   const identity = await selected?.identify();
-  if (identity) say((identity.model ?? identity.chip) + ' · MAC ' + identity.mac);
+  if (identity) say((identity.model ?? identity.chip) + ' · MAC ' + identity.mac, {temporary: true});
 });
 
 const getSelected = () => selected;
@@ -351,5 +354,5 @@ emptyCards.id = 'empty-cards';
 $('active-cards').replaceChildren(emptyCards);
 $('add-device-id').value = suggestBoardName();
 $('server-origin').textContent = location.origin;
-wireGuideHelp();
+wireControlHelp();
 render();

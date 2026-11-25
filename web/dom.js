@@ -1,5 +1,12 @@
 export const $ = id => document.getElementById(id);
-export const say = message => { $('client-state').textContent = message; };
+let noticeTimer;
+
+export function say(message, {temporary = false} = {}) {
+  clearTimeout(noticeTimer);
+  const status = $('client-state');
+  status.textContent = message;
+  if (temporary) noticeTimer = setTimeout(() => { status.textContent = ''; }, 5000);
+}
 export const clock = new Intl.DateTimeFormat('fr', { timeStyle: 'medium' });
 export const number = new Intl.NumberFormat('fr', {maximumFractionDigits: 1});
 

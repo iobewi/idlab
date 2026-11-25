@@ -13,7 +13,7 @@ function operationDetails(entry) {
   const copy = element('button', 'Copier le JSON');
   copy.onclick = () => run(async () => {
     await navigator.clipboard.writeText(proof);
-    say('JSON de l’opération copié.');
+    say('JSON de l’opération copié.', {temporary: true});
   });
   const save = element('button', 'Télécharger le JSON');
   save.onclick = () => download(new Blob([proof + '\n'], {type: 'application/json'}),
@@ -137,6 +137,7 @@ export function wireOperations({getSelected, render, observeCard}) {
       card.dump = {blob, filename: card.name + '-0x' + address.toString(16) + '.bin',
         summary: blob.size + ' octets lus • aperçu des ' + preview.length + ' premiers octets',
         preview: Array.from(preview, byte => byte.toString(16).padStart(2, '0')).join(' ')};
+      if (card === getSelected()) say('Lecture flash terminée. Le dump est disponible.', {temporary: true});
     } catch (error) {
       say(error.message);
     } finally {

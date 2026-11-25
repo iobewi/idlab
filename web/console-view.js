@@ -180,7 +180,7 @@ export function wireConsole({getSelected, render, observeCard}) {
     const text = Array.from(rows, row => row.textContent).join('\n');
     try {
       await navigator.clipboard.writeText(text);
-      say('Journal de l’agent copié.');
+      say('Journal de l’agent copié.', {temporary: true});
     } catch {
       say('Impossible de copier le journal dans le presse-papiers.');
     }
