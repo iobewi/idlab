@@ -194,6 +194,11 @@
 
 /* Operation details expand immediately below their history row; no offscreen-only output. */
 .operation-detail-row td { padding:0; white-space:normal; }
+.operation-row { cursor: pointer; }
+.operation-row .operation-id {
+  min-height: 0; padding: 0; border: 0; background: transparent;
+  color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
 .operation-detail-json { max-height:360px; overflow:auto; margin:0; max-width:100%; }
 
 

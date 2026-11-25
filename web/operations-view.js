@@ -21,7 +21,7 @@ function operationDetails(entry) {
   const row = element('tr', undefined, 'operation-detail-row');
   row.id = 'operation-detail-' + entry.id;
   const cell = element('td');
-  cell.colSpan = 6;
+  cell.colSpan = 5;
   const panel = element('div', undefined, 'operation-proof-panel');
   const toolbar = element('div', undefined, 'operation-proof-toolbar');
   const actions = element('div', undefined, 'operation-proof-actions');
@@ -47,24 +47,26 @@ export function renderOperationHistory(card) {
   $('empty-operations').hidden = entries.length !== 0;
   body.replaceChildren();
   for (const entry of entries) {
-    const row = element('tr');
-    for (const value of [entry.id, entry.device, entry.command === 'flash.read' ? 'Lecture flash' : entry.command, entry.state, entry.duration]) {
-      row.append(element('td', value ?? '—'));
-    }
+    const row = element('tr', undefined, 'operation-row');
     const expanded = card.inspectedOperation === entry.id;
     const cell = element('td');
-    const inspect = element('button', expanded ? 'Masquer' : 'Inspecter');
+    const inspect = element('button', entry.id, 'operation-id');
+    inspect.type = 'button';
     inspect.id = 'inspect-operation-' + entry.id;
     inspect.setAttribute('aria-expanded', expanded);
-    inspect.setAttribute('aria-label', inspect.textContent + ' l’opération ' + entry.id);
+    inspect.setAttribute('aria-label', (expanded ? 'Masquer' : 'Afficher') + ' le détail de l’opération ' + entry.id);
     if (expanded) inspect.setAttribute('aria-controls', 'operation-detail-' + entry.id);
-    inspect.onclick = () => {
+    row.onclick = event => {
+      if (event.target !== inspect && window.getSelection()?.isCollapsed === false) return;
       card.inspectedOperation = expanded ? null : entry.id;
       renderOperationHistory(card);
       $(inspect.id).focus({preventScroll: true});
     };
     cell.append(inspect);
     row.append(cell);
+    for (const value of [entry.device, entry.command === 'flash.read' ? 'Lecture flash' : entry.command, entry.state, entry.duration]) {
+      row.append(element('td', value ?? '—'));
+    }
     body.append(row);
     if (expanded) body.append(operationDetails(entry));
   }
