@@ -54,7 +54,7 @@
 
 .partition-suggestion{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:10px;background:var(--selected);border-bottom:1px solid var(--line)}.partition-suggestion span{flex:1;min-width:180px}
 
-.card-safety{grid-column:1/-1;border-top:1px solid var(--line);padding-top:8px}.card-safety p{margin:0}
+
 
 /* The target and its hardware controls are always part of the workspace. */
 .device-panel{min-width:0;background:var(--toolbar);border-right:1px solid var(--line)}
@@ -62,7 +62,7 @@
 .card-heading[data-tone=warning]{color:var(--warning)}.card-heading[data-tone=warning] span{color:inherit}
 .card-content{display:flex;flex-direction:column;gap:12px}.card-content>label{width:100%}.card-content>label select{flex:1;min-width:0}
 .card-content .card-identity{grid-column:auto;grid-row:auto;width:100%;grid-template-columns:65px minmax(0,1fr);margin:0;font-size:12px}
-.card-content #refresh{width:100%}.card-content>.row{gap:6px}.card-content .hint{margin:0}.card-content .card-safety{width:100%}
+.card-content #refresh{width:100%}.card-content>.row{gap:6px}.card-content .hint{margin:0}
 @media(max-width:760px){
   .workspace{grid-template-rows:auto auto;overflow:auto}
   .work-area,.device-panel{overflow:visible}
