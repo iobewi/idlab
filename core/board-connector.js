@@ -8,7 +8,8 @@ async function api(path, options) {
   const response = await fetch('/api/v1' + path, options);
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail ?? error.error ?? ('HTTP ' + response.status));
+    throw new Error(error.error === 'operation_cancelled' ? 'Opération interrompue.'
+      : error.detail ?? error.error ?? ('HTTP ' + response.status));
   }
   return response;
 }
@@ -256,9 +257,10 @@ export class BoardConnector {
       }
     } catch (error) {
       if (socket.readyState === 1) {
-        socket.send(command.command === 'flash.read' && !command.stream ? command.id
-          : JSON.stringify({result: command.id, error: error.message === 'invalid_flash_range'
-            ? 'invalid_flash_range' : 'device_command_failed', console_restored: this.mode === 'console',
+        const code = this.commandCancelled ? 'operation_cancelled'
+          : error.message === 'invalid_flash_range' ? 'invalid_flash_range' : 'device_command_failed';
+        socket.send(command.command === 'flash.read' && !command.stream && !this.commandCancelled ? command.id
+          : JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
             detail: ['mode.loader', 'identify'].includes(command.command) ? error.message : undefined}));
       }
       this.#log(error.message);

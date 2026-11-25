@@ -87,7 +87,7 @@ en mémoire jusqu’à leur révocation ou au redémarrage du serveur.
 |---|---|
 | `POST /control/token` | Session navigateur locale. Renvoie le jeton une fois. |
 | `GET /control/connect` (WebSocket) | Le jeton de pilotage est envoyé en Bearer. Renvoie un identifiant secret de session et la génération. La connexion ouverte réserve la carte. |
-| `POST /control/stop` | Session navigateur locale. Arrête le pilotage externe. Le jeton peut resservir. |
+| `POST /control/stop` | Session navigateur locale. Arrête le pilotage externe ou demande l’arrêt de l’opération locale en cours sur la carte. Le jeton peut resservir. |
 | `POST /control/revoke` | Session navigateur locale. Supprime le jeton et arrête le pilotage externe. |
 
 Pendant le pilotage externe, la lecture flash exige l’identifiant secret
@@ -96,6 +96,9 @@ l’état de la carte et de piloter les campagnes. Une deuxième session de
 pilotage est refusée avec `409`. Une lecture interrompue par le web renvoie
 `403 control_stopped` ou `403 control_revoked`. Si l’arrêt coupe un
 transfert série, reconnecter la carte pour reprendre les commandes.
+Dans le navigateur, clique sur **Opération en cours** pour demander
+l’arrêt. Une opération locale annulée renvoie `409 operation_cancelled`.
+L’arrêt coopératif attend que le connecteur termine le traitement en cours.
 
 Le navigateur et Python appellent `POST /api/v1/devices/{name}/command`
 avec `generation` et `command`. La réponse est la description actualisée

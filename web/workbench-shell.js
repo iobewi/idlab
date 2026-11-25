@@ -1,4 +1,5 @@
 import { $ } from './dom.js';
+import { updateHelp } from './control-help.js';
 
 export const externallyControlled = card => Boolean(card?.identity && card.observation?.external_control);
 
@@ -43,7 +44,7 @@ async function checkServer() {
   setTimeout(checkServer, 5000);
 }
 
-export function wireWorkbenchShell(cards) {
+export function wireWorkbenchShell(cards, stopTarget) {
   let apiActive = false;
   const needsWakeLock = () => apiActive || [...cards.values()].some(card =>
     card.requesting || card.busy || card.mode === 'connecting' || card.mode === 'closing' ||
@@ -75,16 +76,24 @@ export function wireWorkbenchShell(cards) {
 
   function renderWakeState() {
     const active = needsWakeLock();
+    const control = $('status-control');
+    const card = stopTarget();
     const label = $('status-label-control');
-    const controlState = active ? 'Opération en cours' : 'Disponible';
-    if (label.textContent !== controlState) {
-      label.textContent = controlState;
-      $('status-icon-control').setAttribute('href', active ? '#icon-busy' : '#icon-check');
-    }
+    const stopping = card?.control === 'stopping' || card?.observation?.device.control === 'stopping' || card?.requestingStop;
+    const canStop = Boolean(card && !stopping);
+    const controlState = stopping ? 'Arrêt en cours' : active ? 'Opération en cours' : 'Disponible';
+    if (label.textContent !== controlState) label.textContent = controlState;
+    control.setAttribute('aria-disabled', String(!canStop));
+    $('status-icon-control').setAttribute('href', canStop ? '#icon-stop' : active ? '#icon-busy' : '#icon-check');
     const state = !active ? 'Veille normale'
       : wakeLock && !wakeLock.released ? 'Maintien éveillé'
       : requestingWakeLock ? 'Activation du maintien éveillé…' : 'Maintien éveillé indisponible';
-    $('wake-state').textContent = state;
+    const help = canStop ? 'Clique pour demander l’arrêt sur « ' + card.name + ' ». ' + state + '.'
+      : controlState + '. ' + state + '.';
+    if (control.dataset.guideHelp !== help) {
+      control.dataset.guideHelp = help;
+      updateHelp();
+    }
   }
   document.addEventListener('visibilitychange', updateWakeLock);
 
@@ -106,17 +115,6 @@ export function wireWorkbenchShell(cards) {
   wireTabs('data-workspace-tab');
   wireTabs('data-tab');
 
-  const bands = [...document.querySelectorAll('[data-status]')];
-  function selectBand(active) {
-    for (const button of bands) {
-      button.setAttribute('aria-expanded', button === active);
-      $(button.getAttribute('aria-controls')).hidden = button !== active;
-    }
-  }
-  for (const button of bands) button.onclick = () => selectBand(button.getAttribute('aria-expanded') === 'true' ? null : button);
-  for (const button of document.querySelectorAll('[data-close-status]')) {
-    button.onclick = () => { selectBand(null); $('status-' + button.dataset.closeStatus).focus(); };
-  }
   const bankInfo = $('bank-info');
   document.addEventListener('pointerdown', event => {
     if (bankInfo.open && !bankInfo.contains(event.target)) bankInfo.open = false;
@@ -126,7 +124,7 @@ export function wireWorkbenchShell(cards) {
     if (bankInfo.open) {
       bankInfo.open = false;
       bankInfo.querySelector('summary').focus();
-    } else selectBand(null);
+    }
   });
   void checkServer();
   watchApiActivity();

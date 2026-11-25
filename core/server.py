@@ -62,7 +62,8 @@ class Board:
     progress: dict | None = None
 
     def describe(self):
-        state = ("stopping" if self.control and self.control.stopped else
+        stopping = (self.control and self.control.stopped) or (self.pending and self.pending.cancelled)
+        state = ("stopping" if stopping else
                  "busy" if self.pending else "external" if self.control else "available")
         return {"generation": self.generation, **self.identity, "control": state}
 
@@ -280,20 +281,23 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if board.control is not control or control.stopped:
             return
         control.stopped = reason
+        if not board.pending:
+            board.control = None
+        await request_operation_stop(name, board)
+        if not control.socket.closed:
+            await control.socket.close(code=1008, message=control.stopped.encode())
+
+    async def request_operation_stop(name, board):
         pending = board.pending
         cancelled = pending and not pending.future.done() and not pending.cancelled
         if cancelled:
             pending.cancelled = True
-        if not pending:
-            board.control = None
         await publish_control(board, name)
         if cancelled and not board.socket.closed:
             try:
                 await board.socket.send_json({"cancel": pending.id})
             except ConnectionError:
                 pass
-        if not control.socket.closed:
-            await control.socket.close(code=1008, message=control.stopped.encode())
 
     async def manage_control(request):
         if not request[LOCAL_OPERATOR]:
@@ -318,6 +322,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if board and board.control:
             await stop_control(name, board, board.control,
                                "control_revoked" if action == "revoke" else "control_stopped")
+        elif board and action == "stop":
+            await request_operation_stop(name, board)
         elif board:
             await publish_control(board, name)
         return web.json_response({"control": board.describe()["control"] if board else "disconnected"})
@@ -517,6 +523,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             result = await asyncio.wait_for(operation.future, timeout=command_timeout)
             if control and control.stopped:
                 return problem(403, control.stopped)
+            if operation.cancelled:
+                record["detail"] = "Arrêt demandé par l’opérateur."
+                return problem(409, "operation_cancelled")
             if not isinstance(result, dict):
                 return problem(502, "device_session_changed")
             if result.get("error"):
@@ -542,6 +551,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             finish_operation(request, board, record, started, complete)
             if control and control.stopped and board.control is control:
                 board.control = None
+                await publish_control(board, name)
+            elif operation.cancelled and not control:
                 await publish_control(board, name)
 
     async def read_uart(request):
@@ -639,6 +650,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             complete = isinstance(data, bytes) and len(data) == size
             if control and control.stopped:
                 return problem(403, control.stopped)
+            if operation.cancelled:
+                complete = False
+                record["detail"] = "Arrêt demandé par l’opérateur."
+                return problem(409, "operation_cancelled")
             if complete:
                 record.update(bytesRead=size, preview=data[:256].hex(" "), detail=f"{size} octets lus")
                 return web.Response(body=data, content_type="application/octet-stream",
@@ -649,6 +664,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             try:
                 recoverable = isinstance(result, dict) and (
                     result.get("error") == "invalid_flash_range" or
+                    (operation.cancelled and result.get("error") == "operation_cancelled") or
                     (result.get("console_restored") is True and board.identity.get("mode") == "console")
                 )
                 if not complete and (not recoverable or control and control.stopped):
@@ -658,6 +674,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 if control and control.stopped and board.control is control:
                     board.control = None
                     await publish_control(board, request.match_info["name"])
+                elif operation.cancelled and not control:
+                    await publish_control(board, name)
         if control and control.stopped in {"control_stopped", "control_revoked"}:
             return problem(403, control.stopped)
         if isinstance(result, dict) and result.get("error") and not board.socket.closed:

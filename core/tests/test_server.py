@@ -203,6 +203,24 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         response = await request
         self.assertEqual((response.status, await response.json()), (504, {"error": "device_command_timeout"}))
 
+    async def test_operator_can_stop_a_local_read_and_reuse_the_connection(self):
+        agent, generation = await self.board("board")
+        read = asyncio.create_task(self.read("board", generation))
+        command = await agent.receive_json(timeout=2)
+        stop = await self.browser.post("/api/v1/devices/board/control/stop", headers=self.local)
+        self.assertEqual(await stop.json(), {"control": "stopping"})
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "stopping")
+        self.assertEqual(await agent.receive_json(timeout=2), {"cancel": command["id"]})
+        self.assertEqual((await self.read("board", generation)).status, 409)
+        await agent.send_json({"result": command["id"], "error": "operation_cancelled"})
+        response = await read
+        self.assertEqual((response.status, await response.json()), (409, {"error": "operation_cancelled"}))
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
+        retry = asyncio.create_task(self.read("board", generation))
+        await agent.receive_json(timeout=2)
+        await agent.send_bytes(b"data")
+        self.assertEqual(await (await retry).read(), b"data")
+
     async def test_exclusive_control_stops_and_reuses_token_then_revokes(self):
         agent, generation = await self.board("board")
         base = "/api/v1/devices/board/control/"

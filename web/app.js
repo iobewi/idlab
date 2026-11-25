@@ -159,10 +159,7 @@ function render() {
   modeButton.textContent = selected?.mode === 'loader' ? 'Revenir à la console' : 'Ouvrir le chargeur flash';
   modeButton.disabled = !(autoLoader || (available && selected.canReturnToConsole));
   renderConsoleControls(selected, available);
-  $('control-state').textContent = selected?.observation?.device.control === 'stopping' ? 'Arrêt en cours'
-    : selected?.observation?.device.control === 'busy' || selected?.requesting ? 'Opération en cours' : external ? 'Pilotage externe' : 'Disponible';
   renderControlToken(selected);
-  $('release-control').disabled = !external || selected?.observation?.device.control === 'stopping';
   void updateWakeLock();
   renderConsole(selected);
   renderOperations(selected);
@@ -257,7 +254,28 @@ $('control-token-toggle').onclick = () => run(async () => {
     renderControlToken(selected);
   }
 });
-$('release-control').onclick = () => run(() => controlAction('stop'));
+function stopTarget() {
+  const working = [...cards.values()].filter(card => card.identity && (
+    card.busy || card.requestingStop || externallyControlled(card) ||
+    ['busy', 'stopping'].includes(card.observation?.device.control)
+  ));
+  return working.includes(selected) ? selected : working.length === 1 ? working[0] : null;
+}
+
+$('status-control').onclick = () => run(async () => {
+  if ($('status-control').getAttribute('aria-disabled') === 'true') return;
+  const card = stopTarget();
+  if (!card) return;
+  card.requestingStop = true;
+  void updateWakeLock();
+  try {
+    await controlAction('stop', card);
+    await observeCard(card);
+  } finally {
+    card.requestingStop = false;
+    void updateWakeLock();
+  }
+});
 $('control-token-copy').onclick = async () => {
   const dialog = $('control-token-dialog');
   const input = $('control-token');
@@ -365,7 +383,7 @@ const syncConsole = watchConsole(card => {
   renderIdentification();
   renderConsole(card);
 });
-const updateWakeLock = wireWorkbenchShell(cards);
+const updateWakeLock = wireWorkbenchShell(cards, stopTarget);
 const onRomCardChange = wireRomDialog({getSelected, hasCard: card => cards.get(card.name) === card});
 wireConsole({getSelected, render, observeCard});
 wireOperations({getSelected, render, observeCard});
