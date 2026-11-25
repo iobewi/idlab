@@ -133,7 +133,11 @@
 @media (max-width: 720px) { .app-brand p { font-size:0.65rem; } }
 
 
-.card-authorization { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-panel > .pane-title { border-bottom: 0; }
+.card-authorization {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border-top: 0; padding-top: 0;
+}
 .card-authorization h3 { margin: 0; }
 #control-token-toggle { width: auto; margin: 0; padding: 4px; aspect-ratio: 1; color: var(--muted); }
 #control-token-toggle[data-issued="true"] {
