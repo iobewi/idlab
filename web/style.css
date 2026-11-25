@@ -227,11 +227,13 @@
 .guide-main { position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 10px; }
 .guide-main > .status-icon { color: var(--accent); }
 .guide-main p { margin: 0; min-width: 0; overflow-wrap: anywhere; text-align: end; }
-.application:has(.context-guide:is(:hover, :focus-within)) .guide-highlight {
+.application:has(.context-guide:not([data-explaining]):is(:hover, :focus-within)) .guide-highlight,
+.guide-help-target {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
   box-shadow: 0 0 0 3px var(--selected);
 }
+.help:not(.dismissed):has(> .guide-help-target) > .help-popup { display: none; }
 #guide-boot { border: 0; }
 #guide-boot summary { color: var(--accent); }
 #guide-boot ol {

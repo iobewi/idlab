@@ -40,13 +40,67 @@ function visibleTarget(control) {
 }
 
 let highlighted = new Set();
+let hoveredControl;
+let focusedControl;
+let explainedControl;
+let updateGuide = () => {};
+
+function controlWithHelp(element) {
+  const control = element?.closest?.('[data-guide-help], [aria-describedby]');
+  if (control?.dataset.guideHelp || tooltip(control)) return control;
+}
+
+function tooltip(control) {
+  return control?.getAttribute('aria-describedby')?.split(/\s+/)
+    .map($).find(description => description?.getAttribute('role') === 'tooltip');
+}
+
+export function wireGuideHelp() {
+  document.addEventListener('pointerover', event => {
+    if (event.pointerType === 'touch') return;
+    const control = controlWithHelp(event.target);
+    if (hoveredControl === control) return;
+    hoveredControl = control;
+    updateGuide();
+  });
+  document.addEventListener('pointerout', event => {
+    if (event.pointerType === 'touch' || !hoveredControl ||
+        hoveredControl === controlWithHelp(event.relatedTarget)) return;
+    hoveredControl = undefined;
+    updateGuide();
+  });
+  document.addEventListener('focusin', event => {
+    focusedControl = event.target.matches(':focus-visible') ? controlWithHelp(event.target) : undefined;
+    updateGuide();
+  });
+  document.addEventListener('focusout', () => {
+    focusedControl = undefined;
+    updateGuide();
+  });
+}
 
 export function renderGuide(card, choosingPort = false) {
   const [message, targets = [], manual] = nextStep(card, choosingPort);
   const hint = $('guide-next');
-  if (hint.textContent !== message) hint.textContent = message;
-
   const guide = $('context-guide');
+  const help = $('guide-boot');
+  updateGuide = () => {
+    const control = choosingPort ? undefined : [hoveredControl, focusedControl]
+      .find(candidate => candidate?.isConnected && !candidate.closest('[hidden]'));
+    const detail = control?.dataset.guideHelp ?? tooltip(control)?.textContent.trim();
+    if (explainedControl !== control) {
+      explainedControl?.classList.remove('guide-help-target');
+      control?.classList.add('guide-help-target');
+      explainedControl = control;
+    }
+    const text = detail || message;
+    if (hint.textContent !== text) hint.textContent = text;
+    guide.toggleAttribute('data-explaining', Boolean(detail));
+    help.hidden = !manual || Boolean(detail);
+    if (help.hidden) help.open = false;
+  };
+  updateGuide();
+
   function markTargets() {
     const visible = new Set(targets.map(visibleTarget).filter(Boolean));
     for (const control of highlighted) {
@@ -58,8 +112,4 @@ export function renderGuide(card, choosingPort = false) {
   guide.onpointerenter = guide.onfocusin = markTargets;
   guide.tabIndex = targets.some(Boolean) ? 0 : -1;
   markTargets();
-
-  const help = $('guide-boot');
-  help.hidden = !manual;
-  if (help.hidden) help.open = false;
 }

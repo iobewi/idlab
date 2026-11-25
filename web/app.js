@@ -7,7 +7,7 @@ import { renderConsole, renderConsoleControls, renderFlashProgress, renderJourna
 import { renderOperationHistory, renderOperations, renderPartitions, wireOperations } from './operations-view.js';
 import { renderRom, wireRomDialog } from './rom-dialog.js';
 import { externallyControlled, wireWorkbenchShell } from './workbench-shell.js';
-import { renderGuide } from './context-guide.js';
+import { renderGuide, wireGuideHelp } from './context-guide.js';
 
 const cards = new Map();
 let nextBoardNumber = 1;
@@ -351,4 +351,5 @@ emptyCards.id = 'empty-cards';
 $('active-cards').replaceChildren(emptyCards);
 $('add-device-id').value = suggestBoardName();
 $('server-origin').textContent = location.origin;
+wireGuideHelp();
 render();
