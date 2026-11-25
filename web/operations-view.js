@@ -1,7 +1,7 @@
 import { $, download, element, run, say } from './dom.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
-function proofAction(icon, label, help) {
+function iconAction(icon, label, help) {
   const button = element('button', undefined, 'icon-action');
   button.type = 'button';
   button.setAttribute('aria-label', label);
@@ -25,12 +25,12 @@ function operationDetails(entry) {
   const panel = element('div', undefined, 'operation-proof-panel');
   const toolbar = element('div', undefined, 'operation-proof-toolbar');
   const actions = element('div', undefined, 'operation-proof-actions');
-  const copy = proofAction('copy', 'Copier le JSON', 'Copie le détail de cette opération au format JSON.');
+  const copy = iconAction('copy', 'Copier le JSON', 'Copie le détail de cette opération au format JSON.');
   copy.onclick = () => run(async () => {
     await navigator.clipboard.writeText(proof);
     say('JSON de l’opération copié.', {temporary: true});
   });
-  const save = proofAction('download', 'Télécharger le JSON', 'Télécharge le fichier JSON de cette opération.');
+  const save = iconAction('download', 'Télécharger le JSON', 'Télécharge le fichier JSON de cette opération.');
   save.onclick = () => download(new Blob([proof + '\n'], {type: 'application/json'}),
     'idlab-' + entry.device + '-operation-' + entry.id + '.json');
   actions.append(copy, save);
@@ -89,7 +89,8 @@ export function renderPartitions(card, loader) {
     for (const value of [part.label, hex(part.type) + ' / ' + hex(part.subtype),
       hex(part.address), hex(part.size), hex(part.address + part.size)]) row.append(element('td', value));
     const action = element('td');
-    const read = element('button', 'Sélectionner la plage');
+    const read = iconAction('read', 'Sélectionner la plage de ' + part.label,
+      'Ouvre Lecture mémoire avec l’adresse et la taille de cette partition.');
     read.onclick = () => {
       $('address').value = hex(part.address);
       $('size').value = hex(part.size);
