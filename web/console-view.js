@@ -1,6 +1,7 @@
 import { $, clock, download, element, number, say } from './dom.js';
 import { BootIdentity } from './boot-identity.js';
 import { ConsoleBuffer } from './console-buffer.js';
+import { updateHelp } from './control-help.js';
 
 export function watchConsole(onUpdate) {
   let active;
@@ -109,9 +110,17 @@ export function renderConsoleControls(card, available) {
   $('send').disabled = !(available && card.mode === 'console');
   $('mark').disabled = !card;
   $('export').disabled = !card;
-  $('pause').disabled = !card;
-  $('pause').setAttribute('aria-pressed', card?.pausedAt != null);
-  $('pause').textContent = card?.pausedAt != null ? 'Reprendre l’affichage' : 'Pause affichage';
+  const pause = $('pause');
+  const paused = card?.pausedAt != null;
+  pause.disabled = !card;
+  pause.setAttribute('aria-pressed', paused);
+  $('console-pause-icon').setAttribute('href', paused ? '#icon-play' : '#icon-pause');
+  const help = paused ? 'Affiche à nouveau les lignes reçues par la console.'
+    : 'Fige les lignes affichées. La capture UART continue.';
+  if (pause.dataset.guideHelp !== help) {
+    pause.dataset.guideHelp = help;
+    updateHelp();
+  }
   $('follow').hidden = !card || card.follow;
   $('follow-state').textContent = card?.follow ? 'Suivi du direct' : 'Défilement manuel';
 }

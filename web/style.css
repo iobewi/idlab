@@ -3,8 +3,11 @@
 
 /* The UART capture fills the available work area on wide layouts. */
 .uart-pane{margin:8px;border:1px solid var(--line);border-radius:7px}
-.uart-pane>.pane-title{background:var(--toolbar);color:var(--ink);border-radius:6px 6px 0 0}
-.uart-pane>.pane-title span{color:inherit}
+.uart-pane > .toolbar:first-child { background: var(--toolbar); border-radius: 6px 6px 0 0; }
+.console-actions { display: inline-flex; flex-wrap: wrap; gap: 5px; }
+.console-action { padding: 4px; aspect-ratio: 1; }
+.console-action .status-icon { width: 17px; height: 17px; }
+#capture-state { margin-inline-start: auto; color: var(--muted); font-size: 12px; }
 .console{height:55dvh;min-height:min(190px,40dvh);max-height:85dvh;background:light-dark(#10202e,#0d141c);color:#e3edf5}
 .console-row time,.console-row .seq{color:#93a8bb}.console-row .kind{color:#8cc9ff}.console-row.mark{background:#29415a}.console-empty{color:#a5b9c9}
 .agent-pane{margin:0 12px 10px;border:1px solid var(--line);border-radius:9px;background:var(--panel)}.agent-pane>.pane-title{border-radius:8px 8px 0 0}.agent-log{height:calc(4 * (1lh + 5px));resize:vertical;overflow:auto;min-height:min(70px,25dvh);max-height:40dvh;background:var(--surface);font:12px/1.7 ui-monospace,Consolas,monospace}
