@@ -1,6 +1,21 @@
 import { $, download, element, run, say } from './dom.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
+function proofAction(icon, label, help) {
+  const button = element('button', undefined, 'icon-action');
+  button.type = 'button';
+  button.setAttribute('aria-label', label);
+  button.dataset.guideHelp = help;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  const use = document.createElementNS(svg.namespaceURI, 'use');
+  svg.setAttribute('class', 'status-icon');
+  svg.setAttribute('aria-hidden', 'true');
+  use.setAttribute('href', '#icon-' + icon);
+  svg.append(use);
+  button.append(svg);
+  return button;
+}
+
 function operationDetails(entry) {
   const proof = JSON.stringify(entry, null, 2);
   const row = element('tr', undefined, 'operation-detail-row');
@@ -10,12 +25,12 @@ function operationDetails(entry) {
   const panel = element('div', undefined, 'operation-proof-panel');
   const toolbar = element('div', undefined, 'operation-proof-toolbar');
   const actions = element('div', undefined, 'operation-proof-actions');
-  const copy = element('button', 'Copier le JSON');
+  const copy = proofAction('copy', 'Copier le JSON', 'Copie le détail de cette opération au format JSON.');
   copy.onclick = () => run(async () => {
     await navigator.clipboard.writeText(proof);
     say('JSON de l’opération copié.', {temporary: true});
   });
-  const save = element('button', 'Télécharger le JSON');
+  const save = proofAction('download', 'Télécharger le JSON', 'Télécharge le fichier JSON de cette opération.');
   save.onclick = () => download(new Blob([proof + '\n'], {type: 'application/json'}),
     'idlab-' + entry.device + '-operation-' + entry.id + '.json');
   actions.append(copy, save);
