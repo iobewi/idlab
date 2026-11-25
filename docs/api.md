@@ -75,7 +75,9 @@ physiquement sur RESET sans maintenir BOOT, puis reconnecter la carte.
 ### Pilotage exclusif
 
 Pour une carte connectée en console ou en téléchargement, le web peut
-créer un jeton avec **Get token**. Il est réutilisable tant que la carte
+créer un jeton avec le bouclier dans **Autorisations**. Le bouclier
+coché indique que le jeton est émis et permet de le révoquer. Le jeton
+est réutilisable tant que la carte
 reste associée au même connecteur, y compris après une reconnexion dans
 la même page. En cas de retrait de la carte ou de rechargement de la page,
 révoquer l’ancien jeton et en créer un autre. Les jetons sont conservés
@@ -85,7 +87,7 @@ en mémoire jusqu’à leur révocation ou au redémarrage du serveur.
 |---|---|
 | `POST /control/token` | Session navigateur locale. Renvoie le jeton une fois. |
 | `GET /control/connect` (WebSocket) | Le jeton de pilotage est envoyé en Bearer. Renvoie un identifiant secret de session et la génération. La connexion ouverte réserve la carte. |
-| `POST /control/stop` | Session navigateur locale. Arrête le pilotage externe. Le jeton peut resservir. |
+| `POST /control/stop` | Session navigateur locale. Arrête le pilotage externe ou demande l’arrêt de l’opération locale en cours sur la carte. Le jeton peut resservir. |
 | `POST /control/revoke` | Session navigateur locale. Supprime le jeton et arrête le pilotage externe. |
 
 Pendant le pilotage externe, la lecture flash exige l’identifiant secret
@@ -94,6 +96,9 @@ l’état de la carte et de piloter les campagnes. Une deuxième session de
 pilotage est refusée avec `409`. Une lecture interrompue par le web renvoie
 `403 control_stopped` ou `403 control_revoked`. Si l’arrêt coupe un
 transfert série, reconnecter la carte pour reprendre les commandes.
+Dans le navigateur, clique sur **Opération en cours** pour demander
+l’arrêt. Une opération locale annulée renvoie `409 operation_cancelled`.
+L’arrêt coopératif attend que le connecteur termine le traitement en cours.
 
 Le navigateur et Python appellent `POST /api/v1/devices/{name}/command`
 avec `generation` et `command`. La réponse est la description actualisée
@@ -114,6 +119,8 @@ En cas d’échec de `mode.loader`, le connecteur tente de rétablir la
 console si le port et la session sont encore actifs. La réponse
 `502 device_command_failed` peut inclure un champ `detail` avec la
 cause de l’échec.
+La commande `identify`, utilisée à la connexion par l’interface web,
+peut renvoyer le même champ `detail` en cas d’échec.
 Si le connecteur ne rend aucun résultat dans le délai de la commande,
 l’API renvoie `504 device_command_timeout` et ferme la session de la carte.
 
@@ -123,7 +130,10 @@ ce curseur (`hex`, `cursor`, `dropped`). Sans curseur, la lecture commence
 au plus ancien octet conservé. Le serveur conserve au plus 1 Mio par carte
 et renvoie jusqu’à 64 Kio par appel. L’observation utilise le jeton général
 ou celui de la session de pilotage. En Python, utiliser `board.read_uart()`.
-L’interface web lit la capture sur cette même route.
+L’interface web utilise `wait_ms=5000`. Au bout du journal, le serveur
+attend l’arrivée de nouveaux octets ou l’expiration du délai. La réponse
+est immédiate si des octets sont déjà disponibles. `wait_ms` est compris
+entre 0 et 5000 et vaut 0 par défaut.
 
 `GET /api/v1/devices/{name}/activity?generation=…` renvoie l’état de la
 carte, la progression en cours, jusqu’à 300 messages du journal et les

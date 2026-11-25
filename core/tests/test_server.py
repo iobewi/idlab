@@ -172,6 +172,24 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual((await response.json())["generation"], generation)
 
+    async def test_uart_wait_wakes_on_data_and_disconnect(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await agent.send_json({"mode": "console", "transport": "usb_serial_jtag"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        path = "/api/v1/devices/board/uart"
+        params = {"generation": generation, "cursor": "0", "wait_ms": "5000"}
+        read = asyncio.create_task(self.browser.get(path, headers=self.local, params=params))
+        await asyncio.wait({read}, timeout=0.02)
+        self.assertFalse(read.done())
+        await agent.send_json({"uart": "616263"})
+        response = await asyncio.wait_for(read, timeout=1)
+        self.assertEqual(await response.json(), {"hex": "616263", "cursor": 3, "dropped": 0})
+        read = asyncio.create_task(self.browser.get(path, headers=self.local, params=params | {"cursor": "3"}))
+        await asyncio.wait({read}, timeout=0.02)
+        self.assertFalse(read.done())
+        await agent.close()
+        self.assertEqual((await asyncio.wait_for(read, timeout=1)).status, 404)
+
     async def test_loader_command_timeout_has_a_distinct_error(self):
         agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
         await agent.send_json({"mode": "console", "transport": "usb_serial_jtag"})
@@ -184,6 +202,24 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await agent.receive(timeout=2)
         response = await request
         self.assertEqual((response.status, await response.json()), (504, {"error": "device_command_timeout"}))
+
+    async def test_operator_can_stop_a_local_read_and_reuse_the_connection(self):
+        agent, generation = await self.board("board")
+        read = asyncio.create_task(self.read("board", generation))
+        command = await agent.receive_json(timeout=2)
+        stop = await self.browser.post("/api/v1/devices/board/control/stop", headers=self.local)
+        self.assertEqual(await stop.json(), {"control": "stopping"})
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "stopping")
+        self.assertEqual(await agent.receive_json(timeout=2), {"cancel": command["id"]})
+        self.assertEqual((await self.read("board", generation)).status, 409)
+        await agent.send_json({"result": command["id"], "error": "operation_cancelled"})
+        response = await read
+        self.assertEqual((response.status, await response.json()), (409, {"error": "operation_cancelled"}))
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
+        retry = asyncio.create_task(self.read("board", generation))
+        await agent.receive_json(timeout=2)
+        await agent.send_bytes(b"data")
+        self.assertEqual(await (await retry).read(), b"data")
 
     async def test_exclusive_control_stops_and_reuses_token_then_revokes(self):
         agent, generation = await self.board("board")
@@ -455,7 +491,15 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(os.path.isfile("node_modules/esptool-js/bundle.js"), "npm ci required")
     async def test_browser_assets(self):
-        for path in ("/web/app.js", "/esptool.js"):
-            response = await self.browser.get(path, headers=self.local)
+        for module in ("app", "boot-identity", "campaign-view", "console-buffer", "partitions",
+                       "console-view", "control-help", "dom", "operations-view", "rom-dialog", "workbench-shell",
+                       "board-connector", "esp-driver", "serial-console", "serial-transport"):
+            with self.subTest(module=module):
+                async with self.browser.get(f"/web/{module}.js", headers=self.local) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertIn("javascript", response.content_type)
+        async with self.browser.get("/esptool.js", headers=self.local) as response:
             self.assertEqual(response.status, 200)
             self.assertIn("javascript", response.content_type)
+        async with self.browser.get("/web/server.py", headers=self.local) as response:
+            self.assertEqual(response.status, 404)

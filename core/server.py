@@ -18,7 +18,9 @@ from api_activity import ApiActivity
 from campaigns import CampaignError, Campaigns, search_parameters
 
 ROOT = Path(__file__).resolve().parent
+WEB_ROOT = ROOT.parent / "web"
 BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
+SERIAL_MODULES = ("board-connector.js", "esp-driver.js", "serial-console.js", "serial-transport.js")
 MAX_READ = 4 * 1024 * 1024
 MAX_FLASH = 64 * 1024 * 1024
 UART_BUFFER = 1024 * 1024
@@ -54,12 +56,14 @@ class Board:
     port_key: str | None = None
     uart: bytearray = field(default_factory=bytearray)
     uart_end: int = 0
+    uart_changed: asyncio.Event = field(default_factory=asyncio.Event)
     journal: deque = field(default_factory=lambda: deque(maxlen=300))
     operations: deque = field(default_factory=lambda: deque(maxlen=100))
     progress: dict | None = None
 
     def describe(self):
-        state = ("stopping" if self.control and self.control.stopped else
+        stopping = (self.control and self.control.stopped) or (self.pending and self.pending.cancelled)
+        state = ("stopping" if stopping else
                  "busy" if self.pending else "external" if self.control else "available")
         return {"generation": self.generation, **self.identity, "control": state}
 
@@ -250,7 +254,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         return web.json_response(campaign, status=202 if campaign["state"] == "abort_requested" else 200)
 
     async def index(request):
-        response = web.FileResponse(ROOT / "web/index.html")
+        response = web.FileResponse(WEB_ROOT / "index.html")
         response.set_cookie("idlab_session", session, httponly=True, samesite="Strict")
         return response
 
@@ -277,20 +281,23 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if board.control is not control or control.stopped:
             return
         control.stopped = reason
+        if not board.pending:
+            board.control = None
+        await request_operation_stop(name, board)
+        if not control.socket.closed:
+            await control.socket.close(code=1008, message=control.stopped.encode())
+
+    async def request_operation_stop(name, board):
         pending = board.pending
         cancelled = pending and not pending.future.done() and not pending.cancelled
         if cancelled:
             pending.cancelled = True
-        if not pending:
-            board.control = None
         await publish_control(board, name)
         if cancelled and not board.socket.closed:
             try:
                 await board.socket.send_json({"cancel": pending.id})
             except ConnectionError:
                 pass
-        if not control.socket.closed:
-            await control.socket.close(code=1008, message=control.stopped.encode())
 
     async def manage_control(request):
         if not request[LOCAL_OPERATOR]:
@@ -315,6 +322,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         if board and board.control:
             await stop_control(name, board, board.control,
                                "control_revoked" if action == "revoke" else "control_stopped")
+        elif board and action == "stop":
+            await request_operation_stop(name, board)
         elif board:
             await publish_control(board, name)
         return web.json_response({"control": board.describe()["control"] if board else "disconnected"})
@@ -385,6 +394,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                         board.uart.extend(data)
                         board.uart_end += len(data)
                         del board.uart[:max(0, len(board.uart) - UART_BUFFER)]
+                        if data:
+                            board.uart_changed.set()
+                            board.uart_changed = asyncio.Event()
                     elif isinstance(event.get("journal"), str):
                         board.journal.append({"at": datetime.now(timezone.utc).isoformat(), "message": event["journal"][:500]})
                     elif "progress" in event and pending and event.get("id") == pending.id:
@@ -418,6 +430,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         finally:
             if boards.get(name) is board and board is not None:
                 del boards[name]
+                board.uart_changed.set()
                 if board.pending and not board.pending.future.done():
                     board.pending.future.set_result(None)
                 if board.control:
@@ -510,11 +523,14 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             result = await asyncio.wait_for(operation.future, timeout=command_timeout)
             if control and control.stopped:
                 return problem(403, control.stopped)
+            if operation.cancelled:
+                record["detail"] = "Arrêt demandé par l’opérateur."
+                return problem(409, "operation_cancelled")
             if not isinstance(result, dict):
                 return problem(502, "device_session_changed")
             if result.get("error"):
                 detail = result.get("detail")
-                if command == "mode.loader" and isinstance(detail, str) and detail:
+                if command in ("mode.loader", "identify") and isinstance(detail, str) and detail:
                     record["detail"] = detail[:500]
                     return web.json_response({"error": "device_command_failed", "detail": record["detail"]}, status=502)
                 return problem(502, "device_command_failed")
@@ -536,9 +552,12 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             if control and control.stopped and board.control is control:
                 board.control = None
                 await publish_control(board, name)
+            elif operation.cancelled and not control:
+                await publish_control(board, name)
 
     async def read_uart(request):
-        board = boards.get(request.match_info["name"])
+        name = request.match_info["name"]
+        board = boards.get(name)
         if not board or board.socket.closed:
             return problem(404, "device_disconnected")
         if request.query.get("generation") != board.generation:
@@ -546,10 +565,25 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         start = board.uart_end - len(board.uart)
         try:
             cursor = int(request.query.get("cursor", start))
+            wait_ms = int(request.query.get("wait_ms", "0"))
         except (TypeError, ValueError):
             return problem(400, "invalid_arguments")
-        if not 0 <= cursor <= board.uart_end:
+        if not 0 <= cursor <= board.uart_end or not 0 <= wait_ms <= 5000:
             return problem(400, "invalid_arguments")
+        if wait_ms and cursor == board.uart_end:
+            control = board.control
+            scoped = control and hmac.compare_digest(
+                request.headers.get("Authorization", "").encode(), f"Bearer {control.credential}".encode(),
+            )
+            try:
+                await asyncio.wait_for(board.uart_changed.wait(), timeout=wait_ms / 1000)
+            except TimeoutError:
+                pass
+            if boards.get(name) is not board or board.socket.closed:
+                return problem(404, "device_disconnected")
+            if scoped and (board.control is not control or control.stopped):
+                return problem(403, "control_session_required")
+            start = board.uart_end - len(board.uart)
         offset = max(cursor, start)
         data = board.uart[offset - start:offset - start + UART_PAGE]
         return web.json_response({"hex": data.hex(), "cursor": offset + len(data), "dropped": offset - cursor},
@@ -616,6 +650,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             complete = isinstance(data, bytes) and len(data) == size
             if control and control.stopped:
                 return problem(403, control.stopped)
+            if operation.cancelled:
+                complete = False
+                record["detail"] = "Arrêt demandé par l’opérateur."
+                return problem(409, "operation_cancelled")
             if complete:
                 record.update(bytesRead=size, preview=data[:256].hex(" "), detail=f"{size} octets lus")
                 return web.Response(body=data, content_type="application/octet-stream",
@@ -626,6 +664,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
             try:
                 recoverable = isinstance(result, dict) and (
                     result.get("error") == "invalid_flash_range" or
+                    (operation.cancelled and result.get("error") == "operation_cancelled") or
                     (result.get("console_restored") is True and board.identity.get("mode") == "console")
                 )
                 if not complete and (not recoverable or control and control.stopped):
@@ -635,6 +674,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 if control and control.stopped and board.control is control:
                     board.control = None
                     await publish_control(board, request.match_info["name"])
+                elif operation.cancelled and not control:
+                    await publish_control(board, name)
         if control and control.stopped in {"control_stopped", "control_revoked"}:
             return problem(403, control.stopped)
         if isinstance(result, dict) and result.get("error") and not board.socket.closed:
@@ -653,6 +694,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
     async def revalidate_browser_files(request, response):
         if request.path in {"/", "/esptool.js"} or request.path.startswith("/web/"):
             response.headers["Cache-Control"] = "no-cache"
+
+    async def serial_module(request):
+        return web.FileResponse(ROOT / request.path.rsplit("/", 1)[-1])
 
     activity = ApiActivity()
     app = web.Application(middlewares=[local_access, activity.track], client_max_size=4096)
@@ -680,7 +724,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         web.get("/api/v1/devices/{name}/activity", read_activity),
         web.post("/api/v1/devices/{name}/flash/read", read_flash),
         web.get("/agent", agent),
-        web.static("/web", ROOT / "web"),
+        *(web.get(f"/web/{module}", serial_module) for module in SERIAL_MODULES),
+        web.static("/web", WEB_ROOT),
     ])
     async def esptool(request):
         return web.FileResponse(BUNDLE)

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
-import {BoardConnector} from '../web/board-connector.js';
+import {BoardConnector} from '../board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
   readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
@@ -177,12 +177,43 @@ test('identification and flash reads from console restore the same console and r
     'close-console', 'detect:default_reset', 'close-loader', 'console', 'reset']);
   assert.equal(Buffer.from(uart.join(''), 'hex').toString(), 'READY\nREADY\nREADY\n');
   await card.disconnect();
+  assert.equal(card.lastIdentity.flash_id, 0x184068);
+  await card.disconnect(true);
   assert.equal(card.lastIdentity, null);
+});
+
+test('automatic identification restores the console and skips the reset on a reconnect', async () => {
+  const {card, events} = fixture();
+  assert.equal(await card.connect({identifyOnConnect: true}), undefined);
+  assert.equal(card.mode, 'console');
+  assert.equal(card.lastIdentity.mac, '10:20:30:40:50:60');
+  assert.equal(card.lastIdentity.flash_id, 0x184068);
+  await card.disconnect();
+  assert.equal(await card.connect({identifyOnConnect: true}), undefined);
+  assert.equal(card.mode, 'console');
+  assert.equal(events.filter(event => event === 'detect:default_reset').length, 1);
+  await card.disconnect();
+});
+
+test('failed automatic identification leaves a usable console and reports the reason', async () => {
+  const {card} = fixture({failLoader: true});
+  assert.match(await card.connect({identifyOnConnect: true}), /ne répond pas en mode téléchargement/);
+  assert.equal(card.mode, 'console');
+  await card.write('status');
+  await card.disconnect();
+});
+
+test('automatic identification leaves manual-only ports in console', async () => {
+  const {card, events} = fixture({vid: 0x303a});
+  assert.match(await card.connect({identifyOnConnect: true}), /BOOT et RESET/);
+  assert.equal(card.mode, 'console');
+  assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console']);
+  await card.disconnect();
 });
 
 test('an automatically detected loader stays in download mode through reads and rejects software restart', async () => {
   const {card, events, manualReset} = fixture({inDownload: true});
-  await card.connect();
+  assert.equal(await card.connect({identifyOnConnect: true}), undefined);
   await card.identify();
   await card.readFlash(0, 3);
   assert.equal(card.mode, 'loader');
@@ -354,7 +385,7 @@ test('a manual transport leaves the running console open and requests manual dow
   const {card, events} = fixture({vid: 0x303a});
   await card.connect();
   assert.equal(card.canEnterLoader, false);
-  await assert.rejects(card.identify(), /device_command_failed/);
+  await assert.rejects(card.identify(), /Place la carte en mode téléchargement/);
   assert.equal(card.mode, 'console');
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console']);
   await card.disconnect();

@@ -3,8 +3,7 @@
 !core/requirements.txt
 !core/package.json
 !core/package-lock.json
-!core/server.py
-!core/campaigns.py
-!core/web/
-!core/web/**
-!core/manager.py
+!core/*.py
+!core/*.js
+!web/
+!web/**

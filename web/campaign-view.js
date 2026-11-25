@@ -1,3 +1,5 @@
+import { element } from './dom.js';
+
 const labels = {
   active: 'Active',
   abort_requested: 'Avortement demandé',
@@ -16,12 +18,6 @@ function selectCampaign(campaign) {
 }
 
 document.querySelector('#campaign-context-clear').onclick = () => selectCampaign(null);
-
-function element(tag, text) {
-  const node = document.createElement(tag);
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
 
 function duration(campaign) {
   const start = Date.parse(campaign.started_at);

@@ -5,5 +5,5 @@ cd "$(dirname "$0")/.."
 venv="$HOME/.venv/idlab"
 
 python -m venv "$venv"
-"$venv/bin/python" -m pip install -r core/requirements.txt -e ./client
+"$venv/bin/python" -m pip install -r core/requirements.txt -e ./clients/python
 npm ci --ignore-scripts --prefix core

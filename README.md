@@ -4,9 +4,9 @@ IOBEWI Device Lab relie des cartes embarquées aux scripts et à l'interface
 opérateur. Le navigateur possède les ports Web Serial. Le serveur local
 coordonne les appels. Les deux utilisent la même opération de lecture.
 
-`core/` contient le serveur, le navigateur et le pilote ESP32.
-`client/` fournit le connecteur Python. Le banc couvre la connexion,
-l'identification et la lecture flash.
+- `core/` contient les services HTTP, l’API et le connecteur Web Serial avec son pilote ESP32.
+- `web/` contient l’interface opérateur servie par IDLab.
+- `clients/` regroupe les clients tiers qui utilisent l’API. Le client Python et son paquet sont dans `clients/python/`.
 
 ## Démarrer
 
@@ -49,15 +49,19 @@ puis reconnecte-la depuis la liste des cartes.
 Si IDLab a ouvert le chargeur depuis une console déjà active, le même
 bouton devient **Revenir à la console**. Le retour est disponible sur les
 ports à reset automatique quand le web a la main.
-Le panneau Identification reprend les indices du démarrage ESP-IDF visibles
-sur l’UART, dont la puce, la révision et la taille flash configurée.
-**Identifier**, **Relire la table** et **Lire la flash** passent par le
-connecteur de la carte. Sur un pont UART reconnu ou USB Serial/JTAG, elles
-ouvrent le chargeur si nécessaire, puis rétablissent le mode de départ.
-La carte peut redémarrer et la capture UART est suspendue pendant
-l’opération. Si le port exige une entrée manuelle, place la carte en mode
-téléchargement et reconnecte-la avant la lecture.
-L’identité mesurée et la capture restent affichées au retour en console.
+À l’ajout d’une carte, IDLab complète automatiquement son identification
+via le chargeur. Si la carte était en console et que le port permet la
+bascule automatique, le firmware redémarre et IDLab revient en console.
+Les mesures sont conservées lors d’une reconnexion au même port dans
+la page et effacées si la carte est débranchée. Si l’identification
+complète est impossible, la console affiche les indices disponibles
+dans les logs UART. Le bouton **Ouvrir le chargeur flash** permet
+de réessayer sur un port à bascule automatique.
+
+**Relire la table** et **Lire la flash** ouvrent le chargeur si nécessaire,
+puis rétablissent le mode de départ. Si le port exige une entrée
+manuelle, place la carte en téléchargement avec BOOT et RESET avant de
+la reconnecter.
 Une lecture couvrant une grande plage reste une seule requête API et une
 seule opération dans l’historique. Le connecteur transmet les données au
 serveur par blocs de 4 Mio maximum.
@@ -78,7 +82,7 @@ disponible via **Essayer la connexion**.
 
 ## Piloter depuis Python
 
-Installer le connecteur avec `python -m pip install ./client`. Utiliser la
+Installer le client avec `python -m pip install ./clients/python`. Utiliser la
 même valeur de `IDLAB_TOKEN` pour le serveur et le script, puis connecter la
 carte dans le navigateur.
 
@@ -95,8 +99,9 @@ with lab.control("ma-carte", token_de_pilotage) as board:
         board = board.return_console()
 ```
 
-Dans l’interface, **Get token** crée le jeton de pilotage de la carte
-connectée en console ou en mode chargeur. Le bloc `with` tient la session exclusive et rend
+Dans **Autorisations**, le bouclier avec un plus crée un jeton de pilotage.
+Le bouclier coché indique que le jeton est émis. Clique à nouveau sur
+l’icône pour le révoquer. Le bloc `with` tient la session exclusive et rend
 la main en sortant. Utiliser `IDLAB_TOKEN` pour `devices()` et
 `identify()` en observation. Le client transmet les refus du serveur
 avec `IDLabHTTPError.status` et `IDLabHTTPError.code`.
@@ -149,7 +154,7 @@ pilotent le serveur depuis la palette de commandes.
 
 Avec l’extension **Dev Containers**, ouvrir le dépôt dans VS Code puis choisir
 **Dev Containers: Reopen in Container**. Le conteneur de développement installe
-Python 3.12, Node.js 22, le connecteur Python en mode éditable et les dépendances
+Python 3.12, Node.js 22, le client Python en mode éditable et les dépendances
 du cœur. VS Code sélectionne l’environnement Python dédié. Dans un terminal,
 l’activer avec `. "$HOME/.venv/idlab/bin/activate"`.
 
@@ -166,10 +171,10 @@ python -m unittest discover -s tests -v
 node --test tests/*.test.js
 ```
 
-Pour tester le connecteur contre le serveur avec un agent simulé, depuis la
+Pour tester le client Python contre le serveur avec un agent simulé, depuis la
 racine après installation des dépendances de `core/` :
 
 ```sh
-python -m pip install -e ./client
-python -m unittest discover -s client/tests -v
+python -m pip install -e ./clients/python
+python -m unittest discover -s clients/python/tests -v
 ```
