@@ -150,14 +150,17 @@ export function wireConsole({getSelected, render, observeCard}) {
     card.pausedAt = card.pausedAt === null ? card.capture.sequence : null;
     render();
   };
-  $('uart-log').onscroll = () => {
+  const log = $('uart-log');
+  log.onscroll = () => {
     const card = getSelected();
     if (!card) return;
-    const log = $('uart-log');
     card.follow = log.scrollHeight - log.scrollTop - log.clientHeight < 4;
     $('follow').hidden = card.follow;
     $('follow-state').textContent = card.follow ? 'Suivi du direct' : 'Défilement manuel';
   };
+  new ResizeObserver(() => {
+    if (getSelected()?.follow) log.scrollTop = log.scrollHeight;
+  }).observe(log);
   $('follow').onclick = () => {
     const card = getSelected();
     if (card) { card.follow = true; render(); }
@@ -167,7 +170,7 @@ export function wireConsole({getSelected, render, observeCard}) {
     const card = getSelected();
     if (card) download(new Blob([card.capture.bytes()]), card.name + '-uart.bin');
   };
-  $('console-auto-size').onclick = () => $('uart-log').style.height = '';
+  $('console-auto-size').onclick = () => { log.style.height = ''; };
   $('agent-log-toggle').onclick = event => {
     const log = $('agent-log');
     log.hidden = !log.hidden;
