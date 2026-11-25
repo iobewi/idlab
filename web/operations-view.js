@@ -59,13 +59,7 @@ export function renderOperations(card) {
   renderOperationHistory(card);
   $('dump-state').textContent = card?.dump?.summary ?? 'Aucune relecture.';
   $('hex-dump').textContent = card?.dump?.preview ?? 'Aucune donnée lue.';
-  const link = $('download');
-  link.replaceChildren();
-  if (card?.dump) {
-    const button = element('button', 'Télécharger le dump');
-    button.onclick = () => download(card.dump.blob, card.dump.filename);
-    link.append(button);
-  }
+  $('download-dump').hidden = !card?.dump;
 }
 
 export function renderPartitions(card, loader) {
@@ -98,6 +92,11 @@ function flashNumber(value) {
 }
 
 export function wireOperations({getSelected, render, observeCard}) {
+  $('download-dump').onclick = () => {
+    const dump = getSelected()?.dump;
+    if (dump) download(dump.blob, dump.filename);
+  };
+
   async function readPartitions() {
     const card = getSelected();
     if (!card || card.busy || card.requesting || $('read').disabled) return;
