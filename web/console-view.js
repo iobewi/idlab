@@ -60,8 +60,10 @@ export function renderJournal(card) {
   const log = $('agent-log');
   const follow = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
   const journal = card?.lastJournal ?? [];
-  $('agent-log-entries').replaceChildren(...journal.filter(entry => entry.at > (card.journalAfter ?? ''))
-    .map(entry => element('p', clock.format(new Date(entry.at)) + ' · ' + entry.message, 'journal-row')));
+  const rows = journal.filter(entry => entry.at > (card.journalAfter ?? ''))
+    .map(entry => element('p', clock.format(new Date(entry.at)) + ' · ' + entry.message, 'journal-row'));
+  $('agent-log-entries').replaceChildren(...rows);
+  $('agent-log-copy').disabled = rows.length === 0;
   renderFlashProgress(card);
   if (follow) log.scrollTop = log.scrollHeight;
 }
@@ -171,11 +173,16 @@ export function wireConsole({getSelected, render, observeCard}) {
     if (card) download(new Blob([card.capture.bytes()]), card.name + '-uart.bin');
   };
   $('console-auto-size').onclick = () => { log.style.height = ''; };
-  $('agent-log-toggle').onclick = event => {
-    const log = $('agent-log');
-    log.hidden = !log.hidden;
-    event.currentTarget.setAttribute('aria-expanded', !log.hidden);
-    event.currentTarget.textContent = log.hidden ? 'Développer' : 'Réduire';
+  $('agent-log-copy').onclick = async () => {
+    const rows = $('agent-log-entries').children;
+    if (!rows.length) return;
+    const text = Array.from(rows, row => row.textContent).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      say('Journal de l’agent copié.');
+    } catch {
+      say('Impossible de copier le journal dans le presse-papiers.');
+    }
   };
   $('agent-log-clear').onclick = () => {
     const card = getSelected();
