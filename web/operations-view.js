@@ -49,21 +49,24 @@ export function renderOperationHistory(card) {
   for (const entry of entries) {
     const row = element('tr', undefined, 'operation-row');
     const expanded = card.inspectedOperation === entry.id;
-    const cell = element('td');
-    const inspect = element('button', entry.id, 'operation-id');
-    inspect.type = 'button';
-    inspect.id = 'inspect-operation-' + entry.id;
-    inspect.setAttribute('aria-expanded', expanded);
-    inspect.setAttribute('aria-label', (expanded ? 'Masquer' : 'Afficher') + ' le détail de l’opération ' + entry.id);
-    if (expanded) inspect.setAttribute('aria-controls', 'operation-detail-' + entry.id);
-    row.onclick = event => {
-      if (event.target !== inspect && window.getSelection()?.isCollapsed === false) return;
+    row.id = 'operation-row-' + entry.id;
+    row.tabIndex = 0;
+    row.setAttribute('aria-expanded', expanded);
+    if (expanded) row.setAttribute('aria-controls', 'operation-detail-' + entry.id);
+    const toggleDetails = () => {
       card.inspectedOperation = expanded ? null : entry.id;
       renderOperationHistory(card);
-      $(inspect.id).focus({preventScroll: true});
+      $(row.id).focus({preventScroll: true});
     };
-    cell.append(inspect);
-    row.append(cell);
+    row.onclick = () => {
+      if (window.getSelection()?.isCollapsed !== false) toggleDetails();
+    };
+    row.onkeydown = event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      if (!event.repeat) toggleDetails();
+    };
+    row.append(element('td', entry.id));
     for (const value of [entry.device, entry.command === 'flash.read' ? 'Lecture flash' : entry.command, entry.state, entry.duration]) {
       row.append(element('td', value ?? '—'));
     }
