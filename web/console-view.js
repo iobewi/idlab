@@ -1,4 +1,60 @@
 import { $, clock, download, element, number, say } from './dom.js';
+import { BootIdentity } from './boot-identity.js';
+import { ConsoleBuffer } from './console-buffer.js';
+
+export function watchConsole(onUpdate) {
+  let active;
+
+  async function read(card, generation, {signal}) {
+    const url = new URL('/api/v1/devices/' + card.name + '/uart', location.href);
+    url.searchParams.set('generation', generation);
+    url.searchParams.set('wait_ms', '5000');
+    let framePending = false;
+    while (!signal.aborted) {
+      try {
+        url.searchParams.set('cursor', card.uartCursor);
+        const response = await fetch(url, {signal});
+        if (!response.ok) throw new Error('uart_unavailable');
+        const uart = await response.json();
+        if (signal.aborted) return;
+        card.uartCursor = uart.cursor;
+        if (uart.dropped) card.capture.note('MARK', uart.dropped + ' octets perdus');
+        if (uart.hex) {
+          const bytes = Uint8Array.from(uart.hex.match(/../g), byte => parseInt(byte, 16));
+          card.boot.append(card.capture.append(bytes).text);
+        }
+        if ((uart.hex || uart.dropped) && !framePending) {
+          framePending = true;
+          setTimeout(() => {
+            framePending = false;
+            if (!signal.aborted) onUpdate(card);
+          }, 32);
+        }
+      } catch {
+        if (signal.aborted) return;
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+  }
+
+  return card => {
+    const generation = card?.identity?.generation;
+    if (active?.card === card && active?.generation === generation) return;
+    active?.controller.abort();
+    active = null;
+    if (!generation) return;
+    if (card.uartGeneration !== generation) {
+      card.uartGeneration = generation;
+      card.uartCursor = 0;
+      card.capture = new ConsoleBuffer();
+      card.boot = new BootIdentity();
+      card.pausedAt = null;
+    }
+    const controller = new AbortController();
+    active = {card, generation, controller};
+    void read(card, generation, controller);
+  };
+}
 
 export function renderJournal(card) {
   const log = $('agent-log');

@@ -172,6 +172,24 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual((await response.json())["generation"], generation)
 
+    async def test_uart_wait_wakes_on_data_and_disconnect(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await agent.send_json({"mode": "console", "transport": "usb_serial_jtag"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        path = "/api/v1/devices/board/uart"
+        params = {"generation": generation, "cursor": "0", "wait_ms": "5000"}
+        read = asyncio.create_task(self.browser.get(path, headers=self.local, params=params))
+        await asyncio.wait({read}, timeout=0.02)
+        self.assertFalse(read.done())
+        await agent.send_json({"uart": "616263"})
+        response = await asyncio.wait_for(read, timeout=1)
+        self.assertEqual(await response.json(), {"hex": "616263", "cursor": 3, "dropped": 0})
+        read = asyncio.create_task(self.browser.get(path, headers=self.local, params=params | {"cursor": "3"}))
+        await asyncio.wait({read}, timeout=0.02)
+        self.assertFalse(read.done())
+        await agent.close()
+        self.assertEqual((await asyncio.wait_for(read, timeout=1)).status, 404)
+
     async def test_loader_command_timeout_has_a_distinct_error(self):
         agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
         await agent.send_json({"mode": "console", "transport": "usb_serial_jtag"})

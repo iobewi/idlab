@@ -123,7 +123,10 @@ ce curseur (`hex`, `cursor`, `dropped`). Sans curseur, la lecture commence
 au plus ancien octet conservé. Le serveur conserve au plus 1 Mio par carte
 et renvoie jusqu’à 64 Kio par appel. L’observation utilise le jeton général
 ou celui de la session de pilotage. En Python, utiliser `board.read_uart()`.
-L’interface web lit la capture sur cette même route.
+L’interface web utilise `wait_ms=5000`. Au bout du journal, le serveur
+attend l’arrivée de nouveaux octets ou l’expiration du délai. La réponse
+est immédiate si des octets sont déjà disponibles. `wait_ms` est compris
+entre 0 et 5000 et vaut 0 par défaut.
 
 `GET /api/v1/devices/{name}/activity?generation=…` renvoie l’état de la
 carte, la progression en cours, jusqu’à 300 messages du journal et les

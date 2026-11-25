@@ -56,6 +56,7 @@ class Board:
     port_key: str | None = None
     uart: bytearray = field(default_factory=bytearray)
     uart_end: int = 0
+    uart_changed: asyncio.Event = field(default_factory=asyncio.Event)
     journal: deque = field(default_factory=lambda: deque(maxlen=300))
     operations: deque = field(default_factory=lambda: deque(maxlen=100))
     progress: dict | None = None
@@ -387,6 +388,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                         board.uart.extend(data)
                         board.uart_end += len(data)
                         del board.uart[:max(0, len(board.uart) - UART_BUFFER)]
+                        if data:
+                            board.uart_changed.set()
+                            board.uart_changed = asyncio.Event()
                     elif isinstance(event.get("journal"), str):
                         board.journal.append({"at": datetime.now(timezone.utc).isoformat(), "message": event["journal"][:500]})
                     elif "progress" in event and pending and event.get("id") == pending.id:
@@ -420,6 +424,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         finally:
             if boards.get(name) is board and board is not None:
                 del boards[name]
+                board.uart_changed.set()
                 if board.pending and not board.pending.future.done():
                     board.pending.future.set_result(None)
                 if board.control:
@@ -540,7 +545,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
                 await publish_control(board, name)
 
     async def read_uart(request):
-        board = boards.get(request.match_info["name"])
+        name = request.match_info["name"]
+        board = boards.get(name)
         if not board or board.socket.closed:
             return problem(404, "device_disconnected")
         if request.query.get("generation") != board.generation:
@@ -548,10 +554,25 @@ def create_app(*, port=8080, token=None, read_timeout=600, loopback_forwarded=Fa
         start = board.uart_end - len(board.uart)
         try:
             cursor = int(request.query.get("cursor", start))
+            wait_ms = int(request.query.get("wait_ms", "0"))
         except (TypeError, ValueError):
             return problem(400, "invalid_arguments")
-        if not 0 <= cursor <= board.uart_end:
+        if not 0 <= cursor <= board.uart_end or not 0 <= wait_ms <= 5000:
             return problem(400, "invalid_arguments")
+        if wait_ms and cursor == board.uart_end:
+            control = board.control
+            scoped = control and hmac.compare_digest(
+                request.headers.get("Authorization", "").encode(), f"Bearer {control.credential}".encode(),
+            )
+            try:
+                await asyncio.wait_for(board.uart_changed.wait(), timeout=wait_ms / 1000)
+            except TimeoutError:
+                pass
+            if boards.get(name) is not board or board.socket.closed:
+                return problem(404, "device_disconnected")
+            if scoped and (board.control is not control or control.stopped):
+                return problem(403, "control_session_required")
+            start = board.uart_end - len(board.uart)
         offset = max(cursor, start)
         data = board.uart[offset - start:offset - start + UART_PAGE]
         return web.json_response({"hex": data.hex(), "cursor": offset + len(data), "dropped": offset - cursor},

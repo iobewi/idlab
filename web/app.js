@@ -3,7 +3,7 @@ import { ConsoleBuffer } from './console-buffer.js';
 import { BootIdentity } from './boot-identity.js';
 import { activeCampaignId } from './campaign-view.js';
 import { $, element, number, run, say } from './dom.js';
-import { renderConsole, renderConsoleControls, renderFlashProgress, renderJournal, wireConsole } from './console-view.js';
+import { renderConsole, renderConsoleControls, renderFlashProgress, renderJournal, watchConsole, wireConsole } from './console-view.js';
 import { renderOperationHistory, renderOperations, renderPartitions, wireOperations } from './operations-view.js';
 import { renderRom, wireRomDialog } from './rom-dialog.js';
 import { externallyControlled, wireWorkbenchShell } from './workbench-shell.js';
@@ -19,23 +19,10 @@ async function observeCard(card) {
   if (!generation || card.polling) return;
   card.polling = true;
   try {
-    const path = '/api/v1/devices/' + card.name;
-    const load = async (route, query = '') => {
-      const response = await fetch(path + '/' + route + '?generation=' + generation + query);
-      if (!response.ok) return null;
-      return response.json();
-    };
-    if (card.observedGeneration !== generation) {
-      card.observedGeneration = generation;
-      card.uartCursor = 0;
-      card.capture = new ConsoleBuffer();
-      card.boot = new BootIdentity();
-      card.pausedAt = null;
-    }
-    const requests = [load('activity')];
-    if (card === selected) requests.push(load('uart', '&cursor=' + card.uartCursor));
-    const [activity, uart] = await Promise.all(requests);
-    if (card.identity?.generation !== generation || !activity) return;
+    const response = await fetch('/api/v1/devices/' + card.name + '/activity?generation=' + generation);
+    if (!response.ok) return;
+    const activity = await response.json();
+    if (card.identity?.generation !== generation) return;
     const previous = card.observation;
     const controlChanged = previous?.device.control !== activity.device.control ||
       previous?.external_control !== activity.external_control;
@@ -43,18 +30,9 @@ async function observeCard(card) {
     const journalChanged = previous?.journal.at(-1)?.at !== activity.journal.at(-1)?.at;
     card.observation = activity;
     card.lastJournal = activity.journal;
-    if (uart) {
-      card.uartCursor = uart.cursor;
-      if (uart.dropped) card.capture.note('MARK', uart.dropped + ' octets perdus');
-      if (uart.hex) {
-        const bytes = Uint8Array.from(uart.hex.match(/../g), byte => parseInt(byte, 16));
-        card.boot.append(card.capture.append(bytes).text);
-      }
-    }
     if (controlChanged) render();
     else if (card === selected) {
       renderIdentification();
-      if (uart?.hex || uart?.dropped) renderConsole(card);
       if (journalChanged) renderJournal(card);
       else renderFlashProgress(card);
       if (historyChanged) {
@@ -113,6 +91,7 @@ function renderIdentification() {
 }
 
 function render() {
+  syncConsole(selected);
   for (const card of cards.values()) {
     const active = card === selected;
     card.row.dataset.selected = active;
@@ -349,6 +328,10 @@ $('identify-live').onclick = () => run(async () => {
 });
 
 const getSelected = () => selected;
+const syncConsole = watchConsole(card => {
+  renderIdentification();
+  renderConsole(card);
+});
 const updateWakeLock = wireWorkbenchShell(cards);
 const onRomCardChange = wireRomDialog({getSelected, hasCard: card => cards.get(card.name) === card});
 wireConsole({getSelected, render, observeCard});
