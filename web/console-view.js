@@ -173,7 +173,6 @@ export function wireConsole({getSelected, render, observeCard}) {
     const card = getSelected();
     if (card) download(new Blob([card.capture.bytes()]), card.name + '-uart.bin');
   };
-  $('console-auto-size').onclick = () => { log.style.height = ''; };
   $('agent-log-copy').onclick = async () => {
     const rows = $('agent-log-entries').children;
     if (!rows.length) return;
