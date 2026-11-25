@@ -104,11 +104,10 @@
 </section>
 </main></div>
 <section class="agent-pane" aria-label="Journal de l’agent"><div class="pane-title"><h2>Journal de l’agent</h2><div class="row"><span class="help journal-action"><button id="agent-log-copy" type="button" aria-label="Copier le journal" aria-describedby="agent-log-copy-help" disabled><svg class="status-icon" aria-hidden="true"><use href="#icon-copy"></use></svg></button><span class="help-popup" id="agent-log-copy-help" role="tooltip">Copier les lignes du journal dans le presse-papiers</span></span><span class="help journal-action"><button id="agent-log-clear" type="button" aria-label="Effacer le journal affiché" aria-describedby="agent-log-clear-help"><svg class="status-icon" aria-hidden="true"><use href="#icon-trash"></use></svg></button><span class="help-popup" id="agent-log-clear-help" role="tooltip">Effacer les lignes affichées pour la carte sélectionnée</span></span></div></div><div id="agent-log" class="agent-log"><div id="agent-log-entries" role="log" aria-label="Activité de l’agent"></div><p id="agent-read-progress" class="journal-row" hidden></p></div></section>
-<aside class="context-guide" aria-label="Guide contextuel">
+<aside id="context-guide" class="context-guide" aria-label="Guide contextuel">
   <div class="guide-main">
     <svg class="status-icon" aria-hidden="true"><use href="#icon-guide"></use></svg>
     <p id="guide-next" role="status">Ajoute une carte pour ouvrir sa console ou accéder à sa flash.</p>
-    <button id="guide-action" type="button" hidden></button>
     <details id="guide-boot" hidden>
       <summary>BOOT + RESET</summary>
       <ol>

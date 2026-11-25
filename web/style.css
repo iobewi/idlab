@@ -228,7 +228,11 @@
 .guide-main > .status-icon { color: var(--accent); }
 .guide-main p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 #guide-next { flex: 1 1 18rem; }
-#guide-action { min-height: 28px; }
+.application:has(.context-guide:is(:hover, :focus-within)) .guide-highlight {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: 0 0 0 3px var(--selected);
+}
 #guide-boot { border: 0; }
 #guide-boot summary { color: var(--accent); }
 #guide-boot ol {
