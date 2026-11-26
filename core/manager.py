@@ -3,10 +3,11 @@
 import asyncio
 import hmac
 import os
+import re
 from pathlib import Path
 import sys
 
-from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, WSMsgType, web
+from aiohttp import ClientError, ClientSession, ClientTimeout, DummyCookieJar, WSServerHandshakeError, WSMsgType, web
 
 SERVER = Path(__file__).resolve().with_name("server.py")
 WS_LIMIT = 4 * 1024 * 1024 + 1
@@ -29,27 +30,34 @@ def proxy_headers(headers):
 
 
 async def relay_socket(source, target):
-    async for message in source:
+    while True:
+        message = await source.receive()
         if message.type == WSMsgType.TEXT:
             await target.send_str(message.data)
         elif message.type == WSMsgType.BINARY:
             await target.send_bytes(message.data)
         else:
-            return
+            return message
 
 
 async def bridge_socket(browser, agent):
-    tasks = {
-        asyncio.create_task(relay_socket(browser, agent)),
-        asyncio.create_task(relay_socket(agent, browser)),
-    }
+    downstream = asyncio.create_task(relay_socket(agent, browser))
+    tasks = {asyncio.create_task(relay_socket(browser, agent)), downstream}
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await browser.close(code=agent.close_code if agent.close_code in {1000, 1001, 1011} else 1001)
+        code = agent.close_code if agent.close_code in {1000, 1001, 1008, 1011} else 1001
+        reason = b""
+        if downstream.done() and not downstream.cancelled() and downstream.exception() is None:
+            message = downstream.result()
+            if message is not None and message.type == WSMsgType.CLOSE and message.data == 1008:
+                code = 1008
+                if message.extra in {"control_stopped", "control_revoked", "device_session_changed"}:
+                    reason = message.extra.encode()
+        await browser.close(code=code, message=reason)
 
 
 class HTTPService:
@@ -174,9 +182,16 @@ def create_app(*, token, port=8080, service=None):
                     await browser.prepare(request)
                     await bridge_socket(browser, agent)
                     return browser
-            except (ClientError, TimeoutError) as error:
-                if getattr(error, "status", None) in {400, 401, 403, 409}:
-                    return problem(error.status, "agent_connection_refused")
+            except WSServerHandshakeError as error:
+                # aiohttp discards the rejected handshake body; the backend supplies
+                # the machine-readable error in a response header instead.
+                code = error.headers.get("X-IDLab-Error", "") if error.headers else ""
+                if not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
+                    code = "agent_connection_refused"
+                return problem(error.status if 400 <= error.status <= 599 else 502, code)
+            except TimeoutError:
+                return problem(504, "idlab_http_timeout")
+            except ClientError:
                 return problem(503, "idlab_http_unavailable")
 
         try:
@@ -196,7 +211,9 @@ def create_app(*, token, port=8080, service=None):
                     status=response.status, headers=proxy_headers(response.headers),
                     body=await response.read(),
                 )
-        except (ClientError, TimeoutError):
+        except TimeoutError:
+            return problem(504, "idlab_http_timeout")
+        except ClientError:
             return problem(503, "idlab_http_unavailable")
 
     async def upstream_session(app):
