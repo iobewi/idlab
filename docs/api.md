@@ -412,7 +412,11 @@ dans le corps JSON, également via le manager. Le SDK les expose via
 `IDLabHTTPError.status` et `IDLabHTTPError.code`.
 Un timeout série (`502 serial_timeout`) est distinct d'un délai serveur
 (`504 flash_read_server_timeout`, `device_command_timeout` ou
-`idlab_http_timeout`). Les opérations flash ne sont pas rejouées automatiquement.
+`idlab_http_timeout`). Les opérations flash ne sont pas rejouées automatiquement. Pour une lecture en cours,
+une révocation ou un arrêt explicite prime sur la déconnexion, puis sur
+l'annulation locale et l'erreur matérielle. Le diagnostic agent distinct reste
+conservé dans `agentError`. La fermeture de récupération ne change pas le code
+initial ni son statut HTTP. Seuls les codes agent reconnus sont exposés.
 
 | HTTP | Codes courants | Action côté script |
 |---|---|---|
