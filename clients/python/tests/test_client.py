@@ -87,6 +87,28 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await asyncio.to_thread(context.__exit__, None, None, None)
 
+    async def test_control_preserves_handshake_refusals(self):
+        socket = await self.connect()
+        token = await self.issue_token(socket)
+
+        async def refused(value, status, code):
+            context = self.client.control("test-board", value)
+            with self.assertRaises(IDLabHTTPError) as error:
+                await asyncio.to_thread(context.__enter__)
+            self.assertEqual((error.exception.status, error.exception.code), (status, code))
+
+        await refused("invalid", 403, "invalid_control_token")
+        context = self.client.control("test-board", token)
+        await asyncio.to_thread(context.__enter__)
+        await socket.receive_json(timeout=2)
+        try:
+            await refused(token, 409, "device_busy")
+        finally:
+            await asyncio.to_thread(context.__exit__, None, None, None)
+        await socket.receive_json(timeout=2)
+        await socket.close()
+        await refused(token, 404, "device_disconnected")
+
     async def test_generated_recipe_releases_control_even_on_assertion_failure(self):
         agent = await self.connect(console=True)
         token = await self.issue_token(agent)
@@ -194,7 +216,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                                     "read_diagnostic": {"error": "serial_timeout", "console_restored": True}})
             with self.assertRaises(IDLabHTTPError) as failed:
                 await task
-            self.assertEqual((failed.exception.status, failed.exception.code), (502, "device_command_failed"))
+            self.assertEqual((failed.exception.status, failed.exception.code), (502, "serial_timeout"))
             activity = await asyncio.to_thread(board.activity)
         await socket.close()
         history = await asyncio.to_thread(self.client.campaign_operations, campaign["id"])
