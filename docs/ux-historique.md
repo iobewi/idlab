@@ -27,9 +27,8 @@ utiliser le bouton Reset de la carte pour revoir les logs de démarrage.
 | Autorisations | Durée, autorisation distante, révocation et état par carte. |
 | Commandes de la carte | Retour console, Reset EN ou USB selon le transport, maintien de BOOT et récupération locale. |
 | Consoles | Capture UART redimensionnable, texte ou hexadécimal, horodatage, recherche, pause et suivi, effacement d’affichage, export, saisie UART et repères. |
-| Opérations › Partitions | Adresse, lecture, table et suggestion d’adresse selon le résultat. |
 | Opérations › Plan flash | Images, adresses, validation du plan, confirmations, manifestes et artefacts, écriture et effacement. |
-| Opérations › Mémoire flash | Adresse, taille, lecture, téléchargement et effacement de la plage. |
+| Opérations › Mémoire flash | Table des partitions repliable. Le clic sur une partition renseigne la plage et lance sa lecture. La plage peut être lue, téléchargée, programmée ou effacée dans la même vue. |
 | Opérations › Historique | Opérations, détails, annulation, événements et export. |
 | Opérations › Déclencheurs et outils | Débit de la console, diagnostic et bring-up P4, déclencheur UART et requête HTTP locale. |
 | Journal de l’agent | Journal commun aux deux vues, progression et résultats, réduction et effacement de l’affichage. |

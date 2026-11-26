@@ -71,7 +71,7 @@ peut être copié ou téléchargé en JSON. L’historique est conservé tant qu
 la page reste ouverte et que la carte reste dans la liste.
 **Opérations → ROM seule** ouvre une session
 sans stub sur la carte sélectionnée, affiche son identité et permet une
-lecture du JEDEC. Pendant cette session, **Consoles**, **Partitions**,
+lecture du JEDEC. Pendant cette session, **Consoles**,
 **Plan flash**, **Mémoire flash** et **Déclencheurs et outils** sont grisés
 pour la carte sélectionnée. Une boîte de dialogue propose un reset
 automatique depuis une console sur un port compatible. Elle guide
@@ -151,9 +151,10 @@ Voir la [référence de programmation](docs/api.md#programmation-flash).
 compatible, IDLab ouvre le chargeur depuis la console après confirmation.
 Cette commande supprime aussi les partitions et la configuration.
 
-Dans **Partitions**, un clic sur une ligne ouvre **Mémoire flash** et lit la
-partition. Pour effacer cette plage, utilise ensuite la corbeille dans **Mémoire
-flash**. Tu peux aussi renseigner un offset et une taille manuellement. Vérifie
+Dans **Mémoire flash**, lis la table des partitions et clique sur une ligne
+pour renseigner la plage et lancer sa lecture dans le même panneau. Pour
+effacer cette plage, utilise la corbeille. Tu peux aussi renseigner un offset
+et une taille manuellement. Vérifie
 la plage affichée et confirme par le nom de la carte. Seuls ses secteurs sont
 effacés et relus à `0xFF`.
 

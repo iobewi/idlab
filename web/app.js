@@ -125,7 +125,7 @@ function render() {
   consolesTab.title = consoleUnavailable
     ? selected.canReturnToConsole ? 'Utilise « Revenir à la console » dans les commandes de la carte.' : manualConsoleReturn
     : '';
-  for (const id of ['tab-partitions', 'tab-flash', 'tab-memory', 'tab-tools']) {
+  for (const id of ['tab-flash', 'tab-memory', 'tab-tools']) {
     const tab = $(id);
     if (romActive && tab.getAttribute('aria-selected') === 'true') {
       const active = document.activeElement;

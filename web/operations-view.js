@@ -98,15 +98,14 @@ export function renderPartitions(card, canRead) {
       hex(part.address), hex(part.size), hex(part.address + part.size)]) row.append(element('td', value));
     const enabled = Boolean(canRead && currentTable);
     row.setAttribute('aria-disabled', String(!enabled));
-    row.dataset.guideHelp = enabled ? 'Ouvre Mémoire flash et lit la partition « ' + part.label + ' ».'
+    row.dataset.guideHelp = enabled ? 'Renseigne la plage et lit la partition « ' + part.label + ' ».'
       : currentTable ? 'La lecture est indisponible dans l’état actuel de la carte.' : 'Relis la table des partitions.';
     if (!enabled) return row;
     row.tabIndex = 0;
     const read = () => {
       $('address').value = hex(part.address);
       $('size').value = hex(part.size);
-      $('tab-memory').click();
-      $('tab-memory').focus();
+      $('address').focus();
       $('read').click();
     };
     row.onclick = () => {
