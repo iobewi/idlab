@@ -117,12 +117,21 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(issued.status, 200)
         token = (await issued.json())["token"]
         self.assertTrue((await agent.receive_json(timeout=2))["has_token"])
+        path = "/api/v1/devices/board/control/connect"
+        denied = await self.client.get(path, headers=self.web | {
+            "Authorization": "Bearer invalid", "Upgrade": "websocket",
+        })
+        self.assertEqual((denied.status, await denied.json()), (403, {"error": "invalid_control_token"}))
         async with self.client.ws_connect(
             "/api/v1/devices/board/control/connect",
             headers=self.web | {"Authorization": "Bearer " + token},
         ) as control:
             self.assertTrue((await control.receive_json(timeout=2))["session"])
             self.assertEqual((await agent.receive_json(timeout=2))["control"], "external")
+            denied = await self.client.get(path, headers=self.web | {
+                "Authorization": "Bearer " + token, "Upgrade": "websocket",
+            })
+            self.assertEqual((denied.status, await denied.json()), (409, {"error": "device_busy"}))
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
 
         self.assertEqual((await self.request("POST", "start")).status, 200)
