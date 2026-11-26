@@ -1,6 +1,5 @@
 import { $, download, element, FLASH_PREVIEW_BYTES, flashNumber, formatFlashPreview, run, say } from './dom.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
-import { canErasePartition } from './flash-plan-view.js';
 
 function iconAction(icon, label, help) {
   const button = element('button', undefined, 'icon-action');
@@ -85,34 +84,39 @@ export function renderOperations(card) {
   $('download-dump').disabled = !card?.dump?.blob;
 }
 
-export function renderPartitions(card, canRead, available, openErase) {
+export function renderPartitions(card, canRead) {
   const table = card?.partitions;
+  const currentTable = card?.partitionsGeneration === card?.identity?.generation;
   $('read-partitions').disabled = !canRead;
   $('try-partition-address').disabled = !canRead;
   $('partition-suggestion').hidden = !card?.suggestPartition;
   $('partition-state').textContent = card?.partitionStatus ?? 'Aucune table lue.';
   $('partitions-body').replaceChildren(...(table ?? []).map(part => {
-    const row = element('tr');
+    const row = element('tr', undefined, 'partition-row');
     const hex = value => '0x' + value.toString(16);
     for (const value of [part.label, hex(part.type) + ' / ' + hex(part.subtype),
       hex(part.address), hex(part.size), hex(part.address + part.size)]) row.append(element('td', value));
-    const action = element('td');
-    const read = iconAction('read', 'Lire la partition ' + part.label,
-      'Ouvre Mémoire flash et lance la lecture de cette partition.');
-    read.disabled = !canRead;
-    read.onclick = () => {
+    const enabled = Boolean(canRead && currentTable);
+    row.setAttribute('aria-disabled', String(!enabled));
+    row.dataset.guideHelp = enabled ? 'Ouvre Mémoire flash et lit la partition « ' + part.label + ' ».'
+      : currentTable ? 'La lecture est indisponible dans l’état actuel de la carte.' : 'Relis la table des partitions.';
+    if (!enabled) return row;
+    row.tabIndex = 0;
+    const read = () => {
       $('address').value = hex(part.address);
       $('size').value = hex(part.size);
       $('tab-memory').click();
       $('tab-memory').focus();
       $('read').click();
     };
-    const erase = iconAction('trash', 'Effacer cette partition… ' + part.label,
-      'Ouvre la confirmation d’effacement de cette partition.');
-    erase.disabled = !canErasePartition(card, part, available);
-    erase.onclick = () => openErase(part, true);
-    action.append(read, erase);
-    row.append(action);
+    row.onclick = () => {
+      if (window.getSelection()?.isCollapsed !== false) read();
+    };
+    row.onkeydown = event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      if (!event.repeat) read();
+    };
     return row;
   }));
 }

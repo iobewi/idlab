@@ -39,11 +39,6 @@ function validRegion(card, {address, size}) {
     size >= FLASH_SECTOR && address % FLASH_SECTOR === 0 && size % FLASH_SECTOR === 0 && address + size <= capacity;
 }
 
-export function canErasePartition(card, part, available) {
-  return canErase(card, available, part) && card.partitionsGeneration === card.identity.generation &&
-    card.partitions?.includes(part) && validRegion(card, part);
-}
-
 export function renderFlashPlan(card, available) {
   const plan = planFor(card);
   const canProgram = Boolean(available && card?.identity?.capabilities.includes('flash.program'));
@@ -255,20 +250,19 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
       }
     });
   };
-  function allowedToErase(card, region, partition) {
+  function allowedToErase(card, region) {
     const plan = planFor(card);
     const available = plan?.available && !plan.working;
-    return partition ? canErasePartition(card, region, available) : canErase(card, available, region);
+    return canErase(card, available, region);
   }
-  function openErase(region, partition = false) {
+  function openErase(region) {
     const card = getSelected();
-    if (!allowedToErase(card, region, partition)) return;
+    if (!allowedToErase(card, region)) return;
     if (region && !validRegion(card, region)) throw new Error('Adresse et taille doivent être alignées sur 4 Kio et tenir dans la flash.');
-    eraseTarget = {card, generation: card.identity.generation, region, partition};
-    $('erase-title').textContent = partition ? 'Confirmer l’effacement de la partition'
-      : region ? 'Confirmer l’effacement de la plage' : 'Confirmer l’effacement intégral';
+    eraseTarget = {card, generation: card.identity.generation, region};
+    $('erase-title').textContent = region ? 'Confirmer l’effacement de la plage' : 'Confirmer l’effacement intégral';
     const capacity = card.identity.flash_size ?? card.lastIdentity?.flash_size;
-    const target = [card.name, region?.label];
+    const target = [card.name];
     if (region) target.push(`${hex(region.address)} à ${hex(region.address + region.size)} (fin exclue)`, `${region.size} octets`);
     else if (capacity) target.push(`${capacity / (1024 * 1024)} Mio`);
     $('erase-target').textContent = target.filter(Boolean).join(' · ');
@@ -289,12 +283,12 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
   dialog.querySelector('form').onsubmit = event => {
     event.preventDefault();
     if (!eraseTarget || confirmErase.disabled) return;
-    const {card, generation, region, partition} = eraseTarget;
+    const {card, generation, region} = eraseTarget;
     const typed = confirmation.value;
     dialog.close();
     return run(async () => {
       const plan = planFor(card);
-      if (card !== getSelected() || card.identity?.generation !== generation || !allowedToErase(card, region, partition)) {
+      if (card !== getSelected() || card.identity?.generation !== generation || !allowedToErase(card, region)) {
         throw new Error('La carte ou sa session a changé. Confirme à nouveau l’effacement.');
       }
       invalidate(plan);
@@ -415,5 +409,4 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
       void observeCard(card);
     }
   };
-  return openErase;
 }

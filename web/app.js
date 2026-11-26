@@ -145,7 +145,7 @@ function render() {
   const autoLoader = available && selected.mode === 'console' && selected.canEnterLoader;
   const canRead = autoLoader || (loader && info?.capabilities.includes('flash.read'));
   $('read').disabled = !canRead;
-  renderPartitions(selected, canRead, available, openErase);
+  renderPartitions(selected, canRead);
   renderFlashPlan(selected, available);
   const flashHint = $('flash-availability');
   flashHint.textContent = selected?.mode === 'connecting' && selected.requesting ? 'Transition console / chargeur…'
@@ -393,7 +393,7 @@ const updateWakeLock = wireWorkbenchShell(cards, stopTarget);
 const onRomCardChange = wireRomDialog({getSelected, hasCard: card => cards.get(card.name) === card});
 wireConsole({getSelected, render, observeCard});
 wireOperations({getSelected, render, observeCard});
-const openErase = wireFlashPlan({getSelected, render, observeCard});
+wireFlashPlan({getSelected, render, observeCard});
 
 const emptyCards = element('p', 'Aucune carte connectée dans cette fenêtre.', 'hint');
 emptyCards.id = 'empty-cards';

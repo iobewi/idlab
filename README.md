@@ -151,11 +151,11 @@ Voir la [référence de programmation](docs/api.md#programmation-flash).
 compatible, IDLab ouvre le chargeur depuis la console après confirmation.
 Cette commande supprime aussi les partitions et la configuration.
 
-Pour effacer une partition, lis la table puis utilise l’icône de corbeille sur
-sa ligne. Pour une zone libre, renseigne l’offset et la taille dans **Mémoire
-flash**, puis utilise la corbeille à côté de l’icône de lecture. Vérifie la plage
-affichée et confirme par le nom de la carte. Seuls ses secteurs sont effacés et
-relus à `0xFF`.
+Dans **Partitions**, un clic sur une ligne ouvre **Mémoire flash** et lit la
+partition. Pour effacer cette plage, utilise ensuite la corbeille dans **Mémoire
+flash**. Tu peux aussi renseigner un offset et une taille manuellement. Vérifie
+la plage affichée et confirme par le nom de la carte. Seuls ses secteurs sont
+effacés et relus à `0xFF`.
 
 Dans **Mémoire flash**, renseigne l’offset cible et choisis **Téléverser un
 binaire…**. Pour un dump, renseigne son offset d’origine. La taille vient du
