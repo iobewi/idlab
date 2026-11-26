@@ -44,6 +44,8 @@ class Operation:
     read_address: int | None = None
     read_progress: dict | None = None
     agent_disconnected: bool = False
+    task: asyncio.Task | None = None
+    cancel_requested_at: str | None = None
 
 
 @dataclass
@@ -223,6 +225,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
     detached_reads = {}
     tokens = {}
     sockets = set()
+    operation_tasks = set()
     CAMPAIGNS = web.AppKey("campaigns", Campaigns)
     OWNER = web.RequestKey("web_owner", str)
     BOARD_KEY = web.RequestKey("board_key", tuple)
@@ -389,6 +392,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         cancelled = pending and not pending.future.done() and not pending.cancelled
         if cancelled:
             pending.cancelled = True
+            pending.cancel_requested_at = datetime.now(timezone.utc).isoformat()
+            record = next((entry for entry in board.operations if entry['id'] == pending.id), None)
+            if record is not None:
+                record['cancelRequestedAt'] = pending.cancel_requested_at
+            board.log('Annulation demandée', pending.source, pending.session_id)
         await publish_control(board, key)
         if cancelled and not board.socket.closed:
             try:
@@ -601,12 +609,27 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 owners.append(None)
             request.app[CAMPAIGNS].require_owner(campaign_id, *owners)
             request.app[CAMPAIGNS].enter(campaign_id, record)
+        operation.task = asyncio.current_task()
         board.pending = operation
         board.operations.appendleft(record)
         board.log(f"Début · {command}", source, session_id)
         return operation, record, asyncio.get_running_loop().time()
 
     def finish_operation(request, board, record, started, result):
+        operation = board.pending
+        if operation:
+            if operation.cancel_requested_at:
+                record["cancelRequestedAt"] = operation.cancel_requested_at
+            if operation.agent_disconnected or not operation.future.done() or operation.future.cancelled():
+                record["termination"] = "unknown"
+                record["recoveryRequired"] = True
+            else:
+                response = operation.future.result()
+                record["termination"] = ("cancelled" if isinstance(response, dict)
+                                         and response.get("error") == "operation_cancelled"
+                                         else "completed" if response is not None else "unknown")
+                record["recoveryRequired"] = (record["termination"] == "unknown" or
+                                              isinstance(response, dict) and response.get("recovery_required") is True)
         record["state"] = "Terminée" if result else "Échec"
         if not result:
             record.setdefault("detail", "Opération interrompue ou en échec.")
@@ -687,7 +710,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             elif region_erase:
                 message.update(record_fields)
             await board.socket.send_json(message)
-            result = await asyncio.wait_for(operation.future, timeout=timeout)
+            result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=timeout)
             if control and control.stopped:
                 return problem(403, control.stopped)
             if operation.cancelled:
@@ -826,7 +849,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             if stream:
                 message["stream"] = True
             await board.socket.send_json(message)
-            result = await asyncio.wait_for(operation.future, timeout=read_timeout if not stream else read_timeout * (1 + (size - 1) // MAX_READ))
+            result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=read_timeout if not stream else read_timeout * (1 + (size - 1) // MAX_READ))
             data = result if not stream else None
             capacity = board.identity["flash_size"]
             if stream and isinstance(result, dict) and not result.get("error") and operation.received == size:
@@ -999,7 +1022,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         complete = False
         try:
             await board.socket.send_json({"id": operation.id, "command": "flash.program", "images": plan.images})
-            result = await asyncio.wait_for(operation.future, timeout=read_timeout * 2 * (1 + (total - 1) // MAX_READ))
+            result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=read_timeout * 2 * (1 + (total - 1) // MAX_READ))
             if control and control.stopped:
                 return problem(403, control.stopped)
             if operation.cancelled:
@@ -1050,8 +1073,33 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         board = boards.get(key)
         return web.json_response(board.describe()) if board and not board.socket.closed else problem(404, "device_disconnected")
 
+    def supervise_operation(handler):
+        async def supervised(request):
+            task = asyncio.create_task(handler(request))
+            operation_tasks.add(task)
+
+            def finished(done):
+                operation_tasks.discard(done)
+                if not done.cancelled():
+                    done.exception()  # Retrieve errors even if the HTTP peer left.
+
+            task.add_done_callback(finished)
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                board = boards.get(request[BOARD_KEY])
+                if board and board.pending and board.pending.task is task:
+                    await request_operation_stop(request[BOARD_KEY], board)
+                elif not task.done():
+                    # No operation has been reserved yet; do not start one later.
+                    task.cancel()
+                raise
+        return supervised
+
     async def close_agents(app):
         await asyncio.gather(*(socket.close(code=1001) for socket in tuple(sockets)))
+        if operation_tasks:
+            await asyncio.gather(*tuple(operation_tasks), return_exceptions=True)
 
     async def revalidate_browser_files(request, response):
         if request.path in {"/", "/esptool.js"} or request.path.startswith("/web/"):
@@ -1085,12 +1133,12 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         web.get("/api/v1/devices/{name}", identify),
         web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke}", manage_control),
         web.get("/api/v1/devices/{name}/control/connect", connect_control),
-        web.post("/api/v1/devices/{name}/command", device_command),
+        web.post("/api/v1/devices/{name}/command", supervise_operation(device_command)),
         web.get("/api/v1/devices/{name}/uart", read_uart),
         web.get("/api/v1/devices/{name}/activity", read_activity),
-        web.post("/api/v1/devices/{name}/flash/read", read_flash),
+        web.post("/api/v1/devices/{name}/flash/read", supervise_operation(read_flash)),
         web.post("/api/v1/devices/{name}/flash/plan", prepare_program),
-        web.post("/api/v1/devices/{name}/flash/program", program_flash),
+        web.post("/api/v1/devices/{name}/flash/program", supervise_operation(program_flash)),
         web.get(r"/api/v1/devices/{name}/flash/program/{operation_id:[0-9a-f]{32}}/{index:[0-9]{1,2}}", program_image),
         web.get("/agent", agent),
         *(web.get(f"/web/{module}", serial_module) for module in SERIAL_MODULES),
