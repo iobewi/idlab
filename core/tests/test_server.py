@@ -533,6 +533,16 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(record["consoleRestored"], False if cause == "serial_timeout" else None)
                 if cause == "serial_timeout":
                     self.assertEqual(record["consoleRecoveryError"], "serial_closed")
+                if cause in ("flash_read_server_timeout", "agent_disconnected"):
+                    blocked = await self.read("board", new_generation)
+                    self.assertEqual((blocked.status, await blocked.json()),
+                                     (409, {"error": "device_recovery_required"}))
+                    recovered = await self.browser.post(
+                        "/api/v1/devices/board/control/recover", headers=self.local,
+                        json={"generation": new_generation, "confirmation": "board"})
+                    self.assertEqual((recovered.status, await recovered.json()),
+                                     (200, {"control": "available"}))
+                    self.assertEqual((await fresh.receive_json(timeout=2))["control"], "available")
                 await fresh.close()
 
     async def test_revocation_preserves_secondary_serial_error(self):
