@@ -34,6 +34,8 @@ MAC = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", re.IGNORECASE)
 class Operation:
     id: str
     future: asyncio.Future
+    source: str
+    session_id: str
     cancelled: bool = False
     chunks: list | None = None
     size: int = 0
@@ -46,6 +48,7 @@ class Control:
     credential: str
     socket: web.WebSocketResponse
     stopped: str | None = None
+    session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
 
 @dataclass
@@ -77,6 +80,13 @@ class Board:
         state = ("stopping" if stopping else
                  "busy" if self.pending else "external" if self.control else "available")
         return {"generation": self.generation, **self.identity, "control": state}
+
+    def log(self, message, source=None, session_id=None):
+        entry = {"at": datetime.now(timezone.utc).isoformat(), "message": message}
+        if source:
+            entry["source"] = source
+            entry["session_id"] = session_id
+        self.journal.append(entry)
 
 
 def problem(status, code):
@@ -469,14 +479,21 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                             board.uart_changed.set()
                             board.uart_changed = asyncio.Event()
                     elif isinstance(event.get("journal"), str):
-                        board.journal.append({"at": datetime.now(timezone.utc).isoformat(), "message": event["journal"][:500]})
+                        operation_id = event.get("operation")
+                        if not isinstance(operation_id, str):
+                            board.log(event["journal"][:500])
+                        elif pending and operation_id == pending.id:
+                            board.log(event["journal"][:500], pending.source, pending.session_id)
+                        else:
+                            record = next((entry for entry in board.operations if entry["id"] == operation_id), {})
+                            board.log(event["journal"][:500], record.get("source"), record.get("session_id"))
                     elif "progress" in event and pending and event.get("id") == pending.id:
                         progress = event["progress"]
                         if (not isinstance(progress, dict) or
                                 any(type(progress.get(key)) is not int for key in ("address", "received", "total")) or
                                 not 0 <= progress["received"] <= progress["total"] <= MAX_FLASH):
                             break
-                        board.progress = progress
+                        board.progress = progress | {"source": pending.source, "session_id": pending.session_id}
                     elif pending and not pending.future.done() and event.get("result") == pending.id:
                         pending.future.set_result(event)
                     else:
@@ -524,9 +541,16 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         return None
 
     def start_operation(request, board, name, command, fields, campaign_id):
-        operation = Operation(uuid.uuid4().hex, asyncio.get_running_loop().create_future())
+        if request[LOCAL_OPERATOR]:
+            source = "web"
+            session_id = hashlib.sha256(f"idlab-web-origin:{request[OWNER]}".encode()).hexdigest()[:12]
+        else:
+            source = "python" if request.headers.get("X-IDLab-Client") == "python" else "api"
+            session_id = board.control.session_id
+        operation = Operation(uuid.uuid4().hex, asyncio.get_running_loop().create_future(), source, session_id)
         record = {"id": operation.id, "device": name, "command": command, "state": "En cours",
-                  "startedAt": datetime.now(timezone.utc).isoformat(), **fields}
+                  "startedAt": datetime.now(timezone.utc).isoformat(), "source": source,
+                  "session_id": session_id, **fields}
         if campaign_id:
             record.update(campaign_id=campaign_id, generation=board.generation)
             owners = [request[OWNER]]
@@ -536,6 +560,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             request.app[CAMPAIGNS].enter(campaign_id, record)
         board.pending = operation
         board.operations.appendleft(record)
+        board.log(f"Début · {command}", source, session_id)
         return operation, record, asyncio.get_running_loop().time()
 
     def finish_operation(request, board, record, started, result):

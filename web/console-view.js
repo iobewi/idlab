@@ -1,4 +1,4 @@
-import { $, clock, download, element, number, say } from './dom.js';
+import { $, clock, download, element, number, operationOrigin, say } from './dom.js';
 import { BootIdentity } from './boot-identity.js';
 import { ConsoleBuffer } from './console-buffer.js';
 import { updateHelp } from './control-help.js';
@@ -62,7 +62,8 @@ export function renderJournal(card) {
   const follow = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
   const journal = card?.lastJournal ?? [];
   const rows = journal.filter(entry => entry.at > (card.journalAfter ?? ''))
-    .map(entry => element('p', clock.format(new Date(entry.at)) + ' · ' + entry.message, 'journal-row'));
+    .map(entry => element('p', [clock.format(new Date(entry.at)), operationOrigin(entry), entry.message]
+      .filter(Boolean).join(' · '), 'journal-row'));
   $('agent-log-entries').replaceChildren(...rows);
   $('agent-log-copy').disabled = rows.length === 0;
   renderFlashProgress(card);
@@ -79,10 +80,11 @@ export function renderFlashProgress(card) {
     const {address, received, total, phase} = progress;
     const labels = {write: 'Programmation flash', verify: 'Vérification flash', 'erase-verify': 'Vérification de l’effacement'};
     const label = labels[phase] ?? 'Lecture flash';
-    line.textContent = phase === 'erase' ? 'Effacement flash à 0x' + address.toString(16) + ' · ' +
+    const message = phase === 'erase' ? 'Effacement flash à 0x' + address.toString(16) + ' · ' +
       number.format(total) + ' octets…' : label + ' à 0x' + address.toString(16) + ' · ' +
       number.format(received) + ' / ' + number.format(total) + ' octets · ' +
       Math.floor(received * 100 / total) + ' %';
+    line.textContent = [operationOrigin(progress), message].filter(Boolean).join(' · ');
   }
   if (follow) log.scrollTop = log.scrollHeight;
 }

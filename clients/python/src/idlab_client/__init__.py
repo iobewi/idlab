@@ -334,7 +334,9 @@ class IDLabClient:
             raise IDLabError("Invalid board identity") from error
 
     def _request(self, path, arguments=None, *, expected_bytes=None, timeout=None, method=None):
-        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        headers = {"X-IDLab-Client": "python"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
         body = None
         if arguments is not None:
             headers["Content-Type"] = "application/json"

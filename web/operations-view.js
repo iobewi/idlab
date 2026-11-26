@@ -1,4 +1,4 @@
-import { $, download, element, FLASH_PREVIEW_BYTES, flashNumber, formatFlashPreview, run, say } from './dom.js';
+import { $, download, element, FLASH_PREVIEW_BYTES, flashNumber, formatFlashPreview, operationOrigin, run, say } from './dom.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
 const alternatePartitionAddress = new Map([[0x8000, 0x10000], [0x10000, 0x8000]]);
@@ -37,7 +37,7 @@ function operationDetails(entry) {
   save.onclick = () => download(new Blob([proof + '\n'], {type: 'application/json'}),
     'idlab-' + entry.device + '-operation-' + entry.id + '.json');
   actions.append(copy, save);
-  toolbar.append(element('span', 'Détail de l’opération'), actions);
+  toolbar.append(element('span', ['Détail de l’opération', operationOrigin(entry)].filter(Boolean).join(' · ')), actions);
   panel.append(toolbar, element('pre', proof, 'operation-detail-json result'));
   cell.append(panel);
   row.append(cell);

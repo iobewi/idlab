@@ -5,6 +5,11 @@ export function flashNumber(value) {
 }
 export const FLASH_PREVIEW_BYTES = 256;
 export const formatFlashPreview = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(' ');
+
+export function operationOrigin({source, session_id: sessionId}) {
+  const label = {web: 'Web', python: 'Python', api: 'API'}[source];
+  return label ? `${label}${sessionId ? ' · ' + sessionId : ''}` : '';
+}
 let noticeTimer;
 
 export function say(message, {temporary = false} = {}) {

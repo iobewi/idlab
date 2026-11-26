@@ -175,6 +175,11 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                              ("flash.read", 4096, 4))
             await socket.send_bytes(b"abcd")
             self.assertEqual(await task, b"abcd")
+            activity = await asyncio.to_thread(controller.activity)
+            operation = activity["operations"][0]
+            self.assertEqual(operation["source"], "python")
+            self.assertRegex(operation["session_id"], r"^[0-9a-f]{12}$")
+            self.assertEqual(activity["journal"][-1]["session_id"], operation["session_id"])
 
     async def test_old_handle_refused_after_reconnection(self):
         socket = await self.connect()

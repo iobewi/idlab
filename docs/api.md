@@ -157,6 +157,10 @@ entre 0 et 5000 et vaut 0 par défaut.
 carte, la progression en cours, jusqu’à 300 messages du journal et les
 100 dernières opérations de cette génération. La consultation utilise
 les mêmes droits que la lecture UART. En Python, utiliser `board.activity()`.
+Les opérations, la progression et les messages associés contiennent `source`
+(`web`, `python` ou `api`) et `session_id`. L’identifiant sert à corréler les
+opérations d’une session et ne donne aucun accès. Le SDK déclare `python` via
+`X-IDLab-Client: python`. Cet en-tête sert à l’affichage et ne donne aucun droit.
 
 Un nom de carte contient de 1 à 48 caractères ASCII parmi les lettres,
 chiffres, tirets et underscores. Le premier caractère est alphanumérique.

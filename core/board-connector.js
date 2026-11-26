@@ -291,7 +291,7 @@ export class BoardConnector {
 
   #log(message) {
     if (this.identity && this.socket?.readyState === 1) {
-      this.socket.send(JSON.stringify({journal: message}));
+      this.socket.send(JSON.stringify({journal: message, operation: this.activeCommand ?? undefined}));
     } else {
       this.startupJournal.push(message);
       if (this.startupJournal.length > 20) this.startupJournal.shift();
@@ -419,7 +419,7 @@ export class BoardConnector {
     } else if (command === 'uart.write' && this.mode === 'console') {
       const bytes = Uint8Array.from(hex.match(/../g), byte => parseInt(byte, 16));
       await this.session.write(bytes);
-      this.socket.send(JSON.stringify({journal: 'UART TX · ' + hex}));
+      this.#log('UART TX · ' + hex);
     } else if (command === 'mode.rom') {
       await this.#enterRom(reset);
     } else if (command === 'rom.jedec' && this.mode === 'loader' && this.identity?.loader === 'rom') {
