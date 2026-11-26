@@ -79,10 +79,11 @@ class Board:
     operations: deque = field(default_factory=lambda: deque(maxlen=100))
     progress: dict | None = None
     program_plan: ProgramPlan | None = None
+    recovery_required: bool = False
 
     def describe(self):
         stopping = (self.control and self.control.stopped) or (self.pending and self.pending.cancelled)
-        state = ("stopping" if stopping else
+        state = ("recovery_required" if self.recovery_required else "stopping" if stopping else
                  "busy" if self.pending else "external" if self.control else "available")
         return {"generation": self.generation, **self.identity, "control": state}
 
@@ -223,6 +224,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         origins.add(public_origin)
     boards = {}
     detached_reads = {}
+    recovery_keys = set()
     tokens = {}
     sockets = set()
     operation_tasks = set()
@@ -410,6 +412,24 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         key = request[BOARD_KEY]
         action = request.match_info["action"]
         board = boards.get(key)
+        if action == "recover":
+            if not board or board.socket.closed:
+                return problem(404, "device_disconnected")
+            if board.pending or board.control:
+                return problem(409, "device_busy")
+            try:
+                payload = await request.json()
+            except (ValueError, TypeError):
+                return problem(400, "invalid_json")
+            if payload != {"generation": board.generation, "confirmation": key[1]}:
+                return problem(400, "recovery_confirmation_required")
+            if boards.get(key) is not board or board.pending or board.control or board.socket.closed:
+                return problem(409, "device_session_changed")
+            recovery_keys.discard(key)
+            board.recovery_required = False
+            board.log("Récupération matérielle confirmée par l’opérateur")
+            await publish_control(board, key)
+            return web.json_response({"control": board.describe()["control"]})
         if action == "token":
             if not board or board.socket.closed:
                 return problem(404, "device_disconnected")
@@ -446,6 +466,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return problem(404, "device_disconnected")
         if (board.port_key or board.identity["mac"]) != grant[1]:
             return problem(403, "control_token_device_mismatch")
+        if board.recovery_required:
+            return problem(409, "device_recovery_required")
         if board.control or board.pending:
             return problem(409, "device_busy")
         socket = web.WebSocketResponse(heartbeat=20)
@@ -486,6 +508,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             board = Board(uuid.uuid4().hex, socket, identity, port_key=port_key)
             if port_key:
                 board.operations.extend(detached_reads.pop((*key, port_key), ()))
+            board.recovery_required = key in recovery_keys
             boards[key] = board
             await socket.send_json({"generation": board.generation, "has_token": key in tokens})
             async for message in socket:
@@ -559,6 +582,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             pass
         finally:
             if boards.get(key) is board and board is not None:
+                if board.pending and (not board.pending.future.done() or board.pending.future.cancelled()):
+                    recovery_keys.add(key)
                 del boards[key]
                 if board.port_key:
                     # Keep recent failed reads in the existing history when the same connector reconnects.
@@ -579,6 +604,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         return socket
 
     def command_refusal(request, board):
+        if board.recovery_required:
+            return problem(409, "device_recovery_required")
         control = board.control
         if request[LOCAL_OPERATOR]:
             if control:
@@ -630,6 +657,12 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                                          else "completed" if response is not None else "unknown")
                 record["recoveryRequired"] = (record["termination"] == "unknown" or
                                               isinstance(response, dict) and response.get("recovery_required") is True)
+        if record.get("recoveryRequired"):
+            recovery_keys.add(request[BOARD_KEY])
+            board.recovery_required = True
+            replacement = boards.get(request[BOARD_KEY])
+            if replacement is not None:
+                replacement.recovery_required = True
         record["state"] = "Terminée" if result else "Échec"
         if not result:
             record.setdefault("detail", "Opération interrompue ou en échec.")
@@ -1138,7 +1171,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         web.post("/api/v1/campaigns/{id}/abort", abort_campaign),
         web.get("/api/v1/devices", devices),
         web.get("/api/v1/devices/{name}", identify),
-        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke}", manage_control),
+        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke|recover}", manage_control),
         web.get("/api/v1/devices/{name}/control/connect", connect_control),
         web.post("/api/v1/devices/{name}/command", supervise_operation(device_command)),
         web.get("/api/v1/devices/{name}/uart", read_uart),
@@ -1165,4 +1198,4 @@ if __name__ == "__main__":
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     app = create_app(port=public_port, token=os.environ.get("IDLAB_TOKEN"),
                      public_origin=os.environ.get("IDLAB_PUBLIC_ORIGIN"), campaign_db=state_dir / "campaigns.sqlite3")
-    web.run_app(app, host="127.0.0.1", port=port, shutdown_timeout=3)
+    web.run_app(app, host="127.0.0.1", port=port, shutdown_timeout=3, handler_cancellation=True)
