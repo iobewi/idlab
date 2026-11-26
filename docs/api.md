@@ -190,6 +190,18 @@ au serveur par blocs de 4 Mio maximum. Le champ `campaign_id` est facultatif. Un
 lecture à la fois. Une lecture incomplète renvoie une erreur, ferme la session
 et ne livre aucun résultat partiel.
 
+L’historique conserve le dernier nombre d’octets communiqué par l’agent
+(`bytesReceived`), l’offset absolu de fin exclue (`lastOffset`) et le nombre
+d’octets binaires acceptés par le serveur (`bytesTransferred`). En l’absence
+d’un événement de progression, `bytesReceived` et `lastOffset` valent `null`.
+Le débit UART du chargeur est indiqué par `baudrate` lorsqu’il est connu.
+Une lecture échouée conserve son `error` d’origine dans l’historique, ainsi
+que `consoleRestored` et, si disponible, `consoleRecoveryError`. Un résultat
+de récupération inconnu vaut `null`. Le code de la réponse HTTP reste le
+même. Les échecs récents sont récupérables après une reconnexion du même
+connecteur dans la session Web en cours, dans la limite de l’historique. Les
+lectures associées à une campagne conservent leur diagnostic dans la campagne.
+
 ## Programmation flash
 
 La carte doit être en mode chargeur avec un stub, une capacité connue et la

@@ -41,6 +41,9 @@ class Operation:
     size: int = 0
     received: int = 0
     binaries: list[bytes] | None = None
+    read_address: int | None = None
+    read_progress: dict | None = None
+    agent_disconnected: bool = False
 
 
 @dataclass
@@ -200,6 +203,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             raise ValueError("IDLAB_PUBLIC_ORIGIN must be an HTTPS origin without a path")
         origins.add(public_origin)
     boards = {}
+    detached_reads = {}
     tokens = {}
     sockets = set()
     CAMPAIGNS = web.AppKey("campaigns", Campaigns)
@@ -455,6 +459,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             if port_key is not None and (not isinstance(port_key, str) or not re.fullmatch(r"[0-9a-f-]{36}", port_key)):
                 raise ValueError("invalid_port_key")
             board = Board(uuid.uuid4().hex, socket, identity, port_key=port_key)
+            if port_key:
+                board.operations.extend(detached_reads.pop((*key, port_key), ()))
             boards[key] = board
             await socket.send_json({"generation": board.generation, "has_token": key in tokens})
             async for message in socket:
@@ -494,6 +500,15 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                                 not 0 <= progress["received"] <= progress["total"] <= MAX_FLASH):
                             break
                         board.progress = progress | {"source": pending.source, "session_id": pending.session_id}
+                        previous = pending.read_progress
+                        if (progress["address"] == pending.read_address and progress["total"] == pending.size and
+                                (previous is None or progress["received"] >= previous["received"])):
+                            baudrate = progress.get("baudrate")
+                            pending.read_progress = {
+                                "received": progress["received"],
+                                "baudrate": baudrate if type(baudrate) is int and baudrate > 0
+                                else previous["baudrate"] if previous else None,
+                            }
                     elif pending and not pending.future.done() and event.get("result") == pending.id:
                         pending.future.set_result(event)
                     else:
@@ -503,6 +518,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                     break
                 if message.type == WSMsgType.BINARY:
                     if pending.chunks is None:
+                        if pending.read_address is not None:
+                            pending.received = len(message.data)
                         pending.future.set_result(message.data)
                     elif not message.data or pending.received + len(message.data) > pending.size:
                         pending.future.set_result(None)
@@ -518,8 +535,17 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         finally:
             if boards.get(key) is board and board is not None:
                 del boards[key]
+                if board.port_key:
+                    # Keep recent failed reads in the existing history when the same connector reconnects.
+                    failures = [entry for entry in board.operations
+                                if entry["command"] == "flash.read" and entry["state"] != "Terminée"]
+                    if failures:
+                        detached_reads[(*key, board.port_key)] = failures
+                        if len(detached_reads) > 32:
+                            detached_reads.pop(next(iter(detached_reads)))
                 board.uart_changed.set()
                 if board.pending and not board.pending.future.done():
+                    board.pending.agent_disconnected = True
                     board.pending.future.set_result(None)
                 if board.control:
                     await stop_control(key, board, board.control, "device_session_changed")
@@ -769,11 +795,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         operation, record, started = start_operation(
             request, board, name, "flash.read", {"address": address, "size": size}, campaign_id,
         )
+        operation.size = size
+        operation.read_address = address
         if stream:
             operation.chunks = []
-            operation.size = size
         complete = False
         result = None
+        failure = "read_incomplete"
         try:
             message = {"id": operation.id, "command": "flash.read", "address": address, "size": size}
             if stream:
@@ -791,14 +819,15 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 return problem(403, control.stopped)
             if operation.cancelled:
                 complete = False
-                record["detail"] = "Arrêt demandé par l’opérateur."
                 return problem(409, "operation_cancelled")
             if complete:
                 record.update(bytesRead=size, preview=data[:256].hex(" "), detail=f"{size} octets lus")
                 return web.Response(body=data, content_type="application/octet-stream",
                                     headers={"X-IDLab-Flash-Size": str(capacity)})
-        except (ConnectionError, TimeoutError):
-            pass
+        except TimeoutError:
+            failure = "flash_read_server_timeout"
+        except ConnectionError:
+            operation.agent_disconnected = True
         finally:
             try:
                 recoverable = isinstance(result, dict) and (
@@ -809,7 +838,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 if not complete and (not recoverable or control and control.stopped):
                     await board.socket.close(code=1011)
             finally:
-                finish_operation(request, board, record, started, complete and not (control and control.stopped))
+                succeeded = complete and not (control and control.stopped)
+                record_read_diagnostic(operation, record, result, failure, control, succeeded)
+                finish_operation(request, board, record, started, succeeded)
+                if not succeeded:
+                    board.log(f"{record['detail']} · {record['duration']}", operation.source, operation.session_id)
                 if control and control.stopped and board.control is control:
                     board.control = None
                     await publish_control(board, key)
@@ -822,6 +855,50 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 return problem(400, "invalid_flash_range")
             return problem(502, "device_command_failed")
         return problem(502, "read_incomplete_reconnect_required")
+
+    def record_read_diagnostic(operation, record, result, failure, control, succeeded):
+        progress = operation.read_progress
+        received = progress["received"] if progress is not None else None
+        record.update(bytesReceived=received, bytesTransferred=operation.received,
+                      lastOffset=record["address"] + received if received is not None else None,
+                      baudrate=progress["baudrate"] if progress is not None else None)
+        if succeeded:
+            return
+        response = result if isinstance(result, dict) else {}
+        diagnostic = response.get("read_diagnostic")
+        diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
+
+        def error_code(value):
+            return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", value) else None
+
+        if operation.agent_disconnected:
+            failure = "agent_disconnected"
+        elif control and control.stopped:
+            failure = control.stopped
+        elif operation.cancelled:
+            failure = "operation_cancelled"
+        restored = diagnostic.get("console_restored", response.get("console_restored") if not diagnostic else None)
+        error = error_code(diagnostic.get("error")) or error_code(response.get("error")) or failure
+        record.update(error=error, consoleRestored=restored if type(restored) is bool else None)
+        recovery_error = error_code(diagnostic.get("console_error"))
+        if recovery_error:
+            record["consoleRecoveryError"] = recovery_error
+
+        detail = [f"Lecture flash en échec · {error}"]
+        if record["lastOffset"] is not None:
+            detail.append(f"{received}/{record['size']} octets reçus par l’agent · offset 0x{record['lastOffset']:x}")
+        else:
+            detail.append("Progression agent inconnue")
+        detail.append(f"{operation.received} octets transférés au serveur")
+        if record["baudrate"] is not None:
+            detail.append(f"{record['baudrate']} bauds")
+        if restored is True:
+            detail.append("Console rétablie")
+        elif restored is False:
+            detail.append("Console non rétablie" + (f" ({recovery_error})" if recovery_error else ""))
+        else:
+            detail.append("Récupération console non renseignée")
+        record["detail"] = " · ".join(detail)
 
     def programming_board(request, generation):
         board = boards.get(request[BOARD_KEY])

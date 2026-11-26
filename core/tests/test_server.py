@@ -73,12 +73,13 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.browser.close()
 
-    async def board(self, name, loader="stub", *, browser=None):
+    async def board(self, name, loader="stub", *, browser=None, port_key=None):
         ws = await (browser or self.browser).ws_connect("/agent?device=" + name, headers=self.local)
         await ws.send_json({
             "chip": "esp32s3", "mac": "10:20:30:40:50:60",
             "loader": loader, "transport": "usb_serial_jtag",
             "flash_size": 16 * 1024 * 1024 if loader == "stub" else None,
+            "port_key": port_key,
         })
         return ws, (await ws.receive_json())["generation"]
 
@@ -273,6 +274,10 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         response = await read
         self.assertEqual((response.status, await response.json()), (409, {"error": "operation_cancelled"}))
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
+        path = f"/api/v1/devices/board/activity?generation={generation}"
+        stopped = (await (await self.browser.get(path, headers=self.local)).json())["operations"][0]
+        self.assertEqual((stopped["state"], stopped["error"], stopped["bytesReceived"], stopped["bytesTransferred"]),
+                         ("Échec", "operation_cancelled", None, 0))
         retry = asyncio.create_task(self.read("board", generation))
         await agent.receive_json(timeout=2)
         await agent.send_bytes(b"data")
@@ -415,6 +420,70 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(observed["progress"])
         self.assertEqual(len(observed["operations"]), 1)
         self.assertEqual(observed["operations"][0]["bytesRead"], size)
+        self.assertEqual(observed["operations"][0]["bytesTransferred"], size)
+
+    async def test_partial_read_preserves_agent_progress_and_original_error_after_console_recovery(self):
+        port_key = "00000000-0000-4000-8000-000000000001"
+        ws, generation = await self.board("board", port_key=port_key)
+        start, size, received = 0x10000, 4 * 1024 * 1024 + 4096, 4 * 1024 * 1024 + 256
+        read = asyncio.create_task(self.read("board", generation, address=start, size=size))
+        command = await ws.receive_json(timeout=2)
+        await ws.send_bytes(b"a" * (4 * 1024 * 1024))
+        await ws.send_json({"id": command["id"], "progress": {
+            "address": start, "received": received, "total": size, "baudrate": 115200,
+        }})
+        await ws.send_json({"identity": {"mode": "console", "transport": "usb_uart"}})
+        await ws.receive_json(timeout=2)
+        await ws.send_json({"result": command["id"], "error": "device_command_failed", "console_restored": True,
+                            "read_diagnostic": {"error": "serial_timeout", "console_restored": True}})
+        response = await read
+        self.assertEqual((response.status, await response.json()), (502, {"error": "device_command_failed"}))
+        activity = await self.browser.get(f"/api/v1/devices/board/activity?generation={generation}", headers=self.local)
+        observed = await activity.json()
+        operation = observed["operations"][0]
+        self.assertEqual({field: operation[field] for field in (
+            "state", "address", "size", "bytesReceived", "bytesTransferred", "lastOffset", "baudrate", "error", "consoleRestored", "source",
+        )}, {"state": "Échec", "address": start, "size": size, "bytesReceived": received,
+             "bytesTransferred": 4 * 1024 * 1024, "lastOffset": start + received, "baudrate": 115200,
+             "error": "serial_timeout", "consoleRestored": True, "source": "web"})
+        self.assertRegex(operation["duration"], r"^\d+ ms$")
+        self.assertEqual(operation["session_id"], observed["journal"][-1]["session_id"])
+        self.assertIn("serial_timeout", observed["journal"][-1]["message"])
+        self.assertIsNone(observed["progress"])
+
+    async def test_interrupted_read_history_survives_reconnect_of_same_connector(self):
+        port_key = "00000000-0000-4000-8000-000000000001"
+        for cause in ("flash_read_server_timeout", "agent_disconnected", "serial_timeout"):
+            with self.subTest(cause=cause):
+                ws, generation = await self.board("board", port_key=port_key)
+                read = asyncio.create_task(self.read("board", generation, address=4096))
+                command = await ws.receive_json(timeout=2)
+                if cause == "agent_disconnected":
+                    await ws.close()
+                else:
+                    await ws.send_json({"id": command["id"], "progress": {
+                        "address": 4096, "received": 0, "total": 4, "baudrate": 115200,
+                    }})
+                    if cause == "serial_timeout":
+                        await ws.send_json({"result": command["id"], "error": "device_command_failed",
+                                            "read_diagnostic": {"error": cause, "console_restored": False,
+                                                                "console_error": "serial_closed"}})
+                    self.assertEqual((await ws.receive(timeout=2)).type.name, "CLOSE")
+                self.assertEqual((await read).status, 502)
+                fresh, new_generation = await self.board("board", port_key=port_key)
+                self.assertNotEqual(generation, new_generation)
+                response = await self.browser.get(f"/api/v1/devices/board/activity?generation={new_generation}", headers=self.local)
+                record = (await response.json())["operations"][0]
+                self.assertEqual((record["state"], record["error"], record["bytesTransferred"]), ("Échec", cause, 0))
+                if cause == "agent_disconnected":
+                    self.assertIsNone(record["bytesReceived"])
+                    self.assertIsNone(record["lastOffset"])
+                else:
+                    self.assertEqual((record["bytesReceived"], record["lastOffset"]), (0, 4096))
+                self.assertIs(record["consoleRestored"], False if cause == "serial_timeout" else None)
+                if cause == "serial_timeout":
+                    self.assertEqual(record["consoleRecoveryError"], "serial_closed")
+                await fresh.close()
 
     async def test_short_read_invalidates_session(self):
         ws, generation = await self.board("board")
