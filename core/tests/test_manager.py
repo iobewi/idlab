@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from aiohttp import CookieJar
+from aiohttp import CookieJar, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from manager import HTTPService, create_app
@@ -159,6 +159,47 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         final = self.service.process
         await self.client.close()
         self.assertIsNotNone(final.returncode)
+
+    async def test_proxy_preserves_handshake_status_and_close_reason(self):
+        async def upstream(request):
+            code = request.query.get("code")
+            if code:
+                status = int(request.query["status"])
+                return web.json_response({"error": code}, status=status,
+                                         headers={"X-IDLab-Error": code})
+            socket = web.WebSocketResponse()
+            await socket.prepare(request)
+            await socket.close(code=1008, message=b"control_revoked")
+            return socket
+
+        app = web.Application()
+        app.router.add_get("/agent", upstream)
+        backend = TestServer(app)
+        await backend.start_server()
+        self.addAsyncCleanup(backend.close)
+        self.service.port = backend.port
+        # A simulated running child; no real process or hardware is involved.
+        class Running:
+            returncode = None
+        self.service.process = Running()
+        self.addCleanup(setattr, self.service, "process", None)
+        try:
+            for status, code in [(403, "control_token_device_mismatch"),
+                                 (404, "device_disconnected"),
+                                 (409, "device_busy"),
+                                 (503, "idlab_http_unavailable")]:
+                response = await self.client.get(
+                    "/agent", params={"status": status, "code": code},
+                    headers=self.web | {"Upgrade": "websocket"},
+                )
+                self.assertEqual((response.status, await response.json()), (status, {"error": code}))
+            socket = await self.client.ws_connect("/agent", headers=self.web)
+            message = await socket.receive(timeout=2)
+            self.assertEqual((message.type.name, message.data, message.extra),
+                             ("CLOSE", 1008, "control_revoked"))
+            await socket.close()
+        finally:
+            self.service.process = None
 
     async def test_refuses_untrusted_or_unexpected_requests(self):
         for method, path, kwargs, status in [
