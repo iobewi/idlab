@@ -282,6 +282,7 @@ export class BoardConnector {
           : command.command === 'flash.read' && readDiagnostic?.error
             ? readDiagnostic.error : diagnosticCode(error);
         socket.send(JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
+            recovery_required: Boolean(this.flashTransferInterrupted || this.mode === 'connecting'),
             read_diagnostic: readDiagnostic ? {
               ...readDiagnostic, error: readDiagnostic.error ?? diagnosticCode(error, code),
             } : undefined,
