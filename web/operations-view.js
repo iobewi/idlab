@@ -1,6 +1,9 @@
 import { $, download, element, FLASH_PREVIEW_BYTES, flashNumber, formatFlashPreview, run, say } from './dom.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 
+const alternatePartitionAddress = new Map([[0x8000, 0x10000], [0x10000, 0x8000]]);
+const hex = value => '0x' + value.toString(16);
+
 function iconAction(icon, label, help) {
   const button = element('button', undefined, 'icon-action');
   button.type = 'button';
@@ -88,12 +91,17 @@ export function renderPartitions(card, canRead) {
   const table = card?.partitions;
   const currentTable = card?.partitionsGeneration === card?.identity?.generation;
   $('read-partitions').disabled = !canRead;
-  $('try-partition-address').disabled = !canRead;
-  $('partition-suggestion').hidden = !card?.suggestPartition;
+  const suggestion = card?.suggestPartition;
+  const tryAddress = $('try-partition-address');
+  tryAddress.disabled = !canRead || !suggestion;
+  $('partition-suggestion').hidden = !suggestion;
+  if (suggestion) {
+    $('partition-suggestion-text').textContent = `Aucune table valide à ${hex(suggestion.failed)}. Essaie l’autre adresse courante.`;
+    tryAddress.textContent = `Essayer ${hex(suggestion.address)}`;
+  }
   $('partition-state').textContent = card?.partitionStatus ?? 'Aucune table lue.';
   $('partitions-body').replaceChildren(...(table ?? []).map(part => {
     const row = element('tr', undefined, 'partition-row');
-    const hex = value => '0x' + value.toString(16);
     for (const value of [part.label, hex(part.type) + ' / ' + hex(part.subtype),
       hex(part.address), hex(part.size), hex(part.address + part.size)]) row.append(element('td', value));
     const enabled = Boolean(canRead && currentTable);
@@ -131,7 +139,7 @@ export function wireOperations({getSelected, render, observeCard}) {
     if (!card || card.busy || card.requesting || $('read').disabled) return;
     say('');
     card.partitions = [];
-    card.suggestPartition = false;
+    card.suggestPartition = null;
     card.partitionStatus = 'Lecture de la table…';
     render();
     let address;
@@ -143,14 +151,22 @@ export function wireOperations({getSelected, render, observeCard}) {
       card.partitionsGeneration = generation;
       card.partitionStatus = card.partitions.length + ' partition(s) lue(s).';
     } catch (error) {
-      card.suggestPartition = address === 0x8000 && error.message === 'partition_table_invalid';
+      const alternate = alternatePartitionAddress.get(address);
+      if (alternate !== undefined && error.message === 'partition_table_invalid') {
+        card.suggestPartition = {failed: address, address: alternate};
+      }
       card.partitionStatus = error.message === 'partition_table_invalid' ? 'Aucune table valide à cette adresse.' : error.message;
     } finally {
       if (card === getSelected()) render();
     }
   }
   $('read-partitions').onclick = readPartitions;
-  $('try-partition-address').onclick = () => { $('partition-address').value = '0x10000'; readPartitions(); };
+  $('try-partition-address').onclick = () => {
+    const suggestion = getSelected()?.suggestPartition;
+    if (!suggestion) return;
+    $('partition-address').value = hex(suggestion.address);
+    return readPartitions();
+  };
 
   $('read').onclick = async () => {
     const card = getSelected();

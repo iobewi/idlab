@@ -303,6 +303,7 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
         if (!region) {
           card.partitions = null;
           card.partitionStatus = null;
+          card.suggestPartition = null;
         }
         const {result} = region ? await card.eraseFlashRegion(typed, region.address, region.size) : await card.eraseFlash(typed);
         if (card.identity?.generation === generation) {
