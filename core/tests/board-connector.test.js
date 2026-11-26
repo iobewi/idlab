@@ -402,7 +402,7 @@ test('a short chunk aborts the dump and an invalid range is rejected', async () 
   await card.connect();
   await assert.rejects(card.readFlash(15 * mib, 2 * mib), /invalid_flash_range/);
   assert.equal(reads.length, 1);
-  await assert.rejects(card.readFlash(0, 9 * mib), /device_command_failed/);
+  await assert.rejects(card.readFlash(0, 9 * mib), /incomplete_flash_read/);
   assert.deepEqual(reads.map(read => read.address), [15 * mib, 0]);
   await card.disconnect();
 });
