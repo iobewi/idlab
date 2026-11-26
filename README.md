@@ -157,10 +157,11 @@ flash**, puis utilise la corbeille à côté de l’icône de lecture. Vérifie 
 affichée et confirme par le nom de la carte. Seuls ses secteurs sont effacés et
 relus à `0xFF`.
 
-Pour restaurer un dump dans **Mémoire flash**, renseigne son offset d’origine et
-choisis **Restaurer un binaire…**. La taille vient du fichier sélectionné. La
+Dans **Mémoire flash**, renseigne l’offset cible et choisis **Téléverser un
+binaire…**. Pour un dump, renseigne son offset d’origine. La taille vient du
+fichier sélectionné. La
 confirmation indique les secteurs entiers effacés, y compris le dernier secteur
-si le fichier ne le remplit pas. IDLab vérifie ensuite la restauration par
+si le fichier ne le remplit pas. IDLab vérifie ensuite l’écriture par
 relecture SHA-256 et consigne le résultat dans l’historique des opérations.
 
 ### Initialiser une recette pytest

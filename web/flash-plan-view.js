@@ -189,7 +189,7 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
     return run(() => {
       const address = flashNumber($('address').value.trim());
       if (!Number.isSafeInteger(address) || address % FLASH_SECTOR) {
-        throw new Error('L’adresse de restauration doit être alignée sur 4 Kio.');
+        throw new Error('L’adresse d’écriture doit être alignée sur 4 Kio.');
       }
       restoreTarget = {card, generation: card.identity.generation, address};
       restoreInput.value = '';
@@ -226,18 +226,18 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
     return run(async () => {
       const plan = planFor(card);
       if (card !== getSelected() || card.identity?.generation !== generation || $('restore-memory').disabled) {
-        throw new Error('La carte ou sa session a changé. Confirme à nouveau la restauration.');
+        throw new Error('La carte ou sa session a changé. Confirme à nouveau l’écriture.');
       }
       const entries = [{file, address: hex(address)}];
       invalidate(plan);
       plan.working = true;
       render();
       try {
-        say('Validation du binaire à restaurer…');
+        say('Validation du binaire…');
         const approval = await prepareImages(card, generation, entries, () => say('Ouverture du chargeur flash…'));
-        say('Restauration et relecture en cours…');
+        say('Écriture et relecture en cours…');
         await writeImages(card, generation, approval.plan_id, entries, () => card === getSelected());
-        if (card === getSelected()) say('Restauration vérifiée par relecture SHA-256.');
+        if (card === getSelected()) say('Écriture vérifiée par relecture SHA-256.');
       } catch (error) {
         if (card === getSelected()) say(errors[error.message] ?? error.message);
       } finally {
