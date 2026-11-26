@@ -257,47 +257,55 @@ export class BoardConnector {
       if (this.commandCancelled) throw new Error('Opération interrompue par l’opérateur.');
       if (socket.readyState !== 1 || this.socket !== socket || this.lost) throw new Error('device_session_changed');
     };
+    let terminal;
+    let recoveryRequired = false;
     try {
       check();
       if (command.command === 'flash.read') {
         const capacity = await this.#withLoader(() => this.#readFlashBlocks(socket, command, check), readDiagnostic);
         check();
-        if (command.stream) socket.send(JSON.stringify({result: command.id, value: capacity}));
+        terminal = {result: command.id, value: capacity};
       } else if (command.command === 'flash.program') {
         const {digests, previews} = await this.#programFlash(socket, command, check);
         check();
-        socket.send(JSON.stringify({result: command.id, value: digests, previews}));
+        terminal = {result: command.id, value: digests, previews};
       } else if (command.command === 'flash.erase' || command.command === 'flash.erase.region') {
         const value = await this.#eraseFlash(socket, command, check);
         check();
-        socket.send(JSON.stringify({result: command.id, value}));
+        terminal = {result: command.id, value};
       } else {
         const value = await this.#runCommand(command);
         check();
-        socket.send(JSON.stringify({result: command.id, value}));
+        terminal = {result: command.id, value};
       }
     } catch (error) {
       if (socket.readyState === 1) {
         const code = this.commandCancelled ? 'operation_cancelled'
           : command.command === 'flash.read' && readDiagnostic?.error
             ? readDiagnostic.error : diagnosticCode(error);
-        socket.send(JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
+        terminal = {result: command.id, error: code, console_restored: this.mode === 'console',
             recovery_required: Boolean(this.flashTransferInterrupted || this.mode === 'connecting'),
             read_diagnostic: readDiagnostic ? {
               ...readDiagnostic, error: readDiagnostic.error ?? diagnosticCode(error, code),
             } : undefined,
             detail: ['mode.loader', 'identify', 'flash.program', 'flash.erase', 'flash.erase.region'].includes(command.command)
-              ? error.message : undefined}));
+              ? error.message : undefined};
       }
       this.#log(error.message);
     } finally {
-      if (this.flashTransferInterrupted) {
-        this.flashTransferInterrupted = false;
-        socket.close();
-      }
+      recoveryRequired = Boolean(this.flashTransferInterrupted || this.mode === 'connecting');
+      this.flashTransferInterrupted = false;
+      // A reusable terminal result must only be sent after command ownership
+      // and temporary loader cleanup have completed. An interrupted transfer
+      // is explicitly not reusable, even if the MCU is still responding.
       this.activeCommand = null;
       this.commandCancelled = false;
       this.busy = false;
+      if (terminal && socket.readyState === 1) {
+        if (recoveryRequired) terminal.recovery_required = true;
+        socket.send(JSON.stringify(terminal));
+      }
+      if (recoveryRequired) socket.close();
       if (this.mode === 'connecting') await this.#clearSession();
       else if (!this.requesting && (this.lost || socket.readyState !== 1)) await this.disconnect();
       this.onChange();
