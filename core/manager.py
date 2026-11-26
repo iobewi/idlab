@@ -247,4 +247,5 @@ if __name__ == "__main__":
     if manager_token == os.environ.get("IDLAB_TOKEN"):
         raise SystemExit("IDLAB_MANAGER_TOKEN must differ from IDLAB_TOKEN")
     forwarded = os.environ.get("IDLAB_LOOPBACK_FORWARDED") == "1"
-    web.run_app(create_app(token=manager_token), host="0.0.0.0" if forwarded else "127.0.0.1", port=8080)
+    web.run_app(create_app(token=manager_token), host="0.0.0.0" if forwarded else "127.0.0.1", port=8080,
+                handler_cancellation=True)
