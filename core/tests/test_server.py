@@ -437,7 +437,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await ws.send_json({"result": command["id"], "error": "device_command_failed", "console_restored": True,
                             "read_diagnostic": {"error": "serial_timeout", "console_restored": True}})
         response = await read
-        self.assertEqual((response.status, await response.json()), (502, {"error": "device_command_failed"}))
+        self.assertEqual((response.status, await response.json()), (502, {"error": "serial_timeout"}))
         activity = await self.browser.get(f"/api/v1/devices/board/activity?generation={generation}", headers=self.local)
         observed = await activity.json()
         operation = observed["operations"][0]
@@ -469,7 +469,9 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                                             "read_diagnostic": {"error": cause, "console_restored": False,
                                                                 "console_error": "serial_closed"}})
                     self.assertEqual((await ws.receive(timeout=2)).type.name, "CLOSE")
-                self.assertEqual((await read).status, 502)
+                response = await read
+                self.assertEqual(response.status, 504 if cause == "flash_read_server_timeout" else 502)
+                self.assertEqual((await response.json())["error"], cause)
                 fresh, new_generation = await self.board("board", port_key=port_key)
                 self.assertNotEqual(generation, new_generation)
                 response = await self.browser.get(f"/api/v1/devices/board/activity?generation={new_generation}", headers=self.local)
@@ -504,7 +506,8 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await ws.receive_json()
         reply = await ws.receive(timeout=2)
         self.assertEqual(reply.type.name, "CLOSE")
-        self.assertEqual((await read).status, 502)
+        response = await read
+        self.assertEqual((response.status, await response.json()), (504, {"error": "flash_read_server_timeout"}))
         self.assertEqual((await self.read("board", generation)).status, 409)
 
     async def test_rom_range_and_origin_refused(self):
