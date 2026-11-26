@@ -92,8 +92,13 @@ class Board:
         self.journal.append(entry)
 
 
+def error_code(value):
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", value) else None
+
+
 def problem(status, code):
-    return web.json_response({"error": code}, status=status)
+    headers = {"X-IDLab-Error": code} if error_code(code) else {}
+    return web.json_response({"error": code}, status=status, headers=headers)
 
 
 def validate_identity(value):
@@ -679,11 +684,12 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             if not isinstance(result, dict):
                 return problem(502, "device_session_changed")
             if result.get("error"):
+                code = error_code(result.get("error")) or "device_command_failed"
                 detail = result.get("detail")
                 if (erase or command in ("mode.loader", "identify")) and isinstance(detail, str) and detail:
                     record["detail"] = detail[:500]
-                    return web.json_response({"error": "device_command_failed", "detail": record["detail"]}, status=502)
-                return problem(502, "device_command_failed")
+                    return web.json_response({"error": code, "detail": record["detail"]}, status=502)
+                return problem(502, code)
             value = result.get("value")
             if erase:
                 if (not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
@@ -831,9 +837,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         finally:
             try:
                 recoverable = isinstance(result, dict) and (
-                    result.get("error") == "invalid_flash_range" or
+                    (stream and result.get("error") == "invalid_flash_range") or
                     (operation.cancelled and result.get("error") == "operation_cancelled") or
-                    (result.get("console_restored") is True and board.identity.get("mode") == "console")
+                    (stream and result.get("console_restored") is True and board.identity.get("mode") == "console")
                 )
                 if not complete and (not recoverable or control and control.stopped):
                     await board.socket.close(code=1011)
@@ -850,10 +856,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                     await publish_control(board, key)
         if control and control.stopped in {"control_stopped", "control_revoked"}:
             return problem(403, control.stopped)
-        if isinstance(result, dict) and result.get("error") and not board.socket.closed:
-            if result["error"] == "invalid_flash_range":
-                return problem(400, "invalid_flash_range")
-            return problem(502, "device_command_failed")
+        code = record.get("error")
+        if code == "flash_read_server_timeout":
+            return problem(504, code)
+        if code == "invalid_flash_range" and not board.socket.closed:
+            return problem(400, code)
+        if code and code != "read_incomplete":
+            return problem(502, code)
         return problem(502, "read_incomplete_reconnect_required")
 
     def record_read_diagnostic(operation, record, result, failure, control, succeeded):
@@ -867,9 +876,6 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         response = result if isinstance(result, dict) else {}
         diagnostic = response.get("read_diagnostic")
         diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
-
-        def error_code(value):
-            return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", value) else None
 
         if operation.agent_disconnected:
             failure = "agent_disconnected"
@@ -986,7 +992,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             if not isinstance(result, dict) or result.get("error"):
                 if isinstance(result, dict) and isinstance(result.get("detail"), str):
                     record["detail"] = result["detail"][:500]
-                return problem(502, "flash_program_failed")
+                code = error_code(result.get("error")) if isinstance(result, dict) else None
+                return problem(502, code or "flash_program_failed")
             digests = result.get("value")
             if not isinstance(digests, list) or len(digests) != len(plan.images) or any(
                     not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests):
