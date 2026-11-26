@@ -270,7 +270,8 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "stopping")
         self.assertEqual(await agent.receive_json(timeout=2), {"cancel": command["id"]})
         self.assertEqual((await self.read("board", generation)).status, 409)
-        await agent.send_json({"result": command["id"], "error": "operation_cancelled"})
+        await agent.send_json({"result": command["id"], "error": "operation_cancelled",
+                               "read_diagnostic": {"error": "serial_timeout"}})
         response = await read
         self.assertEqual((response.status, await response.json()), (409, {"error": "operation_cancelled"}))
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
@@ -278,6 +279,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         stopped = (await (await self.browser.get(path, headers=self.local)).json())["operations"][0]
         self.assertEqual((stopped["state"], stopped["error"], stopped["bytesReceived"], stopped["bytesTransferred"]),
                          ("Échec", "operation_cancelled", None, 0))
+        self.assertEqual(stopped["agentError"], "serial_timeout")
         retry = asyncio.create_task(self.read("board", generation))
         await agent.receive_json(timeout=2)
         await agent.send_bytes(b"data")
