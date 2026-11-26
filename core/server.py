@@ -17,7 +17,7 @@ from aiohttp import WSMsgType, web
 
 from api_activity import ApiActivity
 from campaigns import CampaignError, Campaigns, search_parameters
-from flash_plan import MAX_FLASH, MAX_PROGRAM_BODY, decode_images, validate_images
+from flash_plan import MAX_FLASH, MAX_PROGRAM_BODY, SECTOR_SIZE, decode_images, validate_images
 
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT.parent / "web"
@@ -121,6 +121,8 @@ def validate_identity(value):
         capabilities.append("flash.program")
     if loader == "stub" and size and value.get("erasable") is True:
         capabilities.append("flash.erase")
+        if value.get("erasable_region") is True:
+            capabilities.append("flash.erase.region")
     if value.get("return_to_console") is True and transport in ("usb_uart", "usb_serial_jtag"):
         capabilities.append("mode.console")
     if value.get("mode") == "loader":
@@ -557,6 +559,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         if not isinstance(payload, dict) or not isinstance(payload.get("command"), str):
             return problem(400, "invalid_arguments")
         command = payload["command"]
+        region_erase = command == "flash.erase.region"
+        erase = region_erase or command == "flash.erase"
         fields = {"generation", "command"}
         if command == "uart.write":
             fields.add("hex")
@@ -567,8 +571,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             fields.add("reset")
             if type(payload.get("reset")) is not bool:
                 return problem(400, "invalid_arguments")
-        elif command == "flash.erase":
+        elif erase:
             fields.add("confirmation")
+            if region_erase:
+                fields.update(("address", "size"))
             if payload.get("confirmation") != request.match_info["name"]:
                 return problem(400, "flash_erase_confirmation_required")
         elif command not in ("mode.loader", "mode.console", "console.reset", "rom.jedec", "identify"):
@@ -589,13 +595,20 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         if command not in board.identity["capabilities"]:
             return problem(409, "operation_unsupported")
         control = board.control
-        operation, record, started = start_operation(request, board, name, command, {}, campaign_id)
+        record_fields = {}
         timeout = command_timeout
         capacity = board.identity["flash_size"]
-        if command == "flash.erase":
+        if erase:
+            address, size = (payload["address"], payload["size"]) if region_erase else (0, capacity)
+            if region_erase and (type(address) is not int or type(size) is not int or address < 0 or
+                                 size < SECTOR_SIZE or address % SECTOR_SIZE or size % SECTOR_SIZE or
+                                 address + size > capacity):
+                return problem(400, "invalid_flash_range")
+            record_fields.update(address=address, size=size)
+            timeout += read_timeout * (1 + (size - 1) // MAX_READ)
+        operation, record, started = start_operation(request, board, name, command, record_fields, campaign_id)
+        if erase:
             board.program_plan = None
-            record.update(address=0, size=capacity)
-            timeout += read_timeout * (1 + (capacity - 1) // MAX_READ)
         complete = False
         try:
             message = {"id": operation.id, "command": command}
@@ -603,6 +616,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 message["hex"] = payload["hex"]
             elif command == "mode.rom":
                 message["reset"] = payload["reset"]
+            elif region_erase:
+                message.update(record_fields)
             await board.socket.send_json(message)
             result = await asyncio.wait_for(operation.future, timeout=timeout)
             if control and control.stopped:
@@ -614,23 +629,24 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 return problem(502, "device_session_changed")
             if result.get("error"):
                 detail = result.get("detail")
-                if command in ("mode.loader", "identify", "flash.erase") and isinstance(detail, str) and detail:
+                if (erase or command in ("mode.loader", "identify")) and isinstance(detail, str) and detail:
                     record["detail"] = detail[:500]
                     return web.json_response({"error": "device_command_failed", "detail": record["detail"]}, status=502)
                 return problem(502, "device_command_failed")
             value = result.get("value")
-            if command == "flash.erase":
+            if erase:
                 if (not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
-                        value["address"] != 0 or value["size"] != capacity):
+                        value["address"] != address or value["size"] != size):
                     return problem(502, "flash_erase_verification_incomplete")
                 first = value["first_non_ff"]
-                if first is not None and (type(first) is not int or not 0 <= first < capacity):
+                if first is not None and (type(first) is not int or not address <= first < address + size):
                     return problem(502, "flash_erase_verification_incomplete")
                 record["verification"] = value
                 if first is not None:
                     record["detail"] = f"Premier octet différent de 0xFF à 0x{first:x}."
                     return web.json_response({"error": "flash_erase_verification_failed", "detail": record["detail"]}, status=502)
-                record["detail"] = "Effacement intégral vérifié. Tous les octets valent 0xFF."
+                record["detail"] = ("Effacement de la zone vérifié. Tous les octets valent 0xFF." if region_erase
+                                    else "Effacement intégral vérifié. Tous les octets valent 0xFF.")
             if command == "rom.jedec":
                 record["detail"] = value
                 board.identity["jedec"] = value

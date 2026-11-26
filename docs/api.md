@@ -251,6 +251,14 @@ adresse différente. L’arrêt ne restaure aucune donnée déjà effacée. La c
 reste en mode chargeur. En Python, appeler `board.erase_flash(confirmation=nom_saisi)`
 après avoir fait confirmer le nom de la carte à l’opérateur.
 
+`flash.erase.region` accepte le même corps avec deux champs entiers
+supplémentaires, `address` et `size`, et exige la capacité `flash.erase.region`.
+Le début et la taille doivent être alignés sur 4 Kio, et la plage doit tenir en
+flash. Les secteurs demandés et eux seuls sont effacés et relus. Le résultat
+utilise la même structure, avec l’adresse absolue de la première différence s’il
+y en a une. Depuis Python, appeler
+`board.erase_flash_region(address, size, confirmation=nom_saisi)`.
+
 ## Campagnes
 
 Une campagne regroupe les opérations d’un essai et son verdict. Le web

@@ -61,7 +61,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await socket.send_json({"mode": "console", "transport": "usb_uart",
                                 "port_key": "00000000-0000-4000-8000-000000000001"} if console else {
             "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
-            "transport": "usb_uart", "flash_size": 16 * 1024 * 1024, "programmable": programmable, "erasable": erasable,
+            "transport": "usb_uart", "flash_size": 16 * 1024 * 1024, "programmable": programmable,
+            "erasable": erasable, "erasable_region": erasable,
         })
         await socket.receive_json(timeout=2)
         return socket
@@ -213,6 +214,25 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         entries = (await asyncio.to_thread(history.activity))["operations"]
         self.assertEqual([(entry["state"], entry["verification"]["first_non_ff"]) for entry in entries],
                          [("Terminée", None), ("Échec", 7)])
+
+    async def test_erase_region_requires_exact_sector_bounds(self):
+        agent = await self.connect(erasable=True)
+        async with self.control(agent) as board:
+            with self.assertRaises(ValueError):
+                board.erase_flash_region(4096, 4095, confirmation=board.name)
+            for fields, code in (({"address": 4096}, "invalid_arguments"),
+                                 ({"address": 1, "size": 4096}, "invalid_flash_range"),
+                                 ({"address": board.flash_size, "size": 4096}, "invalid_flash_range")):
+                with self.assertRaises(IDLabHTTPError) as refused:
+                    await asyncio.to_thread(board._operate, "flash.erase.region", confirmation=board.name, **fields)
+                self.assertEqual(refused.exception.code, code)
+            task = asyncio.create_task(asyncio.to_thread(board.erase_flash_region, 4096, 8192, confirmation=board.name))
+            request = await agent.receive_json(timeout=2)
+            self.assertEqual((request["command"], request["address"], request["size"]),
+                             ("flash.erase.region", 4096, 8192))
+            result = {"address": 4096, "size": 8192, "first_non_ff": None}
+            await agent.send_json({"result": request["id"], "value": result})
+            self.assertEqual(await task, result)
 
     async def test_program_confirmed_plan_and_record_readback(self):
         agent = await self.connect(programmable=True)

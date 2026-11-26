@@ -79,7 +79,8 @@ export function renderFlashProgress(card) {
     const {address, received, total, phase} = progress;
     const labels = {write: 'Programmation flash', verify: 'Vérification flash', 'erase-verify': 'Vérification de l’effacement'};
     const label = labels[phase] ?? 'Lecture flash';
-    line.textContent = phase === 'erase' ? 'Effacement intégral de la flash…' : label + ' à 0x' + address.toString(16) + ' · ' +
+    line.textContent = phase === 'erase' ? 'Effacement flash à 0x' + address.toString(16) + ' · ' +
+      number.format(total) + ' octets…' : label + ' à 0x' + address.toString(16) + ' · ' +
       number.format(received) + ' / ' + number.format(total) + ' octets · ' +
       Math.floor(received * 100 / total) + ' %';
   }

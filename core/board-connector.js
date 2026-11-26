@@ -256,8 +256,8 @@ export class BoardConnector {
         const verification = await this.#programFlash(socket, command, check);
         check();
         socket.send(JSON.stringify({result: command.id, value: verification}));
-      } else if (command.command === 'flash.erase') {
-        const value = await this.#eraseFlash(socket, command.id, check);
+      } else if (command.command === 'flash.erase' || command.command === 'flash.erase.region') {
+        const value = await this.#eraseFlash(socket, command, check);
         check();
         socket.send(JSON.stringify({result: command.id, value}));
       } else {
@@ -271,7 +271,8 @@ export class BoardConnector {
           : error.message === 'invalid_flash_range' ? 'invalid_flash_range' : 'device_command_failed';
         socket.send(command.command === 'flash.read' && !command.stream && !this.commandCancelled ? command.id
           : JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
-            detail: ['mode.loader', 'identify', 'flash.program', 'flash.erase'].includes(command.command) ? error.message : undefined}));
+            detail: ['mode.loader', 'identify', 'flash.program', 'flash.erase', 'flash.erase.region'].includes(command.command)
+              ? error.message : undefined}));
       }
       this.#log(error.message);
     } finally {
@@ -382,22 +383,25 @@ export class BoardConnector {
     return digests;
   }
 
-  async #eraseFlash(socket, id, check) {
-    if (!this.identity?.capabilities.includes('flash.erase') || !this.session?.identity?.erasable) {
-      throw new Error('Effacement intégral indisponible sur cette carte.');
+  async #eraseFlash(socket, command, check) {
+    const {id, command: type} = command;
+    if (!this.identity?.capabilities.includes(type) || !this.session?.identity?.erasable) {
+      throw new Error('Effacement indisponible sur cette carte.');
     }
-    const total = this.identity.flash_size;
+    const region = type === 'flash.erase.region' ? {address: command.address, size: command.size} : undefined;
+    const {address, size: total} = region ?? {address: 0, size: this.identity.flash_size};
     let lastUpdate = -Infinity;
     const progress = (phase, received) => {
       const now = performance.now();
       if (received && received < total && now - lastUpdate < 250) return;
       lastUpdate = now;
-      socket.send(JSON.stringify({id, progress: {phase, address: 0, received, total}}));
+      socket.send(JSON.stringify({id, progress: {phase, address, received, total}}));
     };
     this.flashTransferInterrupted = true;
     progress('erase', 0);
-    this.#log('Effacement intégral · vérification de tous les octets après effacement');
-    const result = await this.session.eraseFlash(check, received => progress('erase-verify', received));
+    this.#log(region ? 'Effacement de la zone flash · vérification par relecture'
+      : 'Effacement intégral · vérification de tous les octets après effacement');
+    const result = await this.session.eraseFlash(check, received => progress('erase-verify', received), region);
     this.flashTransferInterrupted = false;
     return result;
   }
@@ -548,6 +552,10 @@ export class BoardConnector {
   enterLoader() { return this.#command('mode.loader'); }
 
   eraseFlash(confirmation) { return this.#command('flash.erase', {confirmation}); }
+
+  eraseFlashRegion(confirmation, address, size) {
+    return this.#command('flash.erase.region', {confirmation, address, size});
+  }
 
   prepareProgram(images) {
     return this.#programRequest('plan', {images});

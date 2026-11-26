@@ -148,6 +148,10 @@ Le SDK 0.1.3 expose le même parcours via `Board.prepare_flash()` et
 à `0xFF`. Ouvre le chargeur, puis saisis le nom de la carte dans la boîte de
 confirmation. Cette commande supprime aussi les partitions et la configuration.
 
+Pour effacer une partition, lis la table puis utilise l’icône de corbeille sur
+sa ligne avec le chargeur ouvert. Vérifie la plage affichée et confirme par le
+nom de la carte. Seuls les secteurs de cette plage sont effacés et relus à `0xFF`.
+
 ### Initialiser une recette pytest
 
 Depuis la racine du projet à qualifier, avec le SDK Python IDLab 0.1.2 ou

@@ -1,5 +1,6 @@
 import { $, download, element, run, say } from './dom.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
+import { canErasePartition } from './flash-plan-view.js';
 
 function iconAction(icon, label, help) {
   const button = element('button', undefined, 'icon-action');
@@ -67,7 +68,8 @@ export function renderOperationHistory(card) {
       if (!event.repeat) toggleDetails();
     };
     row.append(element('td', entry.id));
-    const commands = {'flash.read': 'Lecture flash', 'flash.program': 'Programmation flash', 'flash.erase': 'Effacement global'};
+    const commands = {'flash.read': 'Lecture flash', 'flash.program': 'Programmation flash',
+      'flash.erase': 'Effacement global', 'flash.erase.region': 'Effacement de zone'};
     for (const value of [entry.device, commands[entry.command] ?? entry.command, entry.state, entry.duration]) {
       row.append(element('td', value ?? '—'));
     }
@@ -83,7 +85,7 @@ export function renderOperations(card) {
   $('download-dump').disabled = !card?.dump;
 }
 
-export function renderPartitions(card, canRead) {
+export function renderPartitions(card, canRead, available, openErase) {
   const table = card?.partitions;
   $('read-partitions').disabled = !canRead;
   $('try-partition-address').disabled = !canRead;
@@ -105,7 +107,11 @@ export function renderPartitions(card, canRead) {
       $('tab-memory').focus();
       $('read').click();
     };
-    action.append(read);
+    const erase = iconAction('trash', 'Effacer cette partition… ' + part.label,
+      'Ouvre la confirmation d’effacement de cette partition. Nécessite le chargeur flash.');
+    erase.disabled = !canErasePartition(card, part, available);
+    erase.onclick = () => openErase(part);
+    action.append(read, erase);
     row.append(action);
     return row;
   }));
@@ -133,8 +139,10 @@ export function wireOperations({getSelected, render, observeCard}) {
     let address;
     try {
       address = flashNumber($('partition-address').value.trim());
+      const generation = card.identity.generation;
       const {blob, capacity} = await card.readFlash(address, PARTITION_TABLE_BYTES);
       card.partitions = decodePartitions(new Uint8Array(await blob.arrayBuffer()), capacity);
+      card.partitionsGeneration = generation;
       card.partitionStatus = card.partitions.length + ' partition(s) lue(s).';
     } catch (error) {
       card.suggestPartition = address === 0x8000 && error.message === 'partition_table_invalid';

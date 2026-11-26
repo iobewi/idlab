@@ -1,4 +1,5 @@
 import { sha256 } from './board-connector.js';
+import { FLASH_SECTOR } from './esp-driver.js';
 import { $, element, run, say } from './dom.js';
 
 const plans = new WeakMap();
@@ -15,6 +16,14 @@ function invalidate(plan, message = '') {
   plan.approval = null;
   plan.confirming = false;
   plan.message = message;
+}
+
+export function canErasePartition(card, part, available) {
+  const identity = card?.identity;
+  return Boolean(available && identity?.capabilities.includes('flash.erase.region') &&
+    card.partitionsGeneration === identity.generation && card.partitions?.includes(part) &&
+    part.address >= 0 && part.size >= FLASH_SECTOR && part.address % FLASH_SECTOR === 0 &&
+    part.size % FLASH_SECTOR === 0 && part.address + part.size <= identity.flash_size);
 }
 
 export function renderFlashPlan(card, available) {
@@ -113,32 +122,49 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
   const confirmation = $('erase-confirmation');
   const confirmErase = $('erase-confirm');
   let eraseTarget;
-  $('erase').onclick = () => {
+  function openErase(part) {
     const card = getSelected();
-    if ($('erase').disabled || !card?.identity) return;
-    eraseTarget = {card, generation: card.identity.generation};
-    $('erase-target').textContent = `${card.name} · ${card.identity.flash_size / (1024 * 1024)} Mio`;
+    const plan = planFor(card);
+    const allowed = part ? canErasePartition(card, part, plan?.available && !plan.working) : !$('erase').disabled;
+    if (!allowed || !card?.identity) return;
+    eraseTarget = {card, generation: card.identity.generation, part};
+    $('erase-title').textContent = part ? 'Confirmer l’effacement de la partition' : 'Confirmer l’effacement intégral';
+    $('erase-target').textContent = part
+      ? `${card.name} · ${part.label} · ${hex(part.address)} à ${hex(part.address + part.size)} (fin exclue) · ${part.size} octets`
+      : `${card.name} · ${card.identity.flash_size / (1024 * 1024)} Mio`;
+    $('erase-warning').textContent = part ? 'Toutes les données de cette partition seront supprimées.'
+      : 'Le firmware, les partitions, les réglages et toutes les données de la flash seront supprimés.';
     confirmation.value = '';
     confirmErase.disabled = true;
     dialog.showModal();
     confirmation.focus();
-  };
+  }
+  $('erase').onclick = () => openErase();
   confirmation.oninput = () => { confirmErase.disabled = confirmation.value !== eraseTarget?.card.name; };
   $('erase-cancel').onclick = () => dialog.close();
   dialog.querySelector('form').onsubmit = event => {
     event.preventDefault();
     if (!eraseTarget || confirmErase.disabled) return;
-    const {card, generation} = eraseTarget;
+    const {card, generation, part} = eraseTarget;
     const typed = confirmation.value;
     dialog.close();
     return run(async () => {
-      if (card !== getSelected() || card.identity?.generation !== generation || $('erase').disabled) {
+      const plan = planFor(card);
+      const allowed = part ? canErasePartition(card, part, plan.available && !plan.working) : !$('erase').disabled;
+      if (card !== getSelected() || card.identity?.generation !== generation || !allowed) {
         throw new Error('La carte ou sa session a changé. Confirme à nouveau l’effacement.');
       }
-      invalidate(planFor(card));
+      invalidate(plan);
       try {
-        await card.eraseFlash(typed);
-        if (card === getSelected()) say('Effacement intégral vérifié. Tous les octets valent 0xFF.');
+        if (part) {
+          await card.eraseFlashRegion(typed, part.address, part.size);
+        } else {
+          card.partitions = null;
+          card.partitionStatus = null;
+          await card.eraseFlash(typed);
+        }
+        if (card === getSelected()) say(part ? 'Partition effacée et vérifiée à 0xFF.'
+          : 'Effacement intégral vérifié. Tous les octets valent 0xFF.');
       } finally {
         render();
         void observeCard(card);
@@ -220,6 +246,7 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
       const binaries = [];
       for (const {file} of plan.files) binaries.push(encodeBase64(new Uint8Array(await file.arrayBuffer())));
       if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
+      card.partitionsGeneration = null;
       const result = await card.programFlash(planId, binaries);
       plan.message = result.detail;
     } catch (error) {
@@ -230,4 +257,5 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
       void observeCard(card);
     }
   };
+  return openErase;
 }

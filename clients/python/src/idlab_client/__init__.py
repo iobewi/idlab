@@ -176,14 +176,27 @@ class Board:
 
     def erase_flash(self, *, confirmation: str) -> dict:
         """Erase the entire flash and verify 0xFF readback. Confirm with the board name."""
+        return self._erase_flash("flash.erase", confirmation, self.flash_size)
+
+    def erase_flash_region(self, address: int, size: int, *, confirmation: str) -> dict:
+        """Erase only the selected 4 KiB sectors and verify their 0xFF readback."""
+        sector = 4096
+        if (type(address) is not int or type(size) is not int or address < 0 or size < sector
+                or address % sector or size % sector or self.flash_size and address + size > self.flash_size):
+            raise ValueError("Expected a sector-aligned range within the detected flash capacity")
+        return self._erase_flash("flash.erase.region", confirmation, size, address=address)
+
+    def _erase_flash(self, command: str, confirmation: str, size: int | None, **region) -> dict:
         if confirmation != self.name:
-            raise ValueError("Confirm the full flash erase with the board name")
-        if "flash.erase" not in self.capabilities or not self.flash_size:
-            raise ValueError("Full flash erase is unavailable in this board session")
-        payload = {"generation": self.generation, "command": "flash.erase", "confirmation": confirmation}
+            raise ValueError("Confirm the flash erase with the board name")
+        if command not in self.capabilities or not self.flash_size or not size:
+            raise ValueError("Flash erase is unavailable in this board session")
+        payload = {"generation": self.generation, "command": command, "confirmation": confirmation}
+        if region:
+            payload.update(region, size=size)
         if self.campaign_id is not None:
             payload["campaign_id"] = self.campaign_id
-        blocks = 1 + (self.flash_size - 1) // (4 * 1024 * 1024)
+        blocks = 1 + (size - 1) // (4 * 1024 * 1024)
         return self._client._request(_board_path(self.name) + "/command", payload,
                                      timeout=self._client._timeout * (1 + blocks))["result"]
 
