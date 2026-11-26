@@ -38,7 +38,11 @@ function operationDetails(entry) {
     'idlab-' + entry.device + '-operation-' + entry.id + '.json');
   actions.append(copy, save);
   toolbar.append(element('span', ['Détail de l’opération', operationOrigin(entry)].filter(Boolean).join(' · ')), actions);
-  panel.append(toolbar, element('pre', proof, 'operation-detail-json result'));
+  panel.append(toolbar);
+  if (entry.command === 'flash.read' && entry.error && entry.detail) {
+    panel.append(element('p', entry.detail, 'hint padded'));
+  }
+  panel.append(element('pre', proof, 'operation-detail-json result'));
   cell.append(panel);
   row.append(cell);
   return row;

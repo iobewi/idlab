@@ -181,6 +181,30 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertRegex(operation["session_id"], r"^[0-9a-f]{12}$")
             self.assertEqual(activity["journal"][-1]["session_id"], operation["session_id"])
 
+    async def test_failed_python_read_keeps_its_diagnostic_in_campaign_history(self):
+        socket = await self.connect(console=True)
+        campaign = await asyncio.to_thread(self.client.create_campaign, "Readback diagnostics")
+        async with self.control(socket) as board:
+            task = asyncio.create_task(asyncio.to_thread(board.for_campaign(campaign["id"]).read_flash, 4096, 4096))
+            command = await socket.receive_json(timeout=2)
+            await socket.send_json({"id": command["id"], "progress": {
+                "address": 4096, "received": 200, "total": 4096, "baudrate": 115200,
+            }})
+            await socket.send_json({"result": command["id"], "error": "device_command_failed", "console_restored": True,
+                                    "read_diagnostic": {"error": "serial_timeout", "console_restored": True}})
+            with self.assertRaises(IDLabHTTPError) as failed:
+                await task
+            self.assertEqual((failed.exception.status, failed.exception.code), (502, "device_command_failed"))
+            activity = await asyncio.to_thread(board.activity)
+        await socket.close()
+        history = await asyncio.to_thread(self.client.campaign_operations, campaign["id"])
+        record = history["items"][0]
+        self.assertEqual(record, activity["operations"][0])
+        self.assertEqual((record["state"], record["error"], record["bytesReceived"], record["bytesTransferred"],
+                          record["lastOffset"], record["consoleRestored"], record["source"]),
+                         ("Échec", "serial_timeout", 200, 0, 4296, True, "python"))
+        self.assertRegex(record["session_id"], r"^[0-9a-f]{12}$")
+
     async def test_old_handle_refused_after_reconnection(self):
         socket = await self.connect()
         old = await asyncio.to_thread(self.client.identify, "test-board")

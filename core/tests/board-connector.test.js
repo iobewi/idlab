@@ -5,7 +5,7 @@ import {BoardConnector, sha256} from '../board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
   readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
-  romIdentificationTimeout = false, programPayload } = {}) {
+  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -55,7 +55,10 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     async isResponsive() { return !failBaud && this.transport.baudrate === deviceBaud; }
     async readFlashId() { return 0x184068; }
     async readFlash(address, size, onPacket) {
-      if (failRead) throw new Error('error during read');
+      if (failRead) {
+        if (partialRead) onPacket(new Uint8Array(partialRead), partialRead);
+        throw new Error('serial_timeout');
+      }
       if (address === shortResponseAt) return new Uint8Array(1);
       const block = readBlock ? readBlock(address, size) : bytes;
       assert.equal(size, block.length);
@@ -96,7 +99,10 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
       const done = Promise.withResolvers();
       return { done: done.promise, async write(value) { events.push('uart:' + new TextDecoder().decode(value)); }, async close() { events.push('close-console'); done.resolve(); } };
     },
-    async reset() { events.push('reset'); },
+    async reset() {
+      events.push('reset');
+      if (failReset) throw new Error('serial_closed');
+    },
     createSocket() {
       socket = {
         readyState: 1,
@@ -156,6 +162,7 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
   });
   port.readable = null;
   return {card, events, reads, progress, uart, writes,
+    get lastResult() { return commandResult; },
     async program(images) {
       commandResult = null;
       await socket.onmessage({data: JSON.stringify({command: 'flash.program', id: 'write', images})});
@@ -319,15 +326,28 @@ test('a serial timeout during stub startup identifies the stage and restores UAR
   await card.disconnect();
 });
 
-test('a failed flash read clears progress and restores console without retrying the read', async () => {
-  const {card, events, progress} = fixture({failRead: true});
+test('a failed flash read before any bytes restores console without retrying', async () => {
+  const scenario = fixture({failRead: true});
+  const {card, events, progress} = scenario;
   await card.connect();
   await assert.rejects(card.readFlash(0, 3), /device_command_failed/);
-  assert.deepEqual(progress, [{address: 0, received: 0, total: 3}]);
+  assert.deepEqual(progress, [{address: 0, received: 0, total: 3, baudrate: 115200}]);
+  assert.deepEqual(scenario.lastResult.read_diagnostic, {error: 'serial_timeout', console_restored: true});
   assert.equal(card.mode, 'console');
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console',
     'detect:default_reset', 'close-loader', 'console', 'reset']);
   await card.disconnect();
+});
+
+test('a failed read reports throttled progress and keeps the serial error even if console recovery fails', async () => {
+  const scenario = fixture({failRead: true, partialRead: 2, failReset: true});
+  const {card, progress, events} = scenario;
+  await card.connect();
+  await assert.rejects(card.readFlash(0x1000, 3), /device_command_failed/);
+  assert.deepEqual(progress.at(-1), {address: 0x1000, received: 2, total: 3, baudrate: 115200});
+  assert.deepEqual(scenario.lastResult.read_diagnostic,
+    {error: 'serial_timeout', console_restored: false, console_error: 'serial_closed'});
+  assert.equal(events.filter(event => event === 'reset').length, 1);
 });
 
 test('reads the complete factory partition in ordered chunks on one loader session', async () => {
@@ -341,8 +361,8 @@ test('reads the complete factory partition in ordered chunks on one loader sessi
   const {blob} = await card.readFlash(factory, size);
   assert.equal(blob.size, size);
   assert.deepEqual(reads, [{generation: 'generation', address: factory, size}]);
-  assert.deepEqual(progress.at(0), {address: factory, received: 0, total: size});
-  assert.deepEqual(progress.at(-1), {address: factory, received: size, total: size});
+  assert.deepEqual(progress.at(0), {address: factory, received: 0, total: size, baudrate: 115200});
+  assert.deepEqual(progress.at(-1), {address: factory, received: size, total: size, baudrate: 115200});
   for (let offset = 0; offset < size; offset += mib) {
     const byte = new Uint8Array(await blob.slice(offset, offset + 1).arrayBuffer());
     assert.equal(byte[0], offset / mib + 1);

@@ -5,6 +5,14 @@ const CONSOLE_BAUD = 115200;
 const toHex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 export const sha256 = async bytes => toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
 
+function diagnosticCode(error, fallback = 'device_command_failed') {
+  for (const cause of [error, error?.cause]) {
+    const code = cause?.code ?? cause?.message;
+    if (typeof code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(code)) return code;
+  }
+  return fallback;
+}
+
 async function api(path, options) {
   const response = await fetch('/api/v1' + path, options);
   if (!response.ok) {
@@ -241,6 +249,7 @@ export class BoardConnector {
     if (this.busy || this.socket !== socket) return;
     this.busy = true;
     this.activeCommand = command.id;
+    const readDiagnostic = command.command === 'flash.read' ? {} : null;
     this.onChange();
     const check = () => {
       if (this.commandCancelled) throw new Error('Opération interrompue par l’opérateur.');
@@ -249,7 +258,7 @@ export class BoardConnector {
     try {
       check();
       if (command.command === 'flash.read') {
-        const capacity = await this.#withLoader(() => this.#readFlashBlocks(socket, command, check));
+        const capacity = await this.#withLoader(() => this.#readFlashBlocks(socket, command, check), readDiagnostic);
         check();
         if (command.stream) socket.send(JSON.stringify({result: command.id, value: capacity}));
       } else if (command.command === 'flash.program') {
@@ -271,6 +280,9 @@ export class BoardConnector {
           : error.message === 'invalid_flash_range' ? 'invalid_flash_range' : 'device_command_failed';
         socket.send(command.command === 'flash.read' && !command.stream && !this.commandCancelled ? command.id
           : JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
+            read_diagnostic: readDiagnostic ? {
+              ...readDiagnostic, error: readDiagnostic.error ?? diagnosticCode(error, code),
+            } : undefined,
             detail: ['mode.loader', 'identify', 'flash.program', 'flash.erase', 'flash.erase.region'].includes(command.command)
               ? error.message : undefined}));
       }
@@ -305,19 +317,31 @@ export class BoardConnector {
       throw new Error('invalid_flash_range');
     }
     let lastUpdate = -Infinity;
-    const progress = received => {
+    let received = 0;
+    let reported;
+    const baudrate = this.identity.transport === 'usb_uart' ? this.session.transport.baudrate : undefined;
+    const progress = (count, force = false) => {
+      received = count;
       const now = performance.now();
-      if (received < size && now - lastUpdate < 250) return;
+      if (!force && received < size && now - lastUpdate < 250) return;
       lastUpdate = now;
-      socket.send(JSON.stringify({id, progress: {address, received, total: size}}));
+      socket.send(JSON.stringify({id, progress: {address, received, total: size, baudrate}}));
+      reported = received;
     };
     progress(0);
-    for (let offset = 0; offset < size; offset += MAX_FLASH_READ) {
-      check();
-      const length = Math.min(MAX_FLASH_READ, size - offset);
-      const data = await this.session.readFlash(address + offset, length, check, received => progress(offset + received));
-      check();
-      socket.send(data);
+    try {
+      for (let offset = 0; offset < size; offset += MAX_FLASH_READ) {
+        check();
+        const length = Math.min(MAX_FLASH_READ, size - offset);
+        const data = await this.session.readFlash(address + offset, length, check, count => progress(offset + count));
+        if (received < offset + data.length) progress(offset + data.length);
+        check();
+        socket.send(data);
+      }
+    } catch (error) {
+      // Preserve the latest count even when the last packet fell inside the UI throttle window.
+      if (socket.readyState === 1 && received !== reported) progress(received, true);
+      throw error;
     }
     this.#log('Lecture flash terminée · ' + size + ' octets');
     return capacity;
@@ -518,7 +542,7 @@ export class BoardConnector {
     }
   }
 
-  async #withLoader(operation) {
+  async #withLoader(operation, diagnostic = null) {
     if (this.mode === 'loader') return operation();
     if (this.mode !== 'console' || !this.canEnterLoader) {
       throw new Error('Place la carte en mode téléchargement, puis reconnecte-la dans IDLab.');
@@ -529,10 +553,22 @@ export class BoardConnector {
       await this.#closeSession(true);
       await this.#openLoader('stub', {temporary: true});
       return await operation();
+    } catch (error) {
+      if (diagnostic) diagnostic.error = diagnosticCode(error, this.commandCancelled ? 'operation_cancelled' : undefined);
+      throw error;
     } finally {
       if (!this.lost && this.socket?.readyState === 1) {
         this.#log('Retour en console…');
-        await this.#resumeConsole();
+        try {
+          await this.#resumeConsole();
+          if (diagnostic) diagnostic.console_restored = true;
+        } catch (error) {
+          if (diagnostic) {
+            diagnostic.console_restored = false;
+            diagnostic.console_error = diagnosticCode(error);
+          }
+          throw error;
+        }
       }
     }
   }
