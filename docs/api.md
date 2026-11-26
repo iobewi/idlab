@@ -407,6 +407,22 @@ curl --fail-with-body -H "$auth" -H 'Content-Type: application/json' \
 
 Les erreurs métier utilisent un objet `{"error":"code"}`. Les erreurs de
 routage ou de taille émises par le serveur HTTP peuvent avoir un autre format.
+Les refus de négociation WebSocket conservent le statut HTTP et le code métier
+dans le corps JSON, également via le manager. Le SDK les expose via
+`IDLabHTTPError.status` et `IDLabHTTPError.code`.
+Un timeout série (`502 serial_timeout`) est distinct d'un délai serveur
+(`504 flash_read_server_timeout`, `device_command_timeout` ou
+`idlab_http_timeout`). Les opérations flash ne sont pas rejouées automatiquement. Pour une lecture en cours,
+une révocation ou un arrêt explicite prime sur la déconnexion, puis sur
+l'annulation locale et l'erreur matérielle. Le diagnostic agent distinct reste
+conservé dans `agentError`. La fermeture de récupération ne change pas le code
+initial ni son statut HTTP. Seuls les codes agent reconnus sont exposés.
+Une lecture incomplète sans diagnostic reconnu utilise le même code
+`read_incomplete_reconnect_required` dans la réponse et l'historique.
+Une requête en cours lors d'une révocation reçoit `403 control_revoked`.
+Après suppression du contrôle, son ancien jeton de session n'est plus reconnu :
+une nouvelle requête reçoit `401 authentication_required`. Aucun historique de
+jetons révoqués ni surveillance WebSocket supplémentaire n'est nécessaire.
 
 | HTTP | Codes courants | Action côté script |
 |---|---|---|
@@ -416,7 +432,8 @@ routage ou de taille émises par le serveur HTTP peuvent avoir un autre format.
 | `404` | `device_disconnected`, `campaign_not_found` | Vérifier le nom de carte ou l’identifiant de campagne. |
 | `409` | `device_busy`, `campaign_busy`, `manager_busy` | Attendre la fin de l’opération en cours. |
 | `409` | `device_session_changed`, `operation_unsupported`, `campaign_not_active` | Relire respectivement la session, les capacités ou l’état de la campagne. |
-| `502` | `read_incomplete_reconnect_required`, `http_start_failed` | Reconnecter la carte pour la lecture, ou consulter l’état du service HTTP. |
+| `502` | `serial_timeout`, `agent_disconnected`, `read_incomplete_reconnect_required`, `http_start_failed` | Reconnecter la carte pour la lecture, ou consulter l’état du service HTTP. |
+| `504` | `flash_read_server_timeout`, `device_command_timeout`, `flash_program_timeout`, `idlab_http_timeout` | Examiner le diagnostic et la session avant toute nouvelle opération. |
 | `503` | `idlab_http_unavailable`, `browser_bundle_unavailable`, `manager_stopping` | Vérifier la disponibilité du service. |
 
 En cas de perte de la réponse à la création d’une campagne, une nouvelle

@@ -304,7 +304,14 @@ class IDLabClient:
             socket = connect(url, additional_headers={"Authorization": f"Bearer {token}"},
                              open_timeout=self._timeout, close_timeout=3, proxy=None)
         except InvalidStatus as error:
-            raise IDLabHTTPError(error.response.status_code, "control_connection_refused") from None
+            try:
+                payload = json.loads(bytes(error.response.body or b"")[:4096])
+                code = payload.get("error") if isinstance(payload, dict) else None
+            except (ValueError, TypeError):
+                code = None
+            if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code):
+                code = "control_connection_refused"
+            raise IDLabHTTPError(error.response.status_code, code) from None
         except (OSError, WebSocketException) as error:
             raise IDLabError("Unable to open an IDLab control session") from error
         with socket:
@@ -312,7 +319,14 @@ class IDLabClient:
                 session = json.loads(socket.recv(timeout=self._timeout))
                 credential = session["session"]
                 generation = session["generation"]
-            except (KeyError, TypeError, ValueError, TimeoutError, ConnectionClosed) as error:
+            except ConnectionClosed as error:
+                if error.rcvd and error.rcvd.code == 1008 and error.rcvd.reason in {
+                    "control_stopped", "control_revoked", "device_session_changed",
+                }:
+                    raise IDLabHTTPError(403 if error.rcvd.reason != "device_session_changed" else 409,
+                                         error.rcvd.reason) from None
+                raise IDLabError("Invalid IDLab control session") from error
+            except (KeyError, TypeError, ValueError, TimeoutError) as error:
                 raise IDLabError("Invalid IDLab control session") from error
             client = IDLabClient(self._base.removesuffix("/api/v1"), token=credential, timeout=self._timeout,
                                  allow_insecure_http=self._allow_insecure_http)

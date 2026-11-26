@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from aiohttp import CookieJar
+from aiohttp import CookieJar, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from manager import HTTPService, create_app
@@ -117,12 +117,21 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(issued.status, 200)
         token = (await issued.json())["token"]
         self.assertTrue((await agent.receive_json(timeout=2))["has_token"])
+        path = "/api/v1/devices/board/control/connect"
+        denied = await self.client.get(path, headers=self.web | {
+            "Authorization": "Bearer invalid", "Upgrade": "websocket",
+        })
+        self.assertEqual((denied.status, await denied.json()), (403, {"error": "invalid_control_token"}))
         async with self.client.ws_connect(
             "/api/v1/devices/board/control/connect",
             headers=self.web | {"Authorization": "Bearer " + token},
         ) as control:
             self.assertTrue((await control.receive_json(timeout=2))["session"])
             self.assertEqual((await agent.receive_json(timeout=2))["control"], "external")
+            denied = await self.client.get(path, headers=self.web | {
+                "Authorization": "Bearer " + token, "Upgrade": "websocket",
+            })
+            self.assertEqual((denied.status, await denied.json()), (409, {"error": "device_busy"}))
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
 
         self.assertEqual((await self.request("POST", "start")).status, 200)
@@ -150,6 +159,57 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         final = self.service.process
         await self.client.close()
         self.assertIsNotNone(final.returncode)
+
+    async def test_proxy_preserves_handshake_status_and_close_reason(self):
+        async def upstream(request):
+            code = request.query.get("code")
+            if "status" in request.query:
+                status = int(request.query["status"])
+                return web.json_response({"error": code}, status=status,
+                                         headers={"X-IDLab-Error": code} if code else {})
+            socket = web.WebSocketResponse()
+            await socket.prepare(request)
+            await socket.close(code=1008, message=b"control_revoked")
+            return socket
+
+        app = web.Application()
+        app.router.add_get("/agent", upstream)
+        backend = TestServer(app)
+        await backend.start_server()
+        self.addAsyncCleanup(backend.close)
+        self.service.port = backend.port
+        # A simulated running child; no real process or hardware is involved.
+        class Running:
+            returncode = None
+        self.service.process = Running()
+        self.addCleanup(setattr, self.service, "process", None)
+        try:
+            for status, code in [(403, "control_token_device_mismatch"),
+                                 (404, "device_disconnected"),
+                                 (409, "device_busy"),
+                                 (503, "idlab_http_unavailable")]:
+                response = await self.client.get(
+                    "/agent", params={"status": status, "code": code},
+                    headers=self.web | {"Upgrade": "websocket"},
+                )
+                self.assertEqual((response.status, await response.json()), (status, {"error": code}))
+            for code in ("", "invalid header", "secret=value"):
+                response = await self.client.get(
+                    "/agent", params={"status": 403, "code": code},
+                    headers=self.web | {"Upgrade": "websocket"},
+                )
+                self.assertEqual((response.status, await response.json()),
+                                 (403, {"error": "agent_connection_refused"}))
+            socket = await self.client.ws_connect("/agent", headers=self.web)
+            message = await socket.receive(timeout=2)
+            self.assertEqual((message.type.name, message.data, message.extra),
+                             ("CLOSE", 1008, "control_revoked"))
+            await socket.close()
+            await backend.close()
+            response = await self.client.get("/agent", headers=self.web | {"Upgrade": "websocket"})
+            self.assertEqual((response.status, await response.json()), (503, {"error": "idlab_http_unavailable"}))
+        finally:
+            self.service.process = None
 
     async def test_refuses_untrusted_or_unexpected_requests(self):
         for method, path, kwargs, status in [

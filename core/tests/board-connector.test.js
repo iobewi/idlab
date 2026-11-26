@@ -57,7 +57,7 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     async readFlash(address, size, onPacket) {
       if (failRead) {
         if (partialRead) onPacket(new Uint8Array(partialRead), partialRead);
-        throw new Error('serial_timeout');
+        throw new Error(typeof failRead === 'string' ? failRead : 'serial_timeout');
       }
       if (address === shortResponseAt) return new Uint8Array(1);
       const block = readBlock ? readBlock(address, size) : bytes;
@@ -330,7 +330,7 @@ test('a failed flash read before any bytes restores console without retrying', a
   const scenario = fixture({failRead: true});
   const {card, events, progress} = scenario;
   await card.connect();
-  await assert.rejects(card.readFlash(0, 3), /device_command_failed/);
+  await assert.rejects(card.readFlash(0, 3), /serial_timeout/);
   assert.deepEqual(progress, [{address: 0, received: 0, total: 3, baudrate: 115200}]);
   assert.deepEqual(scenario.lastResult.read_diagnostic, {error: 'serial_timeout', console_restored: true});
   assert.equal(card.mode, 'console');
@@ -339,11 +339,19 @@ test('a failed flash read before any bytes restores console without retrying', a
   await card.disconnect();
 });
 
+test('unknown exception messages do not become public agent codes', async () => {
+  const scenario = fixture({failRead: 'unexpected_internal_message'});
+  await scenario.card.connect();
+  await assert.rejects(scenario.card.readFlash(0, 3), /device_command_failed/);
+  assert.equal(scenario.lastResult.read_diagnostic.error, 'device_command_failed');
+  await scenario.card.disconnect();
+});
+
 test('a failed read reports throttled progress and keeps the serial error even if console recovery fails', async () => {
   const scenario = fixture({failRead: true, partialRead: 2, failReset: true});
   const {card, progress, events} = scenario;
   await card.connect();
-  await assert.rejects(card.readFlash(0x1000, 3), /device_command_failed/);
+  await assert.rejects(card.readFlash(0x1000, 3), /serial_timeout/);
   assert.deepEqual(progress.at(-1), {address: 0x1000, received: 2, total: 3, baudrate: 115200});
   assert.deepEqual(scenario.lastResult.read_diagnostic,
     {error: 'serial_timeout', console_restored: false, console_error: 'serial_closed'});
@@ -402,7 +410,7 @@ test('a short chunk aborts the dump and an invalid range is rejected', async () 
   await card.connect();
   await assert.rejects(card.readFlash(15 * mib, 2 * mib), /invalid_flash_range/);
   assert.equal(reads.length, 1);
-  await assert.rejects(card.readFlash(0, 9 * mib), /device_command_failed/);
+  await assert.rejects(card.readFlash(0, 9 * mib), /incomplete_flash_read/);
   assert.deepEqual(reads.map(read => read.address), [15 * mib, 0]);
   await card.disconnect();
 });

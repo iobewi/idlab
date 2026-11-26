@@ -92,8 +92,25 @@ class Board:
         self.journal.append(entry)
 
 
+AGENT_ERROR_CODES = frozenset(["device_command_failed","operation_cancelled","device_session_changed","operation_unsupported","invalid_flash_range","incomplete_flash_read","serial_closed","serial_timeout","serial_partial_packet","serial_invalid_escape","serial_frame_too_large","flash_program_failed"])
+
+
+def agent_error_code(value):
+    return value if isinstance(value, str) and value in AGENT_ERROR_CODES else None
+
+
+def agent_error_status(code):
+    return {"invalid_flash_range": 400, "device_session_changed": 409,
+            "operation_unsupported": 409, "operation_cancelled": 409}.get(code, 502)
+
+
+def error_code(value):
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", value) else None
+
+
 def problem(status, code):
-    return web.json_response({"error": code}, status=status)
+    headers = {"X-IDLab-Error": code} if error_code(code) else {}
+    return web.json_response({"error": code}, status=status, headers=headers)
 
 
 def validate_identity(value):
@@ -679,11 +696,12 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             if not isinstance(result, dict):
                 return problem(502, "device_session_changed")
             if result.get("error"):
+                code = agent_error_code(result.get("error")) or "device_command_failed"
                 detail = result.get("detail")
                 if (erase or command in ("mode.loader", "identify")) and isinstance(detail, str) and detail:
                     record["detail"] = detail[:500]
-                    return web.json_response({"error": "device_command_failed", "detail": record["detail"]}, status=502)
-                return problem(502, "device_command_failed")
+                    return web.json_response({"error": code, "detail": record["detail"]}, status=agent_error_status(code))
+                return problem(agent_error_status(code), code)
             value = result.get("value")
             if erase:
                 if (not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
@@ -802,6 +820,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         complete = False
         result = None
         failure = "read_incomplete"
+        outcome = None
         try:
             message = {"id": operation.id, "command": "flash.read", "address": address, "size": size}
             if stream:
@@ -815,31 +834,38 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 if type(capacity) is int and address + size <= capacity <= MAX_FLASH:
                     data = b"".join(operation.chunks)
             complete = isinstance(data, bytes) and len(data) == size
-            if control and control.stopped:
-                return problem(403, control.stopped)
-            if operation.cancelled:
-                complete = False
-                return problem(409, "operation_cancelled")
-            if complete:
+            if complete and not (control and control.stopped) and not operation.cancelled:
                 record.update(bytesRead=size, preview=data[:256].hex(" "), detail=f"{size} octets lus")
-                return web.Response(body=data, content_type="application/octet-stream",
-                                    headers={"X-IDLab-Flash-Size": str(capacity)})
+                outcome = web.Response(body=data, content_type="application/octet-stream",
+                                       headers={"X-IDLab-Flash-Size": str(capacity)})
+            elif operation.cancelled and not (control and control.stopped):
+                complete = False
         except TimeoutError:
             failure = "flash_read_server_timeout"
         except ConnectionError:
             operation.agent_disconnected = True
         finally:
+            # Capture the failure before closing the socket: the recovery itself
+            # may invalidate the control session and must not mask the read error.
+            if control and control.stopped in {"control_stopped", "control_revoked"}:
+                failure = control.stopped
+            elif operation.agent_disconnected:
+                failure = "agent_disconnected"
+            elif control and control.stopped:
+                failure = control.stopped
+            elif operation.cancelled:
+                failure = "operation_cancelled"
+            succeeded = outcome is not None
+            record_read_diagnostic(operation, record, result, failure, succeeded)
             try:
                 recoverable = isinstance(result, dict) and (
-                    result.get("error") == "invalid_flash_range" or
+                    (stream and result.get("error") == "invalid_flash_range") or
                     (operation.cancelled and result.get("error") == "operation_cancelled") or
-                    (result.get("console_restored") is True and board.identity.get("mode") == "console")
+                    (stream and result.get("console_restored") is True and board.identity.get("mode") == "console")
                 )
                 if not complete and (not recoverable or control and control.stopped):
                     await board.socket.close(code=1011)
             finally:
-                succeeded = complete and not (control and control.stopped)
-                record_read_diagnostic(operation, record, result, failure, control, succeeded)
                 finish_operation(request, board, record, started, succeeded)
                 if not succeeded:
                     board.log(f"{record['detail']} · {record['duration']}", operation.source, operation.session_id)
@@ -848,15 +874,14 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                     await publish_control(board, key)
                 elif operation.cancelled and not control:
                     await publish_control(board, key)
-        if control and control.stopped in {"control_stopped", "control_revoked"}:
-            return problem(403, control.stopped)
-        if isinstance(result, dict) and result.get("error") and not board.socket.closed:
-            if result["error"] == "invalid_flash_range":
-                return problem(400, "invalid_flash_range")
-            return problem(502, "device_command_failed")
-        return problem(502, "read_incomplete_reconnect_required")
+        if outcome is not None:
+            return outcome
+        code = record["error"]
+        status = {"control_stopped": 403, "control_revoked": 403,
+                  "flash_read_server_timeout": 504}.get(code, agent_error_status(code))
+        return problem(status, code)
 
-    def record_read_diagnostic(operation, record, result, failure, control, succeeded):
+    def record_read_diagnostic(operation, record, result, failure, succeeded):
         progress = operation.read_progress
         received = progress["received"] if progress is not None else None
         record.update(bytesReceived=received, bytesTransferred=operation.received,
@@ -868,19 +893,15 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         diagnostic = response.get("read_diagnostic")
         diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
 
-        def error_code(value):
-            return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", value) else None
-
-        if operation.agent_disconnected:
-            failure = "agent_disconnected"
-        elif control and control.stopped:
-            failure = control.stopped
-        elif operation.cancelled:
-            failure = "operation_cancelled"
         restored = diagnostic.get("console_restored", response.get("console_restored") if not diagnostic else None)
-        error = error_code(diagnostic.get("error")) or error_code(response.get("error")) or failure
+        agent_error = agent_error_code(diagnostic.get("error")) or agent_error_code(response.get("error"))
+        error = (agent_error or failure) if failure == "read_incomplete" else failure
+        if error == "read_incomplete":
+            error = "read_incomplete_reconnect_required"
         record.update(error=error, consoleRestored=restored if type(restored) is bool else None)
-        recovery_error = error_code(diagnostic.get("console_error"))
+        if agent_error and agent_error != error:
+            record["agentError"] = agent_error
+        recovery_error = agent_error_code(diagnostic.get("console_error"))
         if recovery_error:
             record["consoleRecoveryError"] = recovery_error
 
@@ -986,7 +1007,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             if not isinstance(result, dict) or result.get("error"):
                 if isinstance(result, dict) and isinstance(result.get("detail"), str):
                     record["detail"] = result["detail"][:500]
-                return problem(502, "flash_program_failed")
+                code = agent_error_code(result.get("error")) if isinstance(result, dict) else None
+                return problem(agent_error_status(code), code or "flash_program_failed")
             digests = result.get("value")
             if not isinstance(digests, list) or len(digests) != len(plan.images) or any(
                     not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests):

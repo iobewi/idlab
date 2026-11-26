@@ -5,10 +5,12 @@ const CONSOLE_BAUD = 115200;
 const toHex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 export const sha256 = async bytes => toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
 
+const AGENT_ERROR_CODES = new Set(["device_command_failed","operation_cancelled","device_session_changed","operation_unsupported","invalid_flash_range","incomplete_flash_read","serial_closed","serial_timeout","serial_partial_packet","serial_invalid_escape","serial_frame_too_large","flash_program_failed"]);
+
 function diagnosticCode(error, fallback = 'device_command_failed') {
   for (const cause of [error, error?.cause]) {
     const code = cause?.code ?? cause?.message;
-    if (typeof code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(code)) return code;
+    if (AGENT_ERROR_CODES.has(code)) return code;
   }
   return fallback;
 }
@@ -277,9 +279,9 @@ export class BoardConnector {
     } catch (error) {
       if (socket.readyState === 1) {
         const code = this.commandCancelled ? 'operation_cancelled'
-          : error.message === 'invalid_flash_range' ? 'invalid_flash_range' : 'device_command_failed';
-        socket.send(command.command === 'flash.read' && !command.stream && !this.commandCancelled ? command.id
-          : JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
+          : command.command === 'flash.read' && readDiagnostic?.error
+            ? readDiagnostic.error : diagnosticCode(error);
+        socket.send(JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
             read_diagnostic: readDiagnostic ? {
               ...readDiagnostic, error: readDiagnostic.error ?? diagnosticCode(error, code),
             } : undefined,

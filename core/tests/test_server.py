@@ -270,7 +270,8 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "stopping")
         self.assertEqual(await agent.receive_json(timeout=2), {"cancel": command["id"]})
         self.assertEqual((await self.read("board", generation)).status, 409)
-        await agent.send_json({"result": command["id"], "error": "operation_cancelled"})
+        await agent.send_json({"result": command["id"], "error": "operation_cancelled",
+                               "read_diagnostic": {"error": "serial_timeout"}})
         response = await read
         self.assertEqual((response.status, await response.json()), (409, {"error": "operation_cancelled"}))
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
@@ -278,6 +279,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         stopped = (await (await self.browser.get(path, headers=self.local)).json())["operations"][0]
         self.assertEqual((stopped["state"], stopped["error"], stopped["bytesReceived"], stopped["bytesTransferred"]),
                          ("Échec", "operation_cancelled", None, 0))
+        self.assertEqual(stopped["agentError"], "serial_timeout")
         retry = asyncio.create_task(self.read("board", generation))
         await agent.receive_json(timeout=2)
         await agent.send_bytes(b"data")
@@ -437,7 +439,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await ws.send_json({"result": command["id"], "error": "device_command_failed", "console_restored": True,
                             "read_diagnostic": {"error": "serial_timeout", "console_restored": True}})
         response = await read
-        self.assertEqual((response.status, await response.json()), (502, {"error": "device_command_failed"}))
+        self.assertEqual((response.status, await response.json()), (502, {"error": "serial_timeout"}))
         activity = await self.browser.get(f"/api/v1/devices/board/activity?generation={generation}", headers=self.local)
         observed = await activity.json()
         operation = observed["operations"][0]
@@ -469,7 +471,9 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                                             "read_diagnostic": {"error": cause, "console_restored": False,
                                                                 "console_error": "serial_closed"}})
                     self.assertEqual((await ws.receive(timeout=2)).type.name, "CLOSE")
-                self.assertEqual((await read).status, 502)
+                response = await read
+                self.assertEqual(response.status, 504 if cause == "flash_read_server_timeout" else 502)
+                self.assertEqual((await response.json())["error"], cause)
                 fresh, new_generation = await self.board("board", port_key=port_key)
                 self.assertNotEqual(generation, new_generation)
                 response = await self.browser.get(f"/api/v1/devices/board/activity?generation={new_generation}", headers=self.local)
@@ -485,15 +489,67 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(record["consoleRecoveryError"], "serial_closed")
                 await fresh.close()
 
+    async def test_revocation_preserves_secondary_serial_error(self):
+        port_key = "00000000-0000-4000-8000-000000000001"
+        agent, generation = await self.board("board", port_key=port_key)
+        base = "/api/v1/devices/board/control/"
+        issued = await self.browser.post(base + "token", headers=self.local)
+        token = (await issued.json())["token"]
+        await agent.receive_json(timeout=2)
+        control = await self.browser.ws_connect(base + "connect",
+                    headers=self.script | {"Authorization": "Bearer " + token})
+        session = (await control.receive_json(timeout=2))["session"]
+        await agent.receive_json(timeout=2)
+        read = asyncio.create_task(self.read("board", generation,
+                    headers=self.script | {"Authorization": "Bearer " + session}))
+        command = await agent.receive_json(timeout=2)
+        revoke = asyncio.create_task(self.browser.post(base + "revoke", headers=self.local))
+        await agent.receive_json(timeout=2)
+        self.assertEqual((await agent.receive_json(timeout=2))["cancel"], command["id"])
+        close = await control.receive(timeout=2)
+        self.assertEqual((close.data, close.extra), (1008, "control_revoked"))
+        self.assertEqual((await revoke).status, 200)
+        await agent.send_json({"result": command["id"], "error": "operation_cancelled",
+                               "read_diagnostic": {"error": "serial_timeout"}})
+        response = await read
+        self.assertEqual((response.status, await response.json()), (403, {"error": "control_revoked"}))
+        fresh, new_generation = await self.board("board", port_key=port_key)
+        activity = await self.browser.get("/api/v1/devices/board/activity",
+                    headers=self.local, params={"generation": new_generation})
+        record = (await activity.json())["operations"][0]
+        self.assertEqual((record["error"], record["agentError"]), ("control_revoked", "serial_timeout"))
+        await fresh.close()
+
+    async def test_nonstream_error_status_survives_recovery(self):
+        for code, status in (("device_session_changed", 409), ("operation_unsupported", 409),
+                             ("invalid_flash_range", 400), ("serial_timeout", 502),
+                             ("unrecognized_internal_message", 502)):
+            with self.subTest(code=code):
+                agent, generation = await self.board("board")
+                read = asyncio.create_task(self.read("board", generation))
+                command = await agent.receive_json(timeout=2)
+                self.assertNotIn("stream", command)
+                await agent.send_json({"result": command["id"], "error": code})
+                response = await read
+                expected = "read_incomplete_reconnect_required" if code.startswith("unrecognized") else code
+                self.assertEqual((response.status, await response.json()), (status, {"error": expected}))
+                self.assertEqual((await agent.receive(timeout=2)).type.name, "CLOSE")
+
     async def test_short_read_invalidates_session(self):
-        ws, generation = await self.board("board")
+        port_key = "00000000-0000-4000-8000-000000000001"
+        ws, generation = await self.board("board", port_key=port_key)
         read = asyncio.create_task(self.read("board", generation))
-        await ws.receive_json()
+        command = await ws.receive_json()
         await ws.send_bytes(b"abc")
+        await ws.send_json({"result": command["id"], "value": 16 * 1024 * 1024})
         response = await read
         self.assertEqual(response.status, 502)
         self.assertEqual((await response.json())["error"], "read_incomplete_reconnect_required")
-        new, new_generation = await self.board("board")
+        new, new_generation = await self.board("board", port_key=port_key)
+        activity = await self.browser.get("/api/v1/devices/board/activity", headers=self.local,
+                                          params={"generation": new_generation})
+        self.assertEqual((await activity.json())["operations"][0]["error"],
+                         "read_incomplete_reconnect_required")
         self.assertNotEqual(generation, new_generation)
         self.assertEqual((await self.read("board", generation)).status, 409)
         await new.close()
@@ -504,7 +560,8 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await ws.receive_json()
         reply = await ws.receive(timeout=2)
         self.assertEqual(reply.type.name, "CLOSE")
-        self.assertEqual((await read).status, 502)
+        response = await read
+        self.assertEqual((response.status, await response.json()), (504, {"error": "flash_read_server_timeout"}))
         self.assertEqual((await self.read("board", generation)).status, 409)
 
     async def test_rom_range_and_origin_refused(self):
