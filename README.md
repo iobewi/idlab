@@ -71,8 +71,8 @@ peut être copié ou téléchargé en JSON. L’historique est conservé tant qu
 la page reste ouverte et que la carte reste dans la liste.
 **Opérations → ROM seule** ouvre une session
 sans stub sur la carte sélectionnée, affiche son identité et permet une
-lecture du JEDEC. Pendant cette session, **Consoles**, **Partitions**,
-**Plan flash**, **Lecture mémoire** et **Déclencheurs et outils** sont grisés
+lecture du JEDEC. Pendant cette session, **Consoles**,
+**Plan flash**, **Mémoire flash** et **Déclencheurs et outils** sont grisés
 pour la carte sélectionnée. Une boîte de dialogue propose un reset
 automatique depuis une console sur un port compatible. Elle guide
 l’entrée manuelle avec BOOT et RESET dans les autres cas. Si le navigateur détecte à
@@ -130,6 +130,40 @@ aux opérations lancées dans la page.
 
 Pour configurer et tester l’accès depuis `rust_dev`, voir le
 [test de connexion Docker](docs/service.md#connecter-un-client-depuis-docker).
+
+### Programmer et vérifier un firmware
+
+Dans **Opérations → Plan flash**, ajoute les binaires, renseigne les adresses
+fournies par ton projet et valide le plan. Depuis une console compatible avec
+la bascule automatique, la validation ouvre le chargeur flash. Pour un port à
+entrée manuelle, ouvre d’abord le chargeur. **Programmer…** affiche les
+secteurs concernés avant confirmation. Après
+l’écriture, IDLab relit chaque image et compare son SHA-256. La carte reste dans
+le chargeur pour permettre une vérification supplémentaire avant démarrage.
+
+Un manifeste ESP Web Tools et ses binaires locaux peuvent aussi alimenter ce
+plan. Le SDK 0.1.3 expose le même parcours via `Board.prepare_flash()` ou
+`Board.prepare_flash_manifest()`, puis `Board.program_flash()`.
+Voir la [référence de programmation](docs/api.md#programmation-flash).
+
+**Plan flash → Effacement global** efface toute la flash et vérifie sa relecture
+à `0xFF`. Saisis le nom de la carte dans la boîte de confirmation. Sur un port
+compatible, IDLab ouvre le chargeur depuis la console après confirmation.
+Cette commande supprime aussi les partitions et la configuration.
+
+Dans **Mémoire flash**, lis la table des partitions et clique sur une ligne
+pour renseigner la plage et lancer sa lecture dans le même panneau. Pour
+effacer cette plage, utilise la corbeille. Tu peux aussi renseigner un offset
+et une taille manuellement. Vérifie
+la plage affichée et confirme par le nom de la carte. Seuls ses secteurs sont
+effacés et relus à `0xFF`.
+
+Dans **Mémoire flash**, renseigne l’offset cible et choisis **Téléverser un
+binaire…**. Pour un dump, renseigne son offset d’origine. La taille vient du
+fichier sélectionné. La
+confirmation indique les secteurs entiers effacés, y compris le dernier secteur
+si le fichier ne le remplit pas. IDLab vérifie ensuite l’écriture par
+relecture SHA-256 et consigne le résultat dans l’historique des opérations.
 
 ### Initialiser une recette pytest
 

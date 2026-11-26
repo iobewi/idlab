@@ -194,9 +194,12 @@
 
 /* Operation details expand immediately below their history row; no offscreen-only output. */
 .operation-detail-row td { padding:0; white-space:normal; }
-.operation-row { cursor: pointer; }
-.operation-row:hover, .operation-row[aria-expanded="true"] { background: var(--selected); }
-.operation-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.operation-row, .partition-row[aria-disabled="false"] { cursor: pointer; }
+.operation-row:hover, .operation-row[aria-expanded="true"],
+.partition-row[aria-disabled="false"]:hover { background: var(--selected); }
+.operation-row:focus-visible, .partition-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.flash-partitions { border-top: 0; border-bottom: 1px solid var(--line); }
+.flash-partitions summary { background: var(--toolbar); font-weight: 600; }
 .operation-detail-json { max-height:360px; overflow:auto; margin:0; max-width:100%; }
 
 

@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 from pathlib import Path
 import os
 import socket
@@ -69,7 +71,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         await agent.send_json({
             "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
             "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
-            "mode": "loader", "port_key": "00000000-0000-4000-8000-000000000001",
+            "mode": "loader", "port_key": "00000000-0000-4000-8000-000000000001", "programmable": True,
         })
         generation = (await agent.receive_json(timeout=2))["generation"]
         chunk = b"a" * (4 * 1024 * 1024)
@@ -89,6 +91,27 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await activity.receive_json(timeout=2), {"active": False})
         await activity.close()
         first = self.service.process
+
+        binary = b"firmware" * 1024
+        image = {"address": 0x10000, "size": len(binary), "sha256": hashlib.sha256(binary).hexdigest()}
+        flash = "/api/v1/devices/board/flash"
+        validated = await self.client.post(flash + "/plan", headers=browser_headers,
+                                           json={"generation": generation, "images": [image]})
+        self.assertEqual(validated.status, 201)
+        plan = await validated.json()
+        program = asyncio.create_task(self.client.post(
+            flash + "/program", headers=browser_headers,
+            json={"generation": generation, "plan_id": plan["plan_id"],
+                  "binaries": [base64.b64encode(binary).decode("ascii")]},
+        ))
+        command = await agent.receive_json(timeout=2)
+        self.assertEqual(command["command"], "flash.program")
+        payload = await self.client.get(f"{flash}/program/{command['id']}/0", headers=browser_headers)
+        self.assertEqual(await payload.read(), binary)
+        await agent.send_json({"result": command["id"], "value": [image["sha256"]]})
+        response = await asyncio.wait_for(program, timeout=2)
+        self.assertEqual(response.status, 200)
+        self.assertTrue((await response.json())["verification"][0]["matches"])
 
         issued = await self.client.post("/api/v1/devices/board/control/token", headers=browser_headers)
         self.assertEqual(issued.status, 200)

@@ -1,10 +1,14 @@
 """Python connector for the IDLab HTTP API."""
 
-from dataclasses import dataclass, field, replace
+from collections.abc import Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
+import base64
+import hashlib
 import http.client
 import json
 import os
+from pathlib import Path
 import re
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
@@ -12,6 +16,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 from websockets.sync.client import connect
+
+from .flash_manifest import read_flash_manifest
 
 __all__ = ["Board", "IDLabClient", "IDLabError", "IDLabHTTPError"]
 
@@ -148,6 +154,74 @@ class Board:
             expected_bytes=size, timeout=self._client._timeout * (1 + (size - 1) // maximum),
         )
 
+    def prepare_flash(self, images: Sequence[tuple[int, bytes]]) -> dict:
+        """Validate a plan, entering the loader from a supported console if needed."""
+        if not 1 <= len(images) <= 16 or any(not isinstance(data, bytes) or not data for _, data in images):
+            raise ValueError("Expected 1 to 16 nonempty flash images as bytes")
+        descriptors = [{"address": address, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                       for address, data in images]
+        board = self._flash_loader()
+        return self._client._request(_board_path(self.name) + "/flash/plan",
+                                     {"generation": board.generation, "images": descriptors})
+
+    def prepare_flash_manifest(self, path: str | Path) -> tuple[dict, list[bytes]]:
+        """Load a local manifest, validate its plan, and return the corresponding binaries."""
+        board = self._flash_loader()
+        images = read_flash_manifest(path, board.chip)
+        return board.prepare_flash(images), [data for _, data in images]
+
+    def _flash_loader(self) -> "Board":
+        board = self._client.identify(self.name)
+        if board.generation != self.generation:
+            raise IDLabHTTPError(409, "device_session_changed")
+        if board.mode == "console" and "mode.loader" in board.capabilities:
+            board = board.for_campaign(self.campaign_id).enter_loader()
+            if board.generation != self.generation:
+                raise IDLabHTTPError(409, "device_session_changed")
+        return board
+
+    def program_flash(self, plan_id: str, binaries: Sequence[bytes]) -> dict:
+        """Confirm a validated plan and return its flash write and readback result."""
+        if not 1 <= len(binaries) <= 16 or any(not isinstance(data, bytes) or not data for data in binaries):
+            raise ValueError("Expected 1 to 16 nonempty flash images as bytes")
+        total = sum(map(len, binaries))
+        if total > 64 * 1024 * 1024:
+            raise ValueError("Expected 1 to 16 nonempty flash images totaling up to 64 MiB")
+        payload = {"generation": self.generation, "plan_id": plan_id,
+                   "binaries": [base64.b64encode(data).decode("ascii") for data in binaries]}
+        if self.campaign_id is not None:
+            payload["campaign_id"] = self.campaign_id
+        return self._client._request(_board_path(self.name) + "/flash/program", payload,
+                                     timeout=self._client._timeout * 2 * (1 + (total - 1) // (4 * 1024 * 1024)))
+
+    def erase_flash(self, *, confirmation: str) -> dict:
+        """Erase the entire flash and verify 0xFF readback. Confirm with the board name."""
+        return self._erase_flash("flash.erase", confirmation)
+
+    def erase_flash_region(self, address: int, size: int, *, confirmation: str) -> dict:
+        """Erase only the selected 4 KiB sectors and verify their 0xFF readback."""
+        sector = 4096
+        if (type(address) is not int or type(size) is not int or address < 0 or size < sector
+                or address % sector or size % sector or self.flash_size and address + size > self.flash_size):
+            raise ValueError("Expected a sector-aligned range within the detected flash capacity")
+        return self._erase_flash("flash.erase.region", confirmation, size, address=address)
+
+    def _erase_flash(self, command: str, confirmation: str, size: int | None = None, **region) -> dict:
+        if confirmation != self.name:
+            raise ValueError("Confirm the flash erase with the board name")
+        board = self._flash_loader()
+        if command not in board.capabilities or not board.flash_size:
+            raise ValueError("Flash erase is unavailable in this board session")
+        size = board.flash_size if size is None else size
+        payload = {"generation": board.generation, "command": command, "confirmation": confirmation}
+        if region:
+            payload.update(region, size=size)
+        if self.campaign_id is not None:
+            payload["campaign_id"] = self.campaign_id
+        blocks = 1 + (size - 1) // (4 * 1024 * 1024)
+        return self._client._request(_board_path(self.name) + "/command", payload,
+                                     timeout=self._client._timeout * (1 + blocks))["result"]
+
 
 class IDLabClient:
     def __init__(self, base_url: str | None = None, *, token: str | None = None,
@@ -260,7 +334,9 @@ class IDLabClient:
             raise IDLabError("Invalid board identity") from error
 
     def _request(self, path, arguments=None, *, expected_bytes=None, timeout=None, method=None):
-        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        headers = {"X-IDLab-Client": "python"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
         body = None
         if arguments is not None:
             headers["Content-Type"] = "application/json"

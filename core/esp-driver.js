@@ -4,6 +4,7 @@ const UART_BRIDGES = new Set([0x0403, 0x067b, 0x10c4, 0x1a86]);
 const FLASH_BLOCK = 1024 * 1024;
 export const ESP_SYNC_BAUD = 115200;
 export const MAX_FLASH_READ = 4 * FLASH_BLOCK;
+export const FLASH_SECTOR = 4096;
 
 export function connectionPlan(portInfo, { romOnly, manualEntry, resetToRom }) {
   const { usbVendorId: vid, usbProductId: pid } = portInfo;
@@ -59,6 +60,9 @@ export class EspDriver {
     this.identificationAfterSync = false;
     if (romOnly && loader.syncStubDetected) throw new Error('Un stub tourne déjà. Remets la carte en mode ROM.');
     if (loader.secureDownloadMode) throw new Error('Identité indisponible en mode téléchargement sécurisé.');
+    const security = loader.securityInfoCache;
+    const erasable = security?.parsedFlags?.SECURE_BOOT_EN === false &&
+      security.parsedFlags.SECURE_DOWNLOAD_ENABLE === false && security.flashCryptCnt === 0;
 
     this.connectionStage = 'Lecture de l’identité matérielle';
     let transport = plan.transport;
@@ -84,6 +88,9 @@ export class EspDriver {
       chip, model, mac, flash_size: flashSize, flash_id: flashId, transport,
       usb_vid: usb.usbVendorId ?? null, usb_pid: usb.usbProductId ?? null,
       loader: loader.IS_STUB ? 'stub' : 'rom',
+      ...(loader.IS_STUB && flashSize && erasable ? {
+        erasable: true, erasable_region: Number.isInteger(loader.ESP_ERASE_REGION),
+      } : {}),
     };
     return this.identity;
   }
@@ -135,6 +142,53 @@ export class EspDriver {
     }
     checkSession();
     return data;
+  }
+
+  async programFlash(images, checkSession, onProgress) {
+    if (!this.loader.IS_STUB || !this.identity?.flash_size) throw new Error('operation_unsupported');
+    checkSession();
+    await this.loader.writeFlash({
+      fileArray: images, flashSize: 'keep', flashMode: 'keep', flashFreq: 'keep',
+      eraseAll: false, compress: true,
+      reportProgress: (index, written, total) => {
+        checkSession();
+        onProgress(index, written, total);
+      },
+    });
+    checkSession();
+  }
+
+  async eraseFlash(checkSession, onProgress, region) {
+    if (!this.identity?.erasable || !this.loader.IS_STUB) throw new Error('operation_unsupported');
+    const capacity = this.identity.flash_size;
+    const {address: start, size} = region ?? {address: 0, size: capacity};
+    if (region && (!this.identity.erasable_region || !Number.isSafeInteger(start) || !Number.isSafeInteger(size) ||
+        start < 0 || size < FLASH_SECTOR || start % FLASH_SECTOR || size % FLASH_SECTOR || start + size > capacity)) {
+      throw new Error('invalid_flash_range');
+    }
+    checkSession();
+    if (region) {
+      const packet = new DataView(new ArrayBuffer(8));
+      packet.setUint32(0, start, true);
+      packet.setUint32(4, size, true);
+      const timeout = this.loader.timeoutPerMb(this.loader.ERASE_REGION_TIMEOUT_PER_MB, size);
+      await this.loader.checkCommand('erase flash region', this.loader.ESP_ERASE_REGION,
+        new Uint8Array(packet.buffer), 0, 0, timeout);
+    } else {
+      await this.loader.eraseFlash();
+    }
+    checkSession();
+    let first = null;
+    for (let offset = 0; offset < size; offset += FLASH_BLOCK) {
+      const length = Math.min(FLASH_BLOCK, size - offset);
+      const address = start + offset;
+      const block = await this.readFlash(address, length, checkSession, read => onProgress(offset + read));
+      if (first === null) {
+        const offset = block.findIndex(byte => byte !== 0xff);
+        if (offset >= 0) first = address + offset;
+      }
+    }
+    return {address: start, size, first_non_ff: first};
   }
 
   async close() {

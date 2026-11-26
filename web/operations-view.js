@@ -1,5 +1,8 @@
-import { $, download, element, run, say } from './dom.js';
+import { $, download, element, FLASH_PREVIEW_BYTES, flashNumber, formatFlashPreview, operationOrigin, run, say } from './dom.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
+
+const alternatePartitionAddress = new Map([[0x8000, 0x10000], [0x10000, 0x8000]]);
+const hex = value => '0x' + value.toString(16);
 
 function iconAction(icon, label, help) {
   const button = element('button', undefined, 'icon-action');
@@ -34,7 +37,7 @@ function operationDetails(entry) {
   save.onclick = () => download(new Blob([proof + '\n'], {type: 'application/json'}),
     'idlab-' + entry.device + '-operation-' + entry.id + '.json');
   actions.append(copy, save);
-  toolbar.append(element('span', 'Détail de l’opération'), actions);
+  toolbar.append(element('span', ['Détail de l’opération', operationOrigin(entry)].filter(Boolean).join(' · ')), actions);
   panel.append(toolbar, element('pre', proof, 'operation-detail-json result'));
   cell.append(panel);
   row.append(cell);
@@ -67,7 +70,9 @@ export function renderOperationHistory(card) {
       if (!event.repeat) toggleDetails();
     };
     row.append(element('td', entry.id));
-    for (const value of [entry.device, entry.command === 'flash.read' ? 'Lecture flash' : entry.command, entry.state, entry.duration]) {
+    const commands = {'flash.read': 'Lecture flash', 'flash.program': 'Programmation flash',
+      'flash.erase': 'Effacement global', 'flash.erase.region': 'Effacement de zone'};
+    for (const value of [entry.device, commands[entry.command] ?? entry.command, entry.state, entry.duration]) {
       row.append(element('td', value ?? '—'));
     }
     body.append(row);
@@ -77,48 +82,56 @@ export function renderOperationHistory(card) {
 
 export function renderOperations(card) {
   renderOperationHistory(card);
-  $('dump-state').textContent = card?.dump?.summary ?? 'Aucune relecture.';
-  $('hex-dump').textContent = card?.dump?.preview ?? 'Aucune donnée lue.';
-  $('download-dump').disabled = !card?.dump;
+  $('dump-state').textContent = card?.dump?.summary ?? 'Aucun aperçu de la flash.';
+  $('hex-dump').textContent = card?.dump?.preview ?? 'Aucune donnée à afficher.';
+  $('download-dump').disabled = !card?.dump?.blob;
 }
 
 export function renderPartitions(card, canRead) {
   const table = card?.partitions;
+  const currentTable = card?.partitionsGeneration === card?.identity?.generation;
   $('read-partitions').disabled = !canRead;
-  $('try-partition-address').disabled = !canRead;
-  $('partition-suggestion').hidden = !card?.suggestPartition;
+  const suggestion = card?.suggestPartition;
+  const tryAddress = $('try-partition-address');
+  tryAddress.disabled = !canRead || !suggestion;
+  $('partition-suggestion').hidden = !suggestion;
+  if (suggestion) {
+    $('partition-suggestion-text').textContent = `Aucune table valide à ${hex(suggestion.failed)}. Essaie l’autre adresse courante.`;
+    tryAddress.textContent = `Essayer ${hex(suggestion.address)}`;
+  }
   $('partition-state').textContent = card?.partitionStatus ?? 'Aucune table lue.';
   $('partitions-body').replaceChildren(...(table ?? []).map(part => {
-    const row = element('tr');
-    const hex = value => '0x' + value.toString(16);
+    const row = element('tr', undefined, 'partition-row');
     for (const value of [part.label, hex(part.type) + ' / ' + hex(part.subtype),
       hex(part.address), hex(part.size), hex(part.address + part.size)]) row.append(element('td', value));
-    const action = element('td');
-    const read = iconAction('read', 'Lire la partition ' + part.label,
-      'Ouvre Lecture mémoire et lance la lecture de cette partition.');
-    read.disabled = !canRead;
-    read.onclick = () => {
+    const enabled = Boolean(canRead && currentTable);
+    row.setAttribute('aria-disabled', String(!enabled));
+    row.dataset.guideHelp = enabled ? 'Renseigne la plage et lit la partition « ' + part.label + ' ».'
+      : currentTable ? 'La lecture est indisponible dans l’état actuel de la carte.' : 'Relis la table des partitions.';
+    if (!enabled) return row;
+    row.tabIndex = 0;
+    const read = () => {
       $('address').value = hex(part.address);
       $('size').value = hex(part.size);
-      $('tab-memory').click();
-      $('tab-memory').focus();
+      $('address').focus();
       $('read').click();
     };
-    action.append(read);
-    row.append(action);
+    row.onclick = () => {
+      if (window.getSelection()?.isCollapsed !== false) read();
+    };
+    row.onkeydown = event => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      if (!event.repeat) read();
+    };
     return row;
   }));
-}
-
-function flashNumber(value) {
-  if (!/^(0x[0-9a-f]+|[0-9]+)$/i.test(value)) throw new Error('Adresse ou taille invalide.');
-  return Number(value);
 }
 
 export function wireOperations({getSelected, render, observeCard}) {
   $('download-dump').onclick = () => {
     const dump = getSelected()?.dump;
-    if (dump) download(dump.blob, dump.filename);
+    if (dump?.blob) download(dump.blob, dump.filename);
   };
 
   async function readPartitions() {
@@ -126,24 +139,34 @@ export function wireOperations({getSelected, render, observeCard}) {
     if (!card || card.busy || card.requesting || $('read').disabled) return;
     say('');
     card.partitions = [];
-    card.suggestPartition = false;
+    card.suggestPartition = null;
     card.partitionStatus = 'Lecture de la table…';
     render();
     let address;
     try {
       address = flashNumber($('partition-address').value.trim());
+      const generation = card.identity.generation;
       const {blob, capacity} = await card.readFlash(address, PARTITION_TABLE_BYTES);
       card.partitions = decodePartitions(new Uint8Array(await blob.arrayBuffer()), capacity);
+      card.partitionsGeneration = generation;
       card.partitionStatus = card.partitions.length + ' partition(s) lue(s).';
     } catch (error) {
-      card.suggestPartition = address === 0x8000 && error.message === 'partition_table_invalid';
+      const alternate = alternatePartitionAddress.get(address);
+      if (alternate !== undefined && error.message === 'partition_table_invalid') {
+        card.suggestPartition = {failed: address, address: alternate};
+      }
       card.partitionStatus = error.message === 'partition_table_invalid' ? 'Aucune table valide à cette adresse.' : error.message;
     } finally {
       if (card === getSelected()) render();
     }
   }
   $('read-partitions').onclick = readPartitions;
-  $('try-partition-address').onclick = () => { $('partition-address').value = '0x10000'; readPartitions(); };
+  $('try-partition-address').onclick = () => {
+    const suggestion = getSelected()?.suggestPartition;
+    if (!suggestion) return;
+    $('partition-address').value = hex(suggestion.address);
+    return readPartitions();
+  };
 
   $('read').onclick = async () => {
     const card = getSelected();
@@ -156,10 +179,10 @@ export function wireOperations({getSelected, render, observeCard}) {
       const address = flashNumber($('address').value.trim());
       const size = flashNumber($('size').value.trim());
       const {blob} = await card.readFlash(address, size);
-      const preview = new Uint8Array(await blob.slice(0, 256).arrayBuffer());
+      const preview = new Uint8Array(await blob.slice(0, FLASH_PREVIEW_BYTES).arrayBuffer());
       card.dump = {blob, filename: card.name + '-0x' + address.toString(16) + '.bin',
         summary: blob.size + ' octets lus • aperçu des ' + preview.length + ' premiers octets',
-        preview: Array.from(preview, byte => byte.toString(16).padStart(2, '0')).join(' ')};
+        preview: formatFlashPreview(preview)};
       if (card === getSelected()) say('Lecture flash terminée. Le fichier est prêt à télécharger.', {temporary: true});
     } catch (error) {
       say(error.message);

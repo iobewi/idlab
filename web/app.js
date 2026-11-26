@@ -8,6 +8,7 @@ import { renderOperationHistory, renderOperations, renderPartitions, wireOperati
 import { renderRom, wireRomDialog } from './rom-dialog.js';
 import { externallyControlled, wireWorkbenchShell } from './workbench-shell.js';
 import { ensureWebSession } from './web-session.js';
+import { renderFlashPlan, wireFlashPlan } from './flash-plan-view.js';
 import { updateHelp, wireControlHelp } from './control-help.js';
 
 const cards = new Map();
@@ -124,7 +125,7 @@ function render() {
   consolesTab.title = consoleUnavailable
     ? selected.canReturnToConsole ? 'Utilise « Revenir à la console » dans les commandes de la carte.' : manualConsoleReturn
     : '';
-  for (const id of ['tab-partitions', 'tab-flash', 'tab-memory', 'tab-tools']) {
+  for (const id of ['tab-flash', 'tab-memory', 'tab-tools']) {
     const tab = $(id);
     if (romActive && tab.getAttribute('aria-selected') === 'true') {
       const active = document.activeElement;
@@ -145,6 +146,7 @@ function render() {
   const canRead = autoLoader || (loader && info?.capabilities.includes('flash.read'));
   $('read').disabled = !canRead;
   renderPartitions(selected, canRead);
+  renderFlashPlan(selected, available);
   const flashHint = $('flash-availability');
   flashHint.textContent = selected?.mode === 'connecting' && selected.requesting ? 'Transition console / chargeur…'
     : selected?.mode === 'console' ? (selected.canEnterLoader
@@ -391,6 +393,7 @@ const updateWakeLock = wireWorkbenchShell(cards, stopTarget);
 const onRomCardChange = wireRomDialog({getSelected, hasCard: card => cards.get(card.name) === card});
 wireConsole({getSelected, render, observeCard});
 wireOperations({getSelected, render, observeCard});
+wireFlashPlan({getSelected, render, observeCard});
 
 const emptyCards = element('p', 'Aucune carte connectée dans cette fenêtre.', 'hint');
 emptyCards.id = 'empty-cards';

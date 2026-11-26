@@ -157,6 +157,10 @@ entre 0 et 5000 et vaut 0 par défaut.
 carte, la progression en cours, jusqu’à 300 messages du journal et les
 100 dernières opérations de cette génération. La consultation utilise
 les mêmes droits que la lecture UART. En Python, utiliser `board.activity()`.
+Les opérations, la progression et les messages associés contiennent `source`
+(`web`, `python` ou `api`) et `session_id`. L’identifiant sert à corréler les
+opérations d’une session et ne donne aucun accès. Le SDK déclare `python` via
+`X-IDLab-Client: python`. Cet en-tête sert à l’affichage et ne donne aucun droit.
 
 Un nom de carte contient de 1 à 48 caractères ASCII parmi les lettres,
 chiffres, tirets et underscores. Le premier caractère est alphanumérique.
@@ -186,11 +190,95 @@ au serveur par blocs de 4 Mio maximum. Le champ `campaign_id` est facultatif. Un
 lecture à la fois. Une lecture incomplète renvoie une erreur, ferme la session
 et ne livre aucun résultat partiel.
 
+## Programmation flash
+
+La carte doit être en mode chargeur avec un stub, une capacité connue et la
+capacité `flash.program`. Le Web et une session Python déléguée utilisent
+les mêmes routes sous `/api/v1/devices/{name}/flash`.
+
+| Méthode et chemin | Corps JSON | Résultat |
+|---|---|---|
+| `POST /plan` | `generation` et `images` avec `address`, `size`, `sha256` pour chaque image | `201` avec `plan_id` et les images validées |
+| `POST /program` | `generation`, `plan_id`, `binaries` en base64 dans l’ordre du plan et `campaign_id` facultatif | `200` avec le résultat d’écriture et `verification` par image |
+
+Un plan comprend de 1 à 16 images pour un total de 64 Mio maximum, dans la
+limite de la capacité mesurée. Chaque adresse de départ est alignée sur 4 Kio.
+Les secteurs occupés sont arrondis au secteur supérieur et ne peuvent pas se
+chevaucher. La validation ne fait aucun accès à la flash. Le plan est valable dix
+minutes dans la même génération et le même contexte de pilotage. Un nouveau
+plan remplace le précédent. Un plan consommé doit être validé à nouveau.
+
+Le serveur contrôle la taille et le SHA-256 de chaque binaire avant l’écriture.
+Pendant l’opération, le connecteur série récupère les binaires avec le cookie
+de la session Web propriétaire de la carte. Le chargeur préserve les paramètres
+flash présents dans les images. L’écriture cible les secteurs du plan.
+
+La vérification relit les octets des images sur la même session chargeur.
+Chaque résultat contient `address`, `size`, `sha256`, `readback_sha256` et
+`matches`. Le connecteur transmet aussi `readback_preview`, les 256 premiers
+octets relus au format hexadécimal, ou tous les octets si l’image est plus courte.
+Un écart retourne `502 flash_verification_failed` et apparaît dans
+l’historique comme un échec. L’arrêt peut laisser la flash partiellement
+programmée. Après vérification, la carte reste dans le chargeur.
+
+En Python, préparer le plan et examiner ses adresses, tailles et empreintes
+avant de confirmer par un appel distinct à `program_flash`.
+
+```python
+from pathlib import Path
+
+firmware = Path(firmware_path).read_bytes()
+with lab.control(board_name, board_token) as board:
+    if board.mode == "console":
+        board = board.enter_loader()
+    plan = board.prepare_flash([(firmware_address, firmware)])
+    print(plan["images"])
+    if input("Confirmer la programmation [oui/non] ? ") == "oui":
+        operation = board.program_flash(plan["plan_id"], [firmware])
+        print(operation["verification"])
+```
+
+Le Web et le SDK acceptent un manifeste ESP Web Tools avec `builds` et
+`chipFamily`, ou un plan simple avec `parts`. Chaque élément de `parts`
+contient `path` (fichier local relatif au manifeste) et `offset` (entier en
+octets). Pour le SDK, `plan, binaries = board.prepare_flash_manifest(path)`
+prépare les mêmes données que l’ajout manuel. `board.program_flash(plan["plan_id"], binaries)`
+confirme ensuite l’écriture. Les clients ouvrent le chargeur depuis une console
+compatible avant la validation ou l’effacement. Les routes de programmation
+et d’effacement exigent toujours une session chargeur.
+
+### Effacement intégral
+
+`POST /api/v1/devices/{name}/command` accepte `command: "flash.erase"`, la
+`generation` actuelle et `confirmation` égale au nom exact de la carte.
+Le navigateur propriétaire ou le client Python délégué détient le contrôle
+exclusif pendant l’effacement et la vérification. La capacité `flash.erase`
+est annoncée quand le stub est actif, la taille est connue et la ROM a confirmé
+que le démarrage sécurisé et le téléchargement sécurisé sont désactivés et que
+le compteur de chiffrement flash est nul. Si l’état est inconnu, la commande
+est indisponible.
+
+Le connecteur utilise la commande matérielle d’effacement et relit toute la
+capacité par blocs. Le champ `result` contient `address: 0`, `size` et
+`first_non_ff`. Un résultat réussi a `first_non_ff: null`. Une différence
+renvoie `502 flash_erase_verification_failed` et l’historique indique la première
+adresse différente. L’arrêt ne restaure aucune donnée déjà effacée. La carte
+reste en mode chargeur. En Python, appeler `board.erase_flash(confirmation=nom_saisi)`
+après avoir fait confirmer le nom de la carte à l’opérateur.
+
+`flash.erase.region` accepte le même corps avec deux champs entiers
+supplémentaires, `address` et `size`, et exige la capacité `flash.erase.region`.
+Le début et la taille doivent être alignés sur 4 Kio, et la plage doit tenir en
+flash. Les secteurs demandés et eux seuls sont effacés et relus. Le résultat
+utilise la même structure, avec l’adresse absolue de la première différence s’il
+y en a une. Depuis Python, appeler
+`board.erase_flash_region(address, size, confirmation=nom_saisi)`.
+
 ## Campagnes
 
 Une campagne regroupe les opérations d’un essai et son verdict. Le web
 et les scripts associent une opération en envoyant `campaign_id` dans
-le corps de `/command` ou de `/flash/read`. Ce champ est facultatif et
+le corps de `/command`, `/flash/read` ou `/flash/program`. Ce champ est facultatif et
 s’applique à la requête. Une campagne peut couvrir plusieurs cartes.
 
 | Méthode et chemin | Corps JSON | Succès |

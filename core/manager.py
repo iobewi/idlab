@@ -180,8 +180,15 @@ def create_app(*, token, port=8080, service=None):
                 return problem(503, "idlab_http_unavailable")
 
         try:
-            body = await request.read() if request.can_read_body else None
-            timeout = {"timeout": ClientTimeout(total=None, connect=2)} if request.path.endswith("/flash/read") else {}
+            program = (request.method == "POST" and request.path.startswith("/api/v1/devices/")
+                       and request.path.endswith("/flash/program"))
+            if program:
+                # The authenticated handler bounds the upload. Avoid buffering it twice.
+                body = request.content.iter_chunked(64 * 1024)
+            else:
+                body = await request.read() if request.can_read_body else None
+            timeout = ({"timeout": ClientTimeout(total=None, connect=2)}
+                       if request.path.endswith(("/flash/read", "/flash/program", "/command")) else {})
             async with request.app[UPSTREAM].request(
                 request.method, upstream, headers=headers, data=body, allow_redirects=False, **timeout,
             ) as response:

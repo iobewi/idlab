@@ -3,6 +3,7 @@ import { openSerialConsole, resetConsole } from './serial-console.js';
 
 const CONSOLE_BAUD = 115200;
 const toHex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+export const sha256 = async bytes => toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
 
 async function api(path, options) {
   const response = await fetch('/api/v1' + path, options);
@@ -169,6 +170,7 @@ export class BoardConnector {
   }
 
   #publishIdentity(identity) {
+    identity = {...identity, programmable: true};
     if (!this.socket) return this.#register(identity);
     return new Promise((resolve, reject) => {
       const settle = (error, value) => {
@@ -250,6 +252,14 @@ export class BoardConnector {
         const capacity = await this.#withLoader(() => this.#readFlashBlocks(socket, command, check));
         check();
         if (command.stream) socket.send(JSON.stringify({result: command.id, value: capacity}));
+      } else if (command.command === 'flash.program') {
+        const {digests, previews} = await this.#programFlash(socket, command, check);
+        check();
+        socket.send(JSON.stringify({result: command.id, value: digests, previews}));
+      } else if (command.command === 'flash.erase' || command.command === 'flash.erase.region') {
+        const value = await this.#eraseFlash(socket, command, check);
+        check();
+        socket.send(JSON.stringify({result: command.id, value}));
       } else {
         const value = await this.#runCommand(command);
         check();
@@ -261,10 +271,15 @@ export class BoardConnector {
           : error.message === 'invalid_flash_range' ? 'invalid_flash_range' : 'device_command_failed';
         socket.send(command.command === 'flash.read' && !command.stream && !this.commandCancelled ? command.id
           : JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
-            detail: ['mode.loader', 'identify'].includes(command.command) ? error.message : undefined}));
+            detail: ['mode.loader', 'identify', 'flash.program', 'flash.erase', 'flash.erase.region'].includes(command.command)
+              ? error.message : undefined}));
       }
       this.#log(error.message);
     } finally {
+      if (this.flashTransferInterrupted) {
+        this.flashTransferInterrupted = false;
+        socket.close();
+      }
       this.activeCommand = null;
       this.commandCancelled = false;
       this.busy = false;
@@ -276,7 +291,7 @@ export class BoardConnector {
 
   #log(message) {
     if (this.identity && this.socket?.readyState === 1) {
-      this.socket.send(JSON.stringify({journal: message}));
+      this.socket.send(JSON.stringify({journal: message, operation: this.activeCommand ?? undefined}));
     } else {
       this.startupJournal.push(message);
       if (this.startupJournal.length > 20) this.startupJournal.shift();
@@ -308,6 +323,91 @@ export class BoardConnector {
     return capacity;
   }
 
+  async #programFlash(socket, {id, images}, check) {
+    const capacity = this.identity.flash_size;
+    if (this.mode !== 'loader' || this.identity.loader !== 'stub' || !capacity) {
+      throw new Error('Le chargeur flash doit être ouvert pour programmer.');
+    }
+    const files = [];
+    let end = 0;
+    const regions = [...images].sort((a, b) => a.address - b.address);
+    for (const {address, size} of regions) {
+      if (!Number.isSafeInteger(address) || !Number.isSafeInteger(size) ||
+          address % 4096 || address < end || size < 1 || address + Math.ceil(size / 4096) * 4096 > capacity) {
+        throw new Error('invalid_flash_range');
+      }
+      end = address + Math.ceil(size / 4096) * 4096;
+    }
+    const total = images.reduce((sum, image) => sum + image.size, 0);
+    let lastUpdate = -Infinity;
+    const progress = (phase, address, received, force = false) => {
+      const now = performance.now();
+      if (!force && received < total && now - lastUpdate < 250) return;
+      lastUpdate = now;
+      socket.send(JSON.stringify({id, progress: {phase, address, received, total}}));
+    };
+    for (const [index, image] of images.entries()) {
+      check();
+      const response = await this.request(`/devices/${this.name}/flash/program/${id}/${index}`);
+      const data = new Uint8Array(await response.arrayBuffer());
+      if (data.length !== image.size || await sha256(data) !== image.sha256) {
+        throw new Error('Le binaire reçu diffère du plan validé.');
+      }
+      files.push({address: image.address, data});
+    }
+    const offsets = [0];
+    for (const {size} of images) offsets.push(offsets.at(-1) + size);
+    check();
+    // An interrupted write or readback can leave the stub in a transfer.
+    this.flashTransferInterrupted = true;
+    progress('write', images[0].address, 0, true);
+    await this.session.programFlash(files, check, (index, sent, compressed) => {
+      const {address, size} = images[index];
+      progress('write', address, offsets[index] + Math.floor(size * sent / compressed));
+    });
+    this.#log('Programmation terminée · relecture SHA-256');
+    const digests = [];
+    const previews = [];
+    progress('verify', images[0].address, 0, true);
+    for (const [index, {address, size}] of images.entries()) {
+      const readback = new Uint8Array(size);
+      for (let offset = 0; offset < size; offset += MAX_FLASH_READ) {
+        check();
+        const length = Math.min(size - offset, MAX_FLASH_READ);
+        const block = await this.session.readFlash(address + offset, length, check,
+          received => progress('verify', address, offsets[index] + offset + received));
+        readback.set(block, offset);
+      }
+      digests.push(await sha256(readback));
+      previews.push(toHex(readback.subarray(0, 256)));
+    }
+    this.flashTransferInterrupted = false;
+    return {digests, previews};
+  }
+
+  async #eraseFlash(socket, command, check) {
+    const {id, command: type} = command;
+    if (!this.identity?.capabilities.includes(type) || !this.session?.identity?.erasable) {
+      throw new Error('Effacement indisponible sur cette carte.');
+    }
+    const region = type === 'flash.erase.region' ? {address: command.address, size: command.size} : undefined;
+    const {address, size: total} = region ?? {address: 0, size: this.identity.flash_size};
+    let lastUpdate = -Infinity;
+    const progress = (phase, received) => {
+      const now = performance.now();
+      if (received && received < total && now - lastUpdate < 250) return;
+      lastUpdate = now;
+      socket.send(JSON.stringify({id, progress: {phase, address, received, total}}));
+    };
+    this.flashTransferInterrupted = true;
+    progress('erase', 0);
+    this.#log(region ? 'Effacement de la zone flash · vérification par relecture'
+      : 'Effacement intégral · vérification de tous les octets après effacement');
+    const result = await this.session.eraseFlash(check, received => progress('erase-verify', received), region);
+    this.flashTransferInterrupted = false;
+    return result;
+  }
+
   async #runCommand({command, hex, reset}) {
     if (command === 'mode.loader' && this.mode === 'console' && this.canEnterLoader) {
       await this.#enterLoaderFromConsole();
@@ -319,7 +419,7 @@ export class BoardConnector {
     } else if (command === 'uart.write' && this.mode === 'console') {
       const bytes = Uint8Array.from(hex.match(/../g), byte => parseInt(byte, 16));
       await this.session.write(bytes);
-      this.socket.send(JSON.stringify({journal: 'UART TX · ' + hex}));
+      this.#log('UART TX · ' + hex);
     } else if (command === 'mode.rom') {
       await this.#enterRom(reset);
     } else if (command === 'rom.jedec' && this.mode === 'loader' && this.identity?.loader === 'rom') {
@@ -452,6 +552,27 @@ export class BoardConnector {
   }
 
   enterLoader() { return this.#command('mode.loader'); }
+
+  eraseFlash(confirmation) { return this.#command('flash.erase', {confirmation}); }
+
+  eraseFlashRegion(confirmation, address, size) {
+    return this.#command('flash.erase.region', {confirmation, address, size});
+  }
+
+  prepareProgram(images) {
+    return this.#programRequest('plan', {images});
+  }
+
+  programFlash(planId, binaries) {
+    return this.#programRequest('program', {plan_id: planId, binaries}, true);
+  }
+
+  #programRequest(path, fields, campaign = false) {
+    const body = campaign ? this.#operationBody(fields) : JSON.stringify({generation: this.identity.generation, ...fields});
+    return this.#exclusive(async () => (await this.request(`/devices/${this.name}/flash/${path}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body,
+    })).json());
+  }
 
   returnConsole() {
     if (!this.canReturnToConsole) return Promise.reject(new Error('Un RESET manuel sans BOOT est nécessaire.'));
