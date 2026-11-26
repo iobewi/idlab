@@ -405,6 +405,15 @@ curl --fail-with-body -H "$auth" -H 'Content-Type: application/json' \
 
 ## Erreurs à traiter
 
+Lorsqu'une opération matérielle rencontre une interruption HTTP incertaine,
+le SDK ferme le contrôle délégué et refuse de réutiliser cette session.
+Une demande d'annulation ne constitue pas une confirmation de terminaison.
+Les enregistrements d'opération peuvent inclure `cancelRequestedAt`,
+`termination` (`completed`, `cancelled` ou `unknown`) et
+`recoveryRequired`. Une terminaison inconnue ou un transfert interrompu
+nécessite une vérification de la carte avant toute nouvelle opération.
+Aucun rejeu automatique n'est effectué.
+
 Les erreurs métier utilisent un objet `{"error":"code"}`. Les erreurs de
 routage ou de taille émises par le serveur HTTP peuvent avoir un autre format.
 Les refus de négociation WebSocket conservent le statut HTTP et le code métier
