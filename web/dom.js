@@ -3,6 +3,8 @@ export function flashNumber(value) {
   if (!/^(0x[0-9a-f]+|[0-9]+)$/i.test(value)) throw new Error('Adresse ou taille invalide.');
   return Number(value);
 }
+export const FLASH_PREVIEW_BYTES = 256;
+export const formatFlashPreview = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(' ');
 let noticeTimer;
 
 export function say(message, {temporary = false} = {}) {

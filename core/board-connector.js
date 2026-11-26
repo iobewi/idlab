@@ -253,9 +253,9 @@ export class BoardConnector {
         check();
         if (command.stream) socket.send(JSON.stringify({result: command.id, value: capacity}));
       } else if (command.command === 'flash.program') {
-        const verification = await this.#programFlash(socket, command, check);
+        const {digests, previews} = await this.#programFlash(socket, command, check);
         check();
-        socket.send(JSON.stringify({result: command.id, value: verification}));
+        socket.send(JSON.stringify({result: command.id, value: digests, previews}));
       } else if (command.command === 'flash.erase' || command.command === 'flash.erase.region') {
         const value = await this.#eraseFlash(socket, command, check);
         check();
@@ -367,6 +367,7 @@ export class BoardConnector {
     });
     this.#log('Programmation terminée · relecture SHA-256');
     const digests = [];
+    const previews = [];
     progress('verify', images[0].address, 0, true);
     for (const [index, {address, size}] of images.entries()) {
       const readback = new Uint8Array(size);
@@ -378,9 +379,10 @@ export class BoardConnector {
         readback.set(block, offset);
       }
       digests.push(await sha256(readback));
+      previews.push(toHex(readback.subarray(0, 256)));
     }
     this.flashTransferInterrupted = false;
-    return digests;
+    return {digests, previews};
   }
 
   async #eraseFlash(socket, command, check) {

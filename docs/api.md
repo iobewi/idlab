@@ -211,7 +211,9 @@ flash présents dans les images. L’écriture cible les secteurs du plan.
 
 La vérification relit les octets des images sur la même session chargeur.
 Chaque résultat contient `address`, `size`, `sha256`, `readback_sha256` et
-`matches`. Un écart retourne `502 flash_verification_failed` et apparaît dans
+`matches`. Le connecteur transmet aussi `readback_preview`, les 256 premiers
+octets relus au format hexadécimal, ou tous les octets si l’image est plus courte.
+Un écart retourne `502 flash_verification_failed` et apparaît dans
 l’historique comme un échec. L’arrêt peut laisser la flash partiellement
 programmée. Après vérification, la carte reste dans le chargeur.
 

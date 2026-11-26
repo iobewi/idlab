@@ -1,4 +1,4 @@
-import { $, download, element, flashNumber, run, say } from './dom.js';
+import { $, download, element, FLASH_PREVIEW_BYTES, flashNumber, formatFlashPreview, run, say } from './dom.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 import { canErasePartition } from './flash-plan-view.js';
 
@@ -80,9 +80,9 @@ export function renderOperationHistory(card) {
 
 export function renderOperations(card) {
   renderOperationHistory(card);
-  $('dump-state').textContent = card?.dump?.summary ?? 'Aucune relecture.';
-  $('hex-dump').textContent = card?.dump?.preview ?? 'Aucune donnée lue.';
-  $('download-dump').disabled = !card?.dump;
+  $('dump-state').textContent = card?.dump?.summary ?? 'Aucun aperçu de la flash.';
+  $('hex-dump').textContent = card?.dump?.preview ?? 'Aucune donnée à afficher.';
+  $('download-dump').disabled = !card?.dump?.blob;
 }
 
 export function renderPartitions(card, canRead, available, openErase) {
@@ -120,7 +120,7 @@ export function renderPartitions(card, canRead, available, openErase) {
 export function wireOperations({getSelected, render, observeCard}) {
   $('download-dump').onclick = () => {
     const dump = getSelected()?.dump;
-    if (dump) download(dump.blob, dump.filename);
+    if (dump?.blob) download(dump.blob, dump.filename);
   };
 
   async function readPartitions() {
@@ -160,10 +160,10 @@ export function wireOperations({getSelected, render, observeCard}) {
       const address = flashNumber($('address').value.trim());
       const size = flashNumber($('size').value.trim());
       const {blob} = await card.readFlash(address, size);
-      const preview = new Uint8Array(await blob.slice(0, 256).arrayBuffer());
+      const preview = new Uint8Array(await blob.slice(0, FLASH_PREVIEW_BYTES).arrayBuffer());
       card.dump = {blob, filename: card.name + '-0x' + address.toString(16) + '.bin',
         summary: blob.size + ' octets lus • aperçu des ' + preview.length + ' premiers octets',
-        preview: Array.from(preview, byte => byte.toString(16).padStart(2, '0')).join(' ')};
+        preview: formatFlashPreview(preview)};
       if (card === getSelected()) say('Lecture flash terminée. Le fichier est prêt à télécharger.', {temporary: true});
     } catch (error) {
       say(error.message);

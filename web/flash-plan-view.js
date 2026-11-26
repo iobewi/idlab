@@ -1,6 +1,6 @@
 import { sha256 } from './board-connector.js';
 import { FLASH_SECTOR } from './esp-driver.js';
-import { $, element, flashNumber, run, say } from './dom.js';
+import { $, element, FLASH_PREVIEW_BYTES, flashNumber, formatFlashPreview, run, say } from './dom.js';
 import { importManifest } from './flash-manifest.js';
 
 const plans = new WeakMap();
@@ -172,6 +172,7 @@ async function writeImages(card, generation, planId, files, isSelected) {
   for (const {file} of files) binaries.push(encodeBase64(new Uint8Array(await file.arrayBuffer())));
   if (card.identity?.generation !== generation || !isSelected()) throw new Error('La carte ou sa session a changé.');
   card.partitionsGeneration = null;
+  card.dump = null;
   return card.programFlash(planId, binaries);
 }
 
@@ -236,7 +237,14 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
         say('Validation du binaire…');
         const approval = await prepareImages(card, generation, entries, () => say('Ouverture du chargeur flash…'));
         say('Écriture et relecture en cours…');
-        await writeImages(card, generation, approval.plan_id, entries, () => card === getSelected());
+        const result = await writeImages(card, generation, approval.plan_id, entries, () => card === getSelected());
+        const preview = result.verification?.[0]?.readback_preview?.match(/../g);
+        if (card.identity?.generation === generation && preview?.length) {
+          card.dump = {
+            summary: `${file.size} octets vérifiés à ${hex(address)} • ${preview.length} premiers octets relus`,
+            preview: preview.join(' '),
+          };
+        }
         if (card === getSelected()) say('Écriture vérifiée par relecture SHA-256.');
       } catch (error) {
         if (card === getSelected()) say(errors[error.message] ?? error.message);
@@ -296,13 +304,19 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
         if (canOpenLoader(card)) await card.enterLoader();
         if (card.identity?.generation !== generation || card !== getSelected()) throw new Error('La carte ou sa session a changé.');
         if (!card.identity.capabilities.includes(eraseCapability(region))) throw new Error('Effacement indisponible pour cette carte.');
-        if (region) {
-          if (!validRegion(card, region)) throw new Error('La plage dépasse la capacité mesurée.');
-          await card.eraseFlashRegion(typed, region.address, region.size);
-        } else {
+        if (region && !validRegion(card, region)) throw new Error('La plage dépasse la capacité mesurée.');
+        card.dump = null;
+        if (!region) {
           card.partitions = null;
           card.partitionStatus = null;
-          await card.eraseFlash(typed);
+        }
+        const {result} = region ? await card.eraseFlashRegion(typed, region.address, region.size) : await card.eraseFlash(typed);
+        if (card.identity?.generation === generation) {
+          const length = Math.min(result.size, FLASH_PREVIEW_BYTES);
+          card.dump = {
+            summary: `${result.size} octets effacés et vérifiés à ${hex(result.address)} • aperçu des ${length} premiers octets`,
+            preview: formatFlashPreview(new Uint8Array(length).fill(0xff)),
+          };
         }
         if (card === getSelected()) say(region ? 'Plage effacée et vérifiée à 0xFF.'
           : 'Effacement intégral vérifié. Tous les octets valent 0xFF.');

@@ -891,9 +891,19 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 return problem(502, "flash_program_failed")
             verification = [image | {"readback_sha256": digest, "matches": digest == image["sha256"]}
                             for image, digest in zip(plan.images, digests, strict=True)]
+            if "previews" in result:
+                previews = result["previews"]
+                if not isinstance(previews, list) or len(previews) != len(verification):
+                    return problem(502, "flash_program_failed")
+                for image, preview, binary in zip(verification, previews, binaries, strict=True):
+                    length = min(image["size"], 256) * 2
+                    if not isinstance(preview, str) or len(preview) != length or not re.fullmatch(r"[0-9a-f]+", preview):
+                        return problem(502, "flash_program_failed")
+                    image["readback_preview"] = preview
+                    image["matches"] = image["matches"] and preview == binary[:256].hex()
             record["verification"] = verification
             complete = all(image["matches"] for image in verification)
-            record["detail"] = "Écriture vérifiée par relecture SHA-256." if complete else "SHA-256 relu différent."
+            record["detail"] = "Écriture vérifiée par relecture SHA-256." if complete else "La relecture diffère du binaire attendu."
         except TimeoutError:
             record["detail"] = "Le connecteur n’a pas répondu à temps."
             await board.socket.close(code=1011)

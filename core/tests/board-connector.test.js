@@ -367,6 +367,7 @@ test('programs only the validated bytes, then hashes the actual flash readback',
   const result = await program([image]);
   assert.deepEqual(writes, [{address: 4096, data: firmware}]);
   assert.deepEqual(result.value, [await sha256(stored)]);
+  assert.deepEqual(result.previews, ['010204']);
   assert(progress.some(entry => entry.phase === 'write'));
   assert(progress.some(entry => entry.phase === 'verify'));
   assert.equal(card.mode, 'loader');

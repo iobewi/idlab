@@ -286,7 +286,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.to_thread(board.program_flash, plan["plan_id"], [b"x" * 8192, binaries[1]])
             self.assertEqual(modified.exception.code, "flash_image_mismatch")
 
-            for matches in (True, False):
+            for mismatch in (None, "preview", "sha256"):
                 program = asyncio.create_task(asyncio.to_thread(board.program_flash, plan["plan_id"], binaries))
                 command = await agent.receive_json(timeout=2)
                 self.assertEqual(command["command"], "flash.program")
@@ -297,17 +297,25 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(download.status, 200)
                         self.assertEqual(await download.read(), data)
                 digests = [hashlib.sha256(data).hexdigest() for data in binaries]
-                await agent.send_json({"result": command["id"], "value": digests if matches else [digests[0], "0" * 64]})
-                if matches:
-                    self.assertTrue(all(row["matches"] for row in (await program)["verification"]))
+                previews = [data[:256].hex() for data in binaries]
+                if mismatch == "preview":
+                    previews[1] = "00" + previews[1][2:]
+                elif mismatch == "sha256":
+                    digests[1] = "0" * 64
+                await agent.send_json({"result": command["id"], "value": digests, "previews": previews})
+                if mismatch is None:
+                    verification = (await program)["verification"]
+                    self.assertTrue(all(row["matches"] for row in verification))
+                    self.assertEqual([row["readback_preview"] for row in verification], previews)
                     with self.assertRaises(IDLabHTTPError) as reused:
                         await asyncio.to_thread(board.program_flash, plan["plan_id"], binaries)
                     self.assertEqual(reused.exception.code, "flash_plan_confirmation_required")
-                    plan = await asyncio.to_thread(board.prepare_flash, [(0, binaries[0]), (8192, binaries[1])])
                 else:
                     with self.assertRaises(IDLabHTTPError) as failed:
                         await program
                     self.assertEqual(failed.exception.code, "flash_verification_failed")
+                if mismatch != "sha256":
+                    plan = await asyncio.to_thread(board.prepare_flash, [(0, binaries[0]), (8192, binaries[1])])
 
         history = await asyncio.to_thread(self.client.campaign_operations, campaign["id"])
         states = {row["state"]: row["verification"][1]["matches"] for row in history["items"]}
