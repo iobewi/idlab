@@ -19,18 +19,23 @@ function invalidate(plan, message = '') {
 
 export function renderFlashPlan(card, available) {
   const plan = planFor(card);
-  const canProgram = available && card?.identity?.capabilities.includes('flash.program');
-  if (plan) plan.canProgram = canProgram;
+  const canProgram = Boolean(available && card?.identity?.capabilities.includes('flash.program'));
+  const canOpenLoader = Boolean(available && card?.mode === 'console' && card.canEnterLoader);
+  const working = Boolean(plan?.working);
+  const confirming = Boolean(plan?.confirming);
+  if (plan) plan.available = available;
   if (plan?.approval && (plan.generation !== card.identity?.generation ||
       !card.identity?.capabilities.includes('flash.program'))) invalidate(plan);
-  $('binary').disabled = !plan || plan.working;
-  $('clear-plan').disabled = !plan?.files.length || plan.working;
-  $('validate-plan').disabled = !canProgram || !plan.files.length || plan.working;
-  $('write').disabled = !canProgram || !plan?.approval || plan.working || plan.confirming;
+  $('binary').disabled = !plan || working;
+  $('clear-plan').disabled = !plan?.files.length || working;
+  $('validate-plan').disabled = !(canProgram || canOpenLoader) || !plan?.files.length || working;
+  $('write').disabled = !canProgram || !plan?.approval || working || confirming;
   $('program-confirmation').hidden = !plan?.confirming;
   $('confirm-write').disabled = !canProgram || !plan?.confirming || plan.working;
   $('cancel-write').disabled = !plan?.confirming || plan.working;
-  $('plan-target-help').textContent = canProgram ? '' : 'Ouvre le chargeur flash de la carte pour valider et programmer le plan.';
+  $('plan-target-help').textContent = canProgram ? '' : card?.mode === 'console' && card.canEnterLoader
+    ? 'La validation ouvre le chargeur flash. La carte peut redémarrer.'
+    : 'Ouvre le chargeur flash de la carte pour valider et programmer le plan.';
   $('plan-state').textContent = plan?.message || (plan?.files.length
     ? 'Renseigne les adresses de chaque binaire puis valide le plan.' : 'Plan vide. Les adresses doivent être renseignées explicitement.');
 
@@ -46,7 +51,7 @@ export function renderFlashPlan(card, available) {
       address.oninput = () => {
         entry.address = address.value;
         invalidate(plan);
-        renderFlashPlan(card, plan.canProgram);
+        renderFlashPlan(card, plan.available);
       };
       const cell = element('td');
       cell.append(address);
@@ -55,7 +60,7 @@ export function renderFlashPlan(card, available) {
       remove.onclick = () => {
         plan.files = plan.files.filter(file => file !== entry);
         invalidate(plan);
-        renderFlashPlan(card, plan.canProgram);
+        renderFlashPlan(card, plan.available);
       };
       const action = element('td');
       action.append(remove);
@@ -137,6 +142,12 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
         images.push({address: Number(address), size: entry.file.size, sha256: entry.sha256});
       }
       if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
+      if (card.mode === 'console' && card.canEnterLoader) {
+        plan.message = 'Ouverture du chargeur flash…';
+        render();
+        await card.enterLoader();
+        if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
+      }
       plan.approval = await card.prepareProgram(images);
       plan.generation = generation;
       plan.message = 'Plan validé. Sélectionne Programmer pour confirmer.';

@@ -133,9 +133,11 @@ Pour configurer et tester l’accès depuis `rust_dev`, voir le
 
 ### Programmer et vérifier un firmware
 
-Dans le Web, ouvre le chargeur flash de la carte, puis **Opérations → Plan flash**.
-Ajoute les binaires, renseigne les adresses fournies par ton projet et valide le
-plan. **Programmer…** affiche les secteurs concernés avant confirmation. Après
+Dans **Opérations → Plan flash**, ajoute les binaires, renseigne les adresses
+fournies par ton projet et valide le plan. Depuis une console compatible avec
+la bascule automatique, la validation ouvre le chargeur flash. Pour un port à
+entrée manuelle, ouvre d’abord le chargeur. **Programmer…** affiche les
+secteurs concernés avant confirmation. Après
 l’écriture, IDLab relit chaque image et compare son SHA-256. La carte reste dans
 le chargeur pour permettre une vérification supplémentaire avant démarrage.
 
