@@ -193,6 +193,13 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
                     headers=self.web | {"Upgrade": "websocket"},
                 )
                 self.assertEqual((response.status, await response.json()), (status, {"error": code}))
+            for code in ("invalid header", "secret=value"):
+                response = await self.client.get(
+                    "/agent", params={"status": 403, "code": code},
+                    headers=self.web | {"Upgrade": "websocket"},
+                )
+                self.assertEqual((response.status, await response.json()),
+                                 (403, {"error": "agent_connection_refused"}))
             socket = await self.client.ws_connect("/agent", headers=self.web)
             message = await socket.receive(timeout=2)
             self.assertEqual((message.type.name, message.data, message.extra),
