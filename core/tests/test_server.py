@@ -285,6 +285,52 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await agent.send_bytes(b"data")
         self.assertEqual(await (await retry).read(), b"data")
 
+    async def test_closed_control_keeps_reservation_until_terminal_agent_response(self):
+        agent, generation = await self.board("board", port_key="00000000-0000-4000-8000-000000000001")
+        base = "/api/v1/devices/board/control/"
+        issued = await self.browser.post(base + "token", headers=self.local)
+        token = (await issued.json())["token"]
+        await agent.receive_json(timeout=2)
+        headers = self.script | {"Authorization": "Bearer " + token}
+        ws = await self.browser.ws_connect(base + "connect", headers=headers)
+        session = (await ws.receive_json(timeout=2))["session"]
+        await agent.receive_json(timeout=2)
+        read = asyncio.create_task(self.read("board", generation,
+                    headers=self.script | {"Authorization": "Bearer " + session}))
+        command = await agent.receive_json(timeout=2)
+        await ws.close()
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "stopping")
+        self.assertEqual(await agent.receive_json(timeout=2), {"cancel": command["id"]})
+        with self.assertRaises(WSServerHandshakeError) as busy:
+            await self.browser.ws_connect(base + "connect", headers=headers)
+        self.assertEqual(busy.exception.status, 409)
+        activity = await self.browser.get("/api/v1/devices/board/activity", headers=self.local,
+                                          params={"generation": generation})
+        record = (await activity.json())["operations"][0]
+        self.assertEqual(record["state"], "En cours")
+        self.assertIn("cancelRequestedAt", record)
+        self.assertNotIn("termination", record)
+        await agent.send_json({"result": command["id"], "error": "operation_cancelled",
+                               "console_restored": True})
+        response = await read
+        self.assertEqual((response.status, await response.json()), (403, {"error": "control_stopped"}))
+
+    async def test_timeout_history_does_not_claim_confirmed_termination(self):
+        port_key = "00000000-0000-4000-8000-000000000002"
+        agent, generation = await self.board("board", port_key=port_key)
+        read = asyncio.create_task(self.read("board", generation))
+        await agent.receive_json(timeout=2)
+        self.assertEqual((await agent.receive(timeout=2)).type.name, "CLOSE")
+        response = await read
+        self.assertEqual(response.status, 504)
+        fresh, new_generation = await self.board("board", port_key=port_key)
+        activity = await self.browser.get("/api/v1/devices/board/activity", headers=self.local,
+                                          params={"generation": new_generation})
+        record = (await activity.json())["operations"][0]
+        self.assertEqual(record["termination"], "unknown")
+        self.assertTrue(record["recoveryRequired"])
+        await fresh.close()
+
     async def test_exclusive_control_stops_and_reuses_token_then_revokes(self):
         agent, generation = await self.board("board")
         base = "/api/v1/devices/board/control/"
