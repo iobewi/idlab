@@ -277,9 +277,9 @@ export class BoardConnector {
     } catch (error) {
       if (socket.readyState === 1) {
         const code = this.commandCancelled ? 'operation_cancelled'
-          : error.message === 'invalid_flash_range' ? 'invalid_flash_range' : 'device_command_failed';
-        socket.send(command.command === 'flash.read' && !command.stream && !this.commandCancelled ? command.id
-          : JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
+          : command.command === 'flash.read' && readDiagnostic?.error
+            ? readDiagnostic.error : diagnosticCode(error);
+        socket.send(JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
             read_diagnostic: readDiagnostic ? {
               ...readDiagnostic, error: readDiagnostic.error ?? diagnosticCode(error, code),
             } : undefined,
