@@ -835,6 +835,14 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         except ConnectionError:
             operation.agent_disconnected = True
         finally:
+            # Capture the failure before closing the socket: the recovery itself
+            # may invalidate the control session and must not mask the read error.
+            if operation.agent_disconnected:
+                failure = "agent_disconnected"
+            elif control and control.stopped:
+                failure = control.stopped
+            elif operation.cancelled:
+                failure = "operation_cancelled"
             try:
                 recoverable = isinstance(result, dict) and (
                     (stream and result.get("error") == "invalid_flash_range") or
@@ -877,12 +885,6 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         diagnostic = response.get("read_diagnostic")
         diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
 
-        if operation.agent_disconnected:
-            failure = "agent_disconnected"
-        elif control and control.stopped:
-            failure = control.stopped
-        elif operation.cancelled:
-            failure = "operation_cancelled"
         restored = diagnostic.get("console_restored", response.get("console_restored") if not diagnostic else None)
         error = error_code(diagnostic.get("error")) or error_code(response.get("error")) or failure
         record.update(error=error, consoleRestored=restored if type(restored) is bool else None)
