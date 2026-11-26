@@ -21,6 +21,12 @@ function invalidate(plan, message = '') {
 
 const canOpenLoader = card => card?.mode === 'console' && card.canEnterLoader;
 const eraseCapability = region => region ? 'flash.erase.region' : 'flash.erase';
+const sectorEnd = (address, size) => address + Math.ceil(size / FLASH_SECTOR) * FLASH_SECTOR;
+
+function canPrepareProgram(card, available) {
+  return Boolean(available && card?.identity &&
+    (card.identity.capabilities.includes('flash.program') || canOpenLoader(card)));
+}
 
 function canErase(card, available, region) {
   return Boolean(available && card?.identity &&
@@ -53,6 +59,7 @@ export function renderFlashPlan(card, available) {
     !($('manifest-files').files.length || $('manifest-directory').files.length);
   $('clear-plan').disabled = !plan?.files.length || working;
   $('validate-plan').disabled = !(canProgram || canLoad) || !plan?.files.length || working;
+  $('restore-memory').disabled = !canPrepareProgram(card, available) || working;
   $('write').disabled = !canProgram || !plan?.approval || working || confirming;
   $('program-confirmation').hidden = !plan?.confirming;
   $('confirm-write').disabled = !canProgram || !plan?.confirming || plan.working;
@@ -110,7 +117,7 @@ export function renderFlashPlan(card, available) {
     $('confirmation-regions').replaceChildren(...plan.approval.images.map((image, index) => {
       const row = element('tr');
       row.append(element('td', files[index].file.name), element('td', hex(image.address)),
-        element('td', hex(image.address + Math.ceil(image.size / 4096) * 4096)));
+        element('td', hex(sectorEnd(image.address, image.size))));
       return row;
     }));
   }
@@ -142,11 +149,104 @@ function appendFiles(plan, entries) {
   invalidate(plan);
 }
 
+async function prepareImages(card, generation, files, beforeLoader = () => {}) {
+  const images = [];
+  for (const entry of files) {
+    const address = entry.address.trim();
+    if (!address) throw new Error('Renseigne l’adresse de ' + entry.file.name + '.');
+    const offset = flashNumber(address);
+    entry.sha256 = await sha256(await entry.file.arrayBuffer());
+    images.push({address: offset, size: entry.file.size, sha256: entry.sha256});
+  }
+  if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
+  if (canOpenLoader(card)) {
+    beforeLoader();
+    await card.enterLoader();
+    if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
+  }
+  return card.prepareProgram(images);
+}
+
+async function writeImages(card, generation, planId, files, isSelected) {
+  const binaries = [];
+  for (const {file} of files) binaries.push(encodeBase64(new Uint8Array(await file.arrayBuffer())));
+  if (card.identity?.generation !== generation || !isSelected()) throw new Error('La carte ou sa session a changé.');
+  card.partitionsGeneration = null;
+  return card.programFlash(planId, binaries);
+}
+
 export function wireFlashPlan({getSelected, render, observeCard}) {
   const dialog = $('erase-dialog');
   const confirmation = $('erase-confirmation');
   const confirmErase = $('erase-confirm');
+  const restoreInput = $('restore-file');
+  const restoreDialog = $('restore-dialog');
+  let restoreTarget;
   let eraseTarget;
+  $('restore-memory').onclick = () => {
+    const card = getSelected();
+    if ($('restore-memory').disabled || !card?.identity) return;
+    return run(() => {
+      const address = flashNumber($('address').value.trim());
+      if (!Number.isSafeInteger(address) || address % FLASH_SECTOR) {
+        throw new Error('L’adresse de restauration doit être alignée sur 4 Kio.');
+      }
+      restoreTarget = {card, generation: card.identity.generation, address};
+      restoreInput.value = '';
+      restoreInput.click();
+    });
+  };
+  restoreInput.onchange = () => run(() => {
+    const file = restoreInput.files[0];
+    restoreInput.value = '';
+    if (!file || !restoreTarget) return;
+    const {card, generation, address} = restoreTarget;
+    if (card !== getSelected() || card.identity?.generation !== generation || $('restore-memory').disabled) {
+      throw new Error('La carte ou sa session a changé. Sélectionne à nouveau le binaire.');
+    }
+    const end = sectorEnd(address, file.size);
+    const capacity = card.identity.flash_size ?? card.lastIdentity?.flash_size ?? 64 * 1024 * 1024;
+    if (!file.size || end > capacity) {
+      throw new Error('Binaire vide ou secteurs hors de la capacité de la flash.');
+    }
+    restoreTarget.file = file;
+    $('restore-target').textContent = `${card.name} · ${file.name} · ${file.size} octets à ${hex(address)}`;
+    $('restore-sectors').textContent = `${hex(address)} à ${hex(end)} (fin exclue)`;
+    $('restore-loader-help').hidden = !canOpenLoader(card);
+    restoreDialog.showModal();
+  });
+  restoreDialog.onclose = () => { restoreTarget = null; };
+  $('restore-cancel').onclick = () => restoreDialog.close();
+  restoreDialog.querySelector('form').onsubmit = event => {
+    event.preventDefault();
+    if (!restoreTarget?.file) return;
+    const {card, generation, address, file} = restoreTarget;
+    restoreTarget = null;
+    restoreDialog.close();
+    return run(async () => {
+      const plan = planFor(card);
+      if (card !== getSelected() || card.identity?.generation !== generation || $('restore-memory').disabled) {
+        throw new Error('La carte ou sa session a changé. Confirme à nouveau la restauration.');
+      }
+      const entries = [{file, address: hex(address)}];
+      invalidate(plan);
+      plan.working = true;
+      render();
+      try {
+        say('Validation du binaire à restaurer…');
+        const approval = await prepareImages(card, generation, entries, () => say('Ouverture du chargeur flash…'));
+        say('Restauration et relecture en cours…');
+        await writeImages(card, generation, approval.plan_id, entries, () => card === getSelected());
+        if (card === getSelected()) say('Restauration vérifiée par relecture SHA-256.');
+      } catch (error) {
+        if (card === getSelected()) say(errors[error.message] ?? error.message);
+      } finally {
+        plan.working = false;
+        render();
+        void observeCard(card);
+      }
+    });
+  };
   function allowedToErase(card, region, partition) {
     const plan = planFor(card);
     const available = plan?.available && !plan.working;
@@ -260,21 +360,10 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
     plan.working = true;
     render();
     try {
-      const images = [];
-      for (const entry of plan.files) {
-        const address = entry.address.trim();
-        if (!/^(?:0x[0-9a-f]+|[0-9]+)$/i.test(address)) throw new Error('Renseigne l’adresse de ' + entry.file.name + '.');
-        entry.sha256 = await sha256(await entry.file.arrayBuffer());
-        images.push({address: Number(address), size: entry.file.size, sha256: entry.sha256});
-      }
-      if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
-      if (card.mode === 'console' && card.canEnterLoader) {
+      plan.approval = await prepareImages(card, generation, plan.files, () => {
         plan.message = 'Ouverture du chargeur flash…';
         render();
-        await card.enterLoader();
-        if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
-      }
-      plan.approval = await card.prepareProgram(images);
+      });
       plan.generation = generation;
       plan.message = 'Plan validé. Sélectionne Programmer pour confirmer.';
     } catch (error) {
@@ -302,11 +391,7 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
     plan.working = true;
     render();
     try {
-      const binaries = [];
-      for (const {file} of plan.files) binaries.push(encodeBase64(new Uint8Array(await file.arrayBuffer())));
-      if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
-      card.partitionsGeneration = null;
-      const result = await card.programFlash(planId, binaries);
+      const result = await writeImages(card, generation, planId, plan.files, () => card === getSelected());
       plan.message = result.detail;
     } catch (error) {
       plan.message = errors[error.message] ?? error.message;
