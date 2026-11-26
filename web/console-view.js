@@ -76,8 +76,9 @@ export function renderFlashProgress(card) {
   const progress = card?.observation?.progress;
   line.hidden = !progress;
   if (progress) {
-    const {address, received, total} = progress;
-    line.textContent = 'Lecture flash à 0x' + address.toString(16) + ' · ' +
+    const {address, received, total, phase} = progress;
+    const label = phase === 'write' ? 'Programmation flash' : phase === 'verify' ? 'Vérification flash' : 'Lecture flash';
+    line.textContent = label + ' à 0x' + address.toString(16) + ' · ' +
       number.format(received) + ' / ' + number.format(total) + ' octets · ' +
       Math.floor(received * 100 / total) + ' %';
   }

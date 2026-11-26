@@ -1,7 +1,10 @@
 """Python connector for the IDLab HTTP API."""
 
-from dataclasses import dataclass, field, replace
+from collections.abc import Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
+import base64
+import hashlib
 import http.client
 import json
 import os
@@ -147,6 +150,29 @@ class Board:
             payload,
             expected_bytes=size, timeout=self._client._timeout * (1 + (size - 1) // maximum),
         )
+
+    def prepare_flash(self, images: Sequence[tuple[int, bytes]]) -> dict:
+        """Validate a plan on the current stub session without writing anything."""
+        if not 1 <= len(images) <= 16 or any(not isinstance(data, bytes) or not data for _, data in images):
+            raise ValueError("Expected 1 to 16 nonempty flash images as bytes")
+        descriptors = [{"address": address, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                       for address, data in images]
+        return self._client._request(_board_path(self.name) + "/flash/plan",
+                                     {"generation": self.generation, "images": descriptors})
+
+    def program_flash(self, plan_id: str, binaries: Sequence[bytes]) -> dict:
+        """Confirm a validated plan and return its flash write and readback result."""
+        if not 1 <= len(binaries) <= 16 or any(not isinstance(data, bytes) or not data for data in binaries):
+            raise ValueError("Expected 1 to 16 nonempty flash images as bytes")
+        total = sum(map(len, binaries))
+        if total > 64 * 1024 * 1024:
+            raise ValueError("Expected 1 to 16 nonempty flash images totaling up to 64 MiB")
+        payload = {"generation": self.generation, "plan_id": plan_id,
+                   "binaries": [base64.b64encode(data).decode("ascii") for data in binaries]}
+        if self.campaign_id is not None:
+            payload["campaign_id"] = self.campaign_id
+        return self._client._request(_board_path(self.name) + "/flash/program", payload,
+                                     timeout=self._client._timeout * 2 * (1 + (total - 1) // (4 * 1024 * 1024)))
 
 
 class IDLabClient:

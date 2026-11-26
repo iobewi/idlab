@@ -137,6 +137,20 @@ export class EspDriver {
     return data;
   }
 
+  async programFlash(images, checkSession, onProgress) {
+    if (!this.loader.IS_STUB || !this.identity?.flash_size) throw new Error('operation_unsupported');
+    checkSession();
+    await this.loader.writeFlash({
+      fileArray: images, flashSize: 'keep', flashMode: 'keep', flashFreq: 'keep',
+      eraseAll: false, compress: true,
+      reportProgress: (index, written, total) => {
+        checkSession();
+        onProgress(index, written, total);
+      },
+    });
+    checkSession();
+  }
+
   async close() {
     if (this.port.readable || this.port.writable) await this.transport.disconnect();
   }

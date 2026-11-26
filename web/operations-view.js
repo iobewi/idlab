@@ -67,7 +67,8 @@ export function renderOperationHistory(card) {
       if (!event.repeat) toggleDetails();
     };
     row.append(element('td', entry.id));
-    for (const value of [entry.device, entry.command === 'flash.read' ? 'Lecture flash' : entry.command, entry.state, entry.duration]) {
+    const commands = {'flash.read': 'Lecture flash', 'flash.program': 'Programmation flash'};
+    for (const value of [entry.device, commands[entry.command] ?? entry.command, entry.state, entry.duration]) {
       row.append(element('td', value ?? '—'));
     }
     body.append(row);

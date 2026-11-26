@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+import hashlib
 import os
 from pathlib import Path
 import socket
@@ -51,7 +52,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 204)
         self.client = IDLabClient(self.origin, token="test-token", timeout=3)
 
-    async def connect(self, *, console=False):
+    async def connect(self, *, console=False, programmable=False):
         socket = await self.browser.ws_connect(
             self.origin + "/agent?device=test-board", origin=self.origin,
             timeout=ClientWSTimeout(ws_close=2),
@@ -60,7 +61,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await socket.send_json({"mode": "console", "transport": "usb_uart",
                                 "port_key": "00000000-0000-4000-8000-000000000001"} if console else {
             "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
-            "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
+            "transport": "usb_uart", "flash_size": 16 * 1024 * 1024, "programmable": programmable,
         })
         await socket.receive_json(timeout=2)
         return socket
@@ -183,6 +184,47 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IDLabHTTPError) as caught:
             await asyncio.to_thread(old.read_flash, 0, 4)
         self.assertEqual((caught.exception.status, caught.exception.code), (409, "device_session_changed"))
+
+    async def test_program_confirmed_plan_and_record_readback(self):
+        agent = await self.connect(programmable=True)
+        campaign = await asyncio.to_thread(self.client.create_campaign, "Firmware delivery")
+        binaries = [b"a" * 8192, b"second image"]
+        async with self.control(agent) as board:
+            board = board.for_campaign(campaign["id"])
+            with self.assertRaises(IDLabHTTPError) as overlap:
+                await asyncio.to_thread(board.prepare_flash, [(0, binaries[0]), (4096, binaries[1])])
+            self.assertEqual(overlap.exception.code, "invalid_flash_range")
+            plan = await asyncio.to_thread(board.prepare_flash, [(0, binaries[0]), (8192, binaries[1])])
+            with self.assertRaises(IDLabHTTPError) as modified:
+                await asyncio.to_thread(board.program_flash, plan["plan_id"], [b"x" * 8192, binaries[1]])
+            self.assertEqual(modified.exception.code, "flash_image_mismatch")
+
+            for matches in (True, False):
+                program = asyncio.create_task(asyncio.to_thread(board.program_flash, plan["plan_id"], binaries))
+                command = await agent.receive_json(timeout=2)
+                self.assertEqual(command["command"], "flash.program")
+                self.assertEqual(command["images"], plan["images"])
+                path = f"/api/v1/devices/test-board/flash/program/{command['id']}"
+                for index, data in enumerate(binaries):
+                    async with self.browser.get(self.origin + f"{path}/{index}") as download:
+                        self.assertEqual(download.status, 200)
+                        self.assertEqual(await download.read(), data)
+                digests = [hashlib.sha256(data).hexdigest() for data in binaries]
+                await agent.send_json({"result": command["id"], "value": digests if matches else [digests[0], "0" * 64]})
+                if matches:
+                    self.assertTrue(all(row["matches"] for row in (await program)["verification"]))
+                    with self.assertRaises(IDLabHTTPError) as reused:
+                        await asyncio.to_thread(board.program_flash, plan["plan_id"], binaries)
+                    self.assertEqual(reused.exception.code, "flash_plan_confirmation_required")
+                    plan = await asyncio.to_thread(board.prepare_flash, [(0, binaries[0]), (8192, binaries[1])])
+                else:
+                    with self.assertRaises(IDLabHTTPError) as failed:
+                        await program
+                    self.assertEqual(failed.exception.code, "flash_verification_failed")
+
+        history = await asyncio.to_thread(self.client.campaign_operations, campaign["id"])
+        states = {row["state"]: row["verification"][1]["matches"] for row in history["items"]}
+        self.assertEqual(states, {"Terminée": True, "Échec": False})
 
     async def test_one_control_session_writes_uart_and_switches_modes(self):
         socket = await self.connect(console=True)

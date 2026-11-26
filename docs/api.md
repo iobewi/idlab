@@ -186,11 +186,57 @@ au serveur par blocs de 4 Mio maximum. Le champ `campaign_id` est facultatif. Un
 lecture à la fois. Une lecture incomplète renvoie une erreur, ferme la session
 et ne livre aucun résultat partiel.
 
+## Programmation flash
+
+La carte doit être en mode chargeur avec un stub, une capacité connue et la
+capacité `flash.program`. Le Web et une session Python déléguée utilisent
+les mêmes routes sous `/api/v1/devices/{name}/flash`.
+
+| Méthode et chemin | Corps JSON | Résultat |
+|---|---|---|
+| `POST /plan` | `generation` et `images` avec `address`, `size`, `sha256` pour chaque image | `201` avec `plan_id` et les images validées |
+| `POST /program` | `generation`, `plan_id`, `binaries` en base64 dans l’ordre du plan et `campaign_id` facultatif | `200` avec le résultat d’écriture et `verification` par image |
+
+Un plan comprend de 1 à 16 images pour un total de 64 Mio maximum, dans la
+limite de la capacité mesurée. Chaque adresse de départ est alignée sur 4 Kio.
+Les secteurs occupés sont arrondis au secteur supérieur et ne peuvent pas se
+chevaucher. La validation ne fait aucun accès à la flash. Le plan est valable dix
+minutes dans la même génération et le même contexte de pilotage. Un nouveau
+plan remplace le précédent. Un plan consommé doit être validé à nouveau.
+
+Le serveur contrôle la taille et le SHA-256 de chaque binaire avant l’écriture.
+Pendant l’opération, le connecteur série récupère les binaires avec le cookie
+de la session Web propriétaire de la carte. Le chargeur préserve les paramètres
+flash présents dans les images. L’écriture cible les secteurs du plan.
+
+La vérification relit les octets des images sur la même session chargeur.
+Chaque résultat contient `address`, `size`, `sha256`, `readback_sha256` et
+`matches`. Un écart retourne `502 flash_verification_failed` et apparaît dans
+l’historique comme un échec. L’arrêt peut laisser la flash partiellement
+programmée. Après vérification, la carte reste dans le chargeur.
+
+En Python, préparer le plan et examiner ses adresses, tailles et empreintes
+avant de confirmer par un appel distinct à `program_flash`.
+
+```python
+from pathlib import Path
+
+firmware = Path(firmware_path).read_bytes()
+with lab.control(board_name, board_token) as board:
+    if board.mode == "console":
+        board = board.enter_loader()
+    plan = board.prepare_flash([(firmware_address, firmware)])
+    print(plan["images"])
+    if input("Confirmer la programmation [oui/non] ? ") == "oui":
+        operation = board.program_flash(plan["plan_id"], [firmware])
+        print(operation["verification"])
+```
+
 ## Campagnes
 
 Une campagne regroupe les opérations d’un essai et son verdict. Le web
 et les scripts associent une opération en envoyant `campaign_id` dans
-le corps de `/command` ou de `/flash/read`. Ce champ est facultatif et
+le corps de `/command`, `/flash/read` ou `/flash/program`. Ce champ est facultatif et
 s’applique à la requête. Une campagne peut couvrir plusieurs cartes.
 
 | Méthode et chemin | Corps JSON | Succès |

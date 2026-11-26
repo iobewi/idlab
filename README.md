@@ -131,6 +131,17 @@ aux opérations lancées dans la page.
 Pour configurer et tester l’accès depuis `rust_dev`, voir le
 [test de connexion Docker](docs/service.md#connecter-un-client-depuis-docker).
 
+### Programmer et vérifier un firmware
+
+Dans le Web, ouvre le chargeur flash de la carte, puis **Opérations → Plan flash**.
+Ajoute les binaires, renseigne les adresses fournies par ton projet et valide le
+plan. **Programmer…** affiche les secteurs concernés avant confirmation. Après
+l’écriture, IDLab relit chaque image et compare son SHA-256. La carte reste dans
+le chargeur pour permettre une vérification supplémentaire avant démarrage.
+
+Le SDK 0.1.3 expose le même parcours via `Board.prepare_flash()` et
+`Board.program_flash()`. Voir la [référence de programmation](docs/api.md#programmation-flash).
+
 ### Initialiser une recette pytest
 
 Depuis la racine du projet à qualifier, avec le SDK Python IDLab 0.1.2 ou

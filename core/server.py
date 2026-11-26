@@ -17,13 +17,13 @@ from aiohttp import WSMsgType, web
 
 from api_activity import ApiActivity
 from campaigns import CampaignError, Campaigns, search_parameters
+from flash_plan import MAX_FLASH, MAX_PROGRAM_BODY, decode_images, validate_images
 
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT.parent / "web"
 BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
 SERIAL_MODULES = ("board-connector.js", "esp-driver.js", "serial-console.js", "serial-transport.js")
 MAX_READ = 4 * 1024 * 1024
-MAX_FLASH = 64 * 1024 * 1024
 UART_BUFFER = 1024 * 1024
 UART_PAGE = 64 * 1024
 BOARD_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}")
@@ -38,6 +38,7 @@ class Operation:
     chunks: list | None = None
     size: int = 0
     received: int = 0
+    binaries: list[bytes] | None = None
 
 
 @dataclass
@@ -45,6 +46,14 @@ class Control:
     credential: str
     socket: web.WebSocketResponse
     stopped: str | None = None
+
+
+@dataclass
+class ProgramPlan:
+    id: str
+    images: list[dict]
+    control: Control | None
+    deadline: float
 
 
 @dataclass
@@ -61,6 +70,7 @@ class Board:
     journal: deque = field(default_factory=lambda: deque(maxlen=300))
     operations: deque = field(default_factory=lambda: deque(maxlen=100))
     progress: dict | None = None
+    program_plan: ProgramPlan | None = None
 
     def describe(self):
         stopping = (self.control and self.control.stopped) or (self.pending and self.pending.cancelled)
@@ -107,6 +117,8 @@ def validate_identity(value):
                 raise ValueError(f"invalid_{key}")
             metadata[key] = field
     capabilities = ["identify", "flash.read"] if loader == "stub" and size else ["identify"]
+    if loader == "stub" and size and value.get("programmable") is True:
+        capabilities.append("flash.program")
     if value.get("return_to_console") is True and transport in ("usb_uart", "usb_serial_jtag"):
         capabilities.append("mode.console")
     if value.get("mode") == "loader":
@@ -395,6 +407,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return problem(409, "device_busy")
         socket = web.WebSocketResponse(heartbeat=20)
         control = Control(secrets.token_urlsafe(32), socket)
+        board.program_plan = None
         board.control = control
         sockets.add(socket)
         try:
@@ -438,6 +451,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                         break
                     if "identity" in event and pending:
                         board.identity = validate_identity(event["identity"])
+                        board.program_plan = None
                         await socket.send_json({"identity": board.describe()})
                     elif "uart" in event and board.identity.get("mode") == "console":
                         encoded = event["uart"]
@@ -744,6 +758,119 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return problem(502, "device_command_failed")
         return problem(502, "read_incomplete_reconnect_required")
 
+    def programming_board(request, generation):
+        board = boards.get(request[BOARD_KEY])
+        if not board or board.socket.closed or generation != board.generation:
+            return None, problem(409, "device_session_changed")
+        refusal = command_refusal(request, board)
+        if refusal is not None:
+            return None, refusal
+        if board.pending:
+            return None, problem(409, "device_busy")
+        if "flash.program" not in board.identity["capabilities"]:
+            return None, problem(409, "operation_unsupported")
+        return board, None
+
+    async def prepare_program(request):
+        try:
+            payload = await request.json()
+        except (TypeError, ValueError):
+            return problem(400, "invalid_json")
+        if not isinstance(payload, dict) or payload.keys() != {"generation", "images"}:
+            return problem(400, "invalid_arguments")
+        board, refusal = programming_board(request, payload["generation"])
+        if refusal is not None:
+            return refusal
+        images = payload["images"]
+        try:
+            validate_images(images, board.identity["flash_size"])
+        except ValueError as error:
+            return problem(400, str(error))
+        plan = ProgramPlan(secrets.token_urlsafe(32), images, board.control, asyncio.get_running_loop().time() + 600)
+        board.program_plan = plan
+        return web.json_response({"plan_id": plan.id, "images": plan.images}, status=201)
+
+    async def program_image(request):
+        # Only the browser holding the serial connection downloads the payload.
+        if request.headers.get("Authorization"):
+            return problem(403, "browser_session_required")
+        board = boards.get(request[BOARD_KEY])
+        operation = board.pending if board else None
+        if (not operation or operation.id != request.match_info["operation_id"] or
+                operation.cancelled or operation.binaries is None):
+            return problem(404, "flash_image_not_found")
+        index = int(request.match_info["index"])
+        if index >= len(operation.binaries):
+            return problem(404, "flash_image_not_found")
+        return web.Response(body=operation.binaries[index], content_type="application/octet-stream")
+
+    async def program_flash(request):
+        try:
+            payload = await request.clone(client_max_size=MAX_PROGRAM_BODY).json()
+        except (TypeError, ValueError):
+            return problem(400, "invalid_json")
+        required = {"generation", "plan_id", "binaries"}
+        if not isinstance(payload, dict) or not required <= payload.keys() <= required | {"campaign_id"}:
+            return problem(400, "invalid_arguments")
+        board, refusal = programming_board(request, payload["generation"])
+        if refusal is not None:
+            return refusal
+        plan = board.program_plan
+        if (not plan or payload["plan_id"] != plan.id or plan.control is not board.control or
+                asyncio.get_running_loop().time() >= plan.deadline):
+            return problem(409, "flash_plan_confirmation_required")
+        try:
+            validate_images(plan.images, board.identity["flash_size"])
+            binaries = decode_images(payload["binaries"], plan.images)
+        except ValueError as error:
+            return problem(400, str(error))
+
+        key = request[BOARD_KEY]
+        control = board.control
+        total = sum(image["size"] for image in plan.images)
+        operation, record, started = start_operation(
+            request, board, key[1], "flash.program", {"images": plan.images}, operation_campaign(payload),
+        )
+        board.program_plan = None
+        operation.binaries = binaries
+        complete = False
+        try:
+            await board.socket.send_json({"id": operation.id, "command": "flash.program", "images": plan.images})
+            result = await asyncio.wait_for(operation.future, timeout=read_timeout * 2 * (1 + (total - 1) // MAX_READ))
+            if control and control.stopped:
+                return problem(403, control.stopped)
+            if operation.cancelled:
+                return problem(409, "operation_cancelled")
+            if not isinstance(result, dict) or result.get("error"):
+                if isinstance(result, dict) and isinstance(result.get("detail"), str):
+                    record["detail"] = result["detail"][:500]
+                return problem(502, "flash_program_failed")
+            digests = result.get("value")
+            if not isinstance(digests, list) or len(digests) != len(plan.images) or any(
+                    not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests):
+                return problem(502, "flash_program_failed")
+            verification = [image | {"readback_sha256": digest, "matches": digest == image["sha256"]}
+                            for image, digest in zip(plan.images, digests, strict=True)]
+            record["verification"] = verification
+            complete = all(image["matches"] for image in verification)
+            record["detail"] = "Écriture vérifiée par relecture SHA-256." if complete else "SHA-256 relu différent."
+        except TimeoutError:
+            record["detail"] = "Le connecteur n’a pas répondu à temps."
+            await board.socket.close(code=1011)
+            return problem(504, "flash_program_timeout")
+        except ConnectionError:
+            return problem(502, "flash_program_failed")
+        finally:
+            finish_operation(request, board, record, started, complete)
+            if control and control.stopped and board.control is control:
+                board.control = None
+                await publish_control(board, key)
+            elif operation.cancelled and not control:
+                await publish_control(board, key)
+        if not complete:
+            return web.json_response({"error": "flash_verification_failed", "operation": record}, status=502)
+        return web.json_response(record)
+
     async def identify(request):
         key = request[BOARD_KEY]
         board = boards.get(key)
@@ -788,6 +915,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         web.get("/api/v1/devices/{name}/uart", read_uart),
         web.get("/api/v1/devices/{name}/activity", read_activity),
         web.post("/api/v1/devices/{name}/flash/read", read_flash),
+        web.post("/api/v1/devices/{name}/flash/plan", prepare_program),
+        web.post("/api/v1/devices/{name}/flash/program", program_flash),
+        web.get(r"/api/v1/devices/{name}/flash/program/{operation_id:[0-9a-f]{32}}/{index:[0-9]{1,2}}", program_image),
         web.get("/agent", agent),
         *(web.get(f"/web/{module}", serial_module) for module in SERIAL_MODULES),
         web.static("/web", WEB_ROOT),

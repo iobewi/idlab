@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
-import {BoardConnector} from '../board-connector.js';
+import {BoardConnector, sha256} from '../board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
   readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
-  romIdentificationTimeout = false } = {}) {
+  romIdentificationTimeout = false, programPayload } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
+  const writes = [];
   let identity, socket, commandResult;
   const responseParts = [];
   const uart = [];
@@ -62,6 +63,16 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
       return block;
     }
     async openAndSync() {}
+    async writeFlash(options) {
+      assert.equal(options.eraseAll, false);
+      assert.equal(options.flashSize, 'keep');
+      assert.equal(options.flashMode, 'keep');
+      assert.equal(options.flashFreq, 'keep');
+      for (const [index, file] of options.fileArray.entries()) {
+        writes.push(file);
+        options.reportProgress(index, file.data.length, file.data.length);
+      }
+    }
     async usesUsbOtg() { return vid === 0x303a; }
   }
   const card = new BoardConnector('board', port, {
@@ -114,6 +125,9 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     async request(path, options) {
       if (!options) {
         if (socket.readyState === 3) throw new Error('device_disconnected');
+        if (path === '/devices/board/flash/program/write/0') {
+          return {arrayBuffer: async () => programPayload.buffer};
+        }
         return {json: async () => identity};
       }
       if (path === '/devices/board/command') {
@@ -141,7 +155,13 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     },
   });
   port.readable = null;
-  return {card, events, reads, progress, uart, manualReset() { inDownload = false; deviceBaud = 115200; }};
+  return {card, events, reads, progress, uart, writes,
+    async program(images) {
+      commandResult = null;
+      await socket.onmessage({data: JSON.stringify({command: 'flash.program', id: 'write', images})});
+      return commandResult;
+    },
+    manualReset() { inDownload = false; deviceBaud = 115200; }};
 }
 
 test('only unexpected disconnections report a lost board link', async () => {
@@ -330,6 +350,26 @@ test('reads the complete factory partition in ordered chunks on one loader sessi
   assert.equal(events.filter(e => e === 'detect:default_reset').length, 1);
   assert.equal(events.filter(e => e === 'reset').length, 1);
   assert.equal(card.mode, 'console');
+  await card.disconnect();
+});
+
+test('programs only the validated bytes, then hashes the actual flash readback', async () => {
+  const firmware = Uint8Array.of(1, 2, 3);
+  const stored = Uint8Array.of(1, 2, 4);
+  const {card, program, progress, writes} = fixture({
+    inDownload: true, programPayload: firmware, readBlock: () => stored,
+  });
+  await card.connect();
+  const image = {address: 4096, size: 3, sha256: await sha256(firmware)};
+  const bad = await program([{...image, sha256: await sha256(stored)}]);
+  assert.equal(bad.error, 'device_command_failed');
+  assert.equal(writes.length, 0);
+  const result = await program([image]);
+  assert.deepEqual(writes, [{address: 4096, data: firmware}]);
+  assert.deepEqual(result.value, [await sha256(stored)]);
+  assert(progress.some(entry => entry.phase === 'write'));
+  assert(progress.some(entry => entry.phase === 'verify'));
+  assert.equal(card.mode, 'loader');
   await card.disconnect();
 });
 
