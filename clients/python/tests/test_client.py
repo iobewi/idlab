@@ -218,6 +218,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_manifest_and_erase_region_open_loader_from_console(self):
         agent = await self.connect(console=True)
+        campaign = await asyncio.to_thread(self.client.create_campaign, "Flash maintenance")
         loader = {"mode": "loader", "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
                   "transport": "usb_uart", "flash_size": 16 * 1024 * 1024, "programmable": True,
                   "erasable": True, "erasable_region": True, "return_to_console": True}
@@ -230,6 +231,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             await agent.send_json({"result": request["id"]})
 
         async with self.control(agent) as console:
+            console = console.for_campaign(campaign["id"])
             with TemporaryDirectory() as folder:
                 path = Path(folder) / "manifest.json"
                 (path.parent / "app.bin").write_bytes(b"firmware")
@@ -252,6 +254,9 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             verified = {"address": 4096, "size": 4096, "first_non_ff": None}
             await agent.send_json({"result": request["id"], "value": verified})
             self.assertEqual(await erase, verified)
+        history = await asyncio.to_thread(self.client.campaign_operations, campaign["id"])
+        self.assertCountEqual([entry["command"] for entry in history["items"]],
+                              ["mode.loader", "mode.console", "mode.loader", "flash.erase.region"])
 
     async def test_erase_region_requires_exact_sector_bounds(self):
         agent = await self.connect(erasable=True)

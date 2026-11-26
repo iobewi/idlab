@@ -175,7 +175,7 @@ class Board:
         if board.generation != self.generation:
             raise IDLabHTTPError(409, "device_session_changed")
         if board.mode == "console" and "mode.loader" in board.capabilities:
-            board = board.enter_loader()
+            board = board.for_campaign(self.campaign_id).enter_loader()
             if board.generation != self.generation:
                 raise IDLabHTTPError(409, "device_session_changed")
         return board
