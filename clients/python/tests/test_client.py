@@ -109,6 +109,49 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await socket.close()
         await refused(token, 404, "device_disconnected")
 
+    async def test_revoked_established_session_refuses_next_operation(self):
+        agent = await self.connect()
+        async with self.control(agent) as board:
+            async with self.browser.post(self.origin + "/api/v1/devices/test-board/control/revoke",
+                                         headers={"Origin": self.origin}) as response:
+                self.assertEqual(response.status, 200)
+            await agent.receive_json(timeout=2)
+            with self.assertRaises(IDLabHTTPError) as denied:
+                await asyncio.to_thread(board.read_flash, 0, 4)
+            self.assertEqual((denied.exception.status, denied.exception.code),
+                             (401, "authentication_required"))
+
+    async def test_malformed_handshake_body_has_safe_fallback(self):
+        async def refuse(request):
+            return web.Response(status=403, body=b"not json")
+        app = web.Application()
+        app.router.add_get("/api/v1/devices/test-board/control/connect", refuse)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        client = IDLabClient(f"http://127.0.0.1:{port}", timeout=3)
+        context = client.control("test-board", "invalid")
+        with self.assertRaises(IDLabHTTPError) as denied:
+            await asyncio.to_thread(context.__enter__)
+        self.assertEqual((denied.exception.status, denied.exception.code),
+                         (403, "control_connection_refused"))
+
+    async def test_program_failure_preserves_known_agent_error(self):
+        agent = await self.connect(programmable=True)
+        async with self.control(agent) as board:
+            for code, expected in (("serial_timeout", "serial_timeout"),
+                                   ("unexpected_internal_message", "flash_program_failed")):
+                plan = await asyncio.to_thread(board.prepare_flash, [(0, b"data")])
+                task = asyncio.create_task(asyncio.to_thread(board.program_flash, plan["plan_id"], [b"data"]))
+                command = await agent.receive_json(timeout=2)
+                await agent.send_json({"result": command["id"], "error": code})
+                with self.assertRaises(IDLabHTTPError) as denied:
+                    await task
+                self.assertEqual((denied.exception.status, denied.exception.code), (502, expected))
+
     async def test_generated_recipe_releases_control_even_on_assertion_failure(self):
         agent = await self.connect(console=True)
         token = await self.issue_token(agent)

@@ -99,6 +99,11 @@ def agent_error_code(value):
     return value if isinstance(value, str) and value in AGENT_ERROR_CODES else None
 
 
+def agent_error_status(code):
+    return {"invalid_flash_range": 400, "device_session_changed": 409,
+            "operation_unsupported": 409, "operation_cancelled": 409}.get(code, 502)
+
+
 def error_code(value):
     return value if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,79}", value) else None
 
@@ -695,8 +700,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 detail = result.get("detail")
                 if (erase or command in ("mode.loader", "identify")) and isinstance(detail, str) and detail:
                     record["detail"] = detail[:500]
-                    return web.json_response({"error": code, "detail": record["detail"]}, status=502)
-                return problem(502, code)
+                    return web.json_response({"error": code, "detail": record["detail"]}, status=agent_error_status(code))
+                return problem(agent_error_status(code), code)
             value = result.get("value")
             if erase:
                 if (not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
@@ -873,9 +878,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return outcome
         code = record["error"]
         status = {"control_stopped": 403, "control_revoked": 403,
-                  "operation_cancelled": 409, "invalid_flash_range": 400,
-                  "flash_read_server_timeout": 504}.get(code, 502)
-        return problem(status, "read_incomplete_reconnect_required" if code == "read_incomplete" else code)
+                  "flash_read_server_timeout": 504}.get(code, agent_error_status(code))
+        return problem(status, code)
 
     def record_read_diagnostic(operation, record, result, failure, succeeded):
         progress = operation.read_progress
@@ -892,6 +896,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         restored = diagnostic.get("console_restored", response.get("console_restored") if not diagnostic else None)
         agent_error = agent_error_code(diagnostic.get("error")) or agent_error_code(response.get("error"))
         error = (agent_error or failure) if failure == "read_incomplete" else failure
+        if error == "read_incomplete":
+            error = "read_incomplete_reconnect_required"
         record.update(error=error, consoleRestored=restored if type(restored) is bool else None)
         if agent_error and agent_error != error:
             record["agentError"] = agent_error
@@ -1002,7 +1008,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 if isinstance(result, dict) and isinstance(result.get("detail"), str):
                     record["detail"] = result["detail"][:500]
                 code = agent_error_code(result.get("error")) if isinstance(result, dict) else None
-                return problem(502, code or "flash_program_failed")
+                return problem(agent_error_status(code), code or "flash_program_failed")
             digests = result.get("value")
             if not isinstance(digests, list) or len(digests) != len(plan.images) or any(
                     not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests):

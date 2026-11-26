@@ -163,10 +163,10 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_proxy_preserves_handshake_status_and_close_reason(self):
         async def upstream(request):
             code = request.query.get("code")
-            if code:
+            if "status" in request.query:
                 status = int(request.query["status"])
                 return web.json_response({"error": code}, status=status,
-                                         headers={"X-IDLab-Error": code})
+                                         headers={"X-IDLab-Error": code} if code else {})
             socket = web.WebSocketResponse()
             await socket.prepare(request)
             await socket.close(code=1008, message=b"control_revoked")
@@ -193,7 +193,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
                     headers=self.web | {"Upgrade": "websocket"},
                 )
                 self.assertEqual((response.status, await response.json()), (status, {"error": code}))
-            for code in ("invalid header", "secret=value"):
+            for code in ("", "invalid header", "secret=value"):
                 response = await self.client.get(
                     "/agent", params={"status": 403, "code": code},
                     headers=self.web | {"Upgrade": "websocket"},
@@ -205,6 +205,9 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((message.type.name, message.data, message.extra),
                              ("CLOSE", 1008, "control_revoked"))
             await socket.close()
+            await backend.close()
+            response = await self.client.get("/agent", headers=self.web | {"Upgrade": "websocket"})
+            self.assertEqual((response.status, await response.json()), (503, {"error": "idlab_http_unavailable"}))
         finally:
             self.service.process = None
 

@@ -39,6 +39,17 @@ jobs:
         run: |
           idlab init --help
           python -m unittest discover -s clients/python/tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install core JavaScript dependencies
+        run: npm ci --prefix core
+      - name: Test core server and manager
+        working-directory: core
+        run: python -m unittest discover -s tests -v
+      - name: Test core JavaScript
+        working-directory: core
+        run: node --test tests/*.test.js
       - name: Upload the tested wheel
         uses: actions/upload-artifact@v4
         with:
