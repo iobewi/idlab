@@ -72,7 +72,7 @@ la page reste ouverte et que la carte reste dans la liste.
 **Opérations → ROM seule** ouvre une session
 sans stub sur la carte sélectionnée, affiche son identité et permet une
 lecture du JEDEC. Pendant cette session, **Consoles**, **Partitions**,
-**Plan flash**, **Lecture mémoire** et **Déclencheurs et outils** sont grisés
+**Plan flash**, **Mémoire flash** et **Déclencheurs et outils** sont grisés
 pour la carte sélectionnée. Une boîte de dialogue propose un reset
 automatique depuis une console sur un port compatible. Elle guide
 l’entrée manuelle avec BOOT et RESET dans les autres cas. Si le navigateur détecte à
@@ -141,16 +141,21 @@ secteurs concernés avant confirmation. Après
 l’écriture, IDLab relit chaque image et compare son SHA-256. La carte reste dans
 le chargeur pour permettre une vérification supplémentaire avant démarrage.
 
-Le SDK 0.1.3 expose le même parcours via `Board.prepare_flash()` et
-`Board.program_flash()`. Voir la [référence de programmation](docs/api.md#programmation-flash).
+Un manifeste ESP Web Tools et ses binaires locaux peuvent aussi alimenter ce
+plan. Le SDK 0.1.3 expose le même parcours via `Board.prepare_flash()` ou
+`Board.prepare_flash_manifest()`, puis `Board.program_flash()`.
+Voir la [référence de programmation](docs/api.md#programmation-flash).
 
 **Plan flash → Effacement global** efface toute la flash et vérifie sa relecture
-à `0xFF`. Ouvre le chargeur, puis saisis le nom de la carte dans la boîte de
-confirmation. Cette commande supprime aussi les partitions et la configuration.
+à `0xFF`. Saisis le nom de la carte dans la boîte de confirmation. Sur un port
+compatible, IDLab ouvre le chargeur depuis la console après confirmation.
+Cette commande supprime aussi les partitions et la configuration.
 
 Pour effacer une partition, lis la table puis utilise l’icône de corbeille sur
-sa ligne avec le chargeur ouvert. Vérifie la plage affichée et confirme par le
-nom de la carte. Seuls les secteurs de cette plage sont effacés et relus à `0xFF`.
+sa ligne. Pour une zone libre, renseigne l’offset et la taille dans **Mémoire
+flash**, puis utilise la corbeille à côté de l’icône de lecture. Vérifie la plage
+affichée et confirme par le nom de la carte. Seuls ses secteurs sont effacés et
+relus à `0xFF`.
 
 ### Initialiser une recette pytest
 

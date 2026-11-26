@@ -10,8 +10,8 @@ consultent depuis le nouvel onglet correspondant.
 
 Les panneaux historiques restent visibles pour la revue. Les commandes
 qui attendent un raccordement au nouveau cœur sont grisées, notamment
-l’import de manifestes et les artefacts. L’effacement global est accessible
-sur les cartes qui annoncent la capacité `flash.erase`. La
+les déclencheurs UART et la requête HTTP locale. L’effacement global est
+accessible sur les cartes qui annoncent la capacité `flash.erase`. La
 [documentation historique](https://github.com/iobewi/rust_dev/blob/79fd7bf943751755de65b4212f08c5bd88a51e7c/bench/docs/interface.md)
 décrit leurs anciens comportements. En mode console, le reset est disponible
 sur les ponts UART reconnus et USB Serial/JTAG. Sur un autre transport,
@@ -29,7 +29,7 @@ utiliser le bouton Reset de la carte pour revoir les logs de démarrage.
 | Consoles | Capture UART redimensionnable, texte ou hexadécimal, horodatage, recherche, pause et suivi, effacement d’affichage, export, saisie UART et repères. |
 | Opérations › Partitions | Adresse, lecture, table et suggestion d’adresse selon le résultat. |
 | Opérations › Plan flash | Images, adresses, validation du plan, confirmations, manifestes et artefacts, écriture et effacement. |
-| Opérations › Lecture mémoire | Adresse, taille, options de lecture et téléchargement. |
+| Opérations › Mémoire flash | Adresse, taille, lecture, téléchargement et effacement de la plage. |
 | Opérations › Historique | Opérations, détails, annulation, événements et export. |
 | Opérations › Déclencheurs et outils | Débit de la console, diagnostic et bring-up P4, déclencheur UART et requête HTTP locale. |
 | Journal de l’agent | Journal commun aux deux vues, progression et résultats, réduction et effacement de l’affichage. |

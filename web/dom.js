@@ -1,4 +1,8 @@
 export const $ = id => document.getElementById(id);
+export function flashNumber(value) {
+  if (!/^(0x[0-9a-f]+|[0-9]+)$/i.test(value)) throw new Error('Adresse ou taille invalide.');
+  return Number(value);
+}
 let noticeTimer;
 
 export function say(message, {temporary = false} = {}) {

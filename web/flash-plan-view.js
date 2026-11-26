@@ -1,6 +1,7 @@
 import { sha256 } from './board-connector.js';
 import { FLASH_SECTOR } from './esp-driver.js';
-import { $, element, run, say } from './dom.js';
+import { $, element, flashNumber, run, say } from './dom.js';
+import { importManifest } from './flash-manifest.js';
 
 const plans = new WeakMap();
 const hex = address => '0x' + address.toString(16);
@@ -18,33 +19,48 @@ function invalidate(plan, message = '') {
   plan.message = message;
 }
 
+const canOpenLoader = card => card?.mode === 'console' && card.canEnterLoader;
+const eraseCapability = region => region ? 'flash.erase.region' : 'flash.erase';
+
+function canErase(card, available, region) {
+  return Boolean(available && card?.identity &&
+    (card.identity.capabilities.includes(eraseCapability(region)) || canOpenLoader(card)));
+}
+
+function validRegion(card, {address, size}) {
+  const capacity = card.identity?.flash_size ?? card.lastIdentity?.flash_size ?? 64 * 1024 * 1024;
+  return Number.isSafeInteger(address) && Number.isSafeInteger(size) && address >= 0 &&
+    size >= FLASH_SECTOR && address % FLASH_SECTOR === 0 && size % FLASH_SECTOR === 0 && address + size <= capacity;
+}
+
 export function canErasePartition(card, part, available) {
-  const identity = card?.identity;
-  return Boolean(available && identity?.capabilities.includes('flash.erase.region') &&
-    card.partitionsGeneration === identity.generation && card.partitions?.includes(part) &&
-    part.address >= 0 && part.size >= FLASH_SECTOR && part.address % FLASH_SECTOR === 0 &&
-    part.size % FLASH_SECTOR === 0 && part.address + part.size <= identity.flash_size);
+  return canErase(card, available, part) && card.partitionsGeneration === card.identity.generation &&
+    card.partitions?.includes(part) && validRegion(card, part);
 }
 
 export function renderFlashPlan(card, available) {
   const plan = planFor(card);
   const canProgram = Boolean(available && card?.identity?.capabilities.includes('flash.program'));
-  const canOpenLoader = Boolean(available && card?.mode === 'console' && card.canEnterLoader);
+  const canLoad = available && canOpenLoader(card);
   const working = Boolean(plan?.working);
   const confirming = Boolean(plan?.confirming);
-  const canErase = Boolean(card?.identity?.capabilities.includes('flash.erase'));
   if (plan) plan.available = available;
   if (plan?.approval && (plan.generation !== card.identity?.generation ||
       !card.identity?.capabilities.includes('flash.program'))) invalidate(plan);
   $('binary').disabled = !plan || working;
+  for (const id of ['manifest', 'manifest-files', 'manifest-directory']) $(id).disabled = !plan || working;
+  $('install').disabled = !plan || working || !$('manifest').files.length ||
+    !($('manifest-files').files.length || $('manifest-directory').files.length);
   $('clear-plan').disabled = !plan?.files.length || working;
-  $('validate-plan').disabled = !(canProgram || canOpenLoader) || !plan?.files.length || working;
+  $('validate-plan').disabled = !(canProgram || canLoad) || !plan?.files.length || working;
   $('write').disabled = !canProgram || !plan?.approval || working || confirming;
   $('program-confirmation').hidden = !plan?.confirming;
   $('confirm-write').disabled = !canProgram || !plan?.confirming || plan.working;
   $('cancel-write').disabled = !plan?.confirming || plan.working;
-  $('erase').disabled = !available || !canErase || working;
-  $('erase-help').textContent = canErase
+  $('erase').disabled = !canErase(card, available) || working;
+  $('erase-memory').disabled = !canErase(card, available, true) || working;
+  $('erase-help').textContent = canLoad ? 'Après confirmation, IDLab ouvre le chargeur, efface la flash et vérifie la relecture.'
+    : card?.identity?.capabilities.includes('flash.erase')
     ? 'Efface toute la flash, puis vérifie que chaque octet vaut 0xFF.'
     : 'Nécessite un stub actif, une capacité connue et un état de sécurité vérifié.';
   $('plan-target-help').textContent = canProgram ? '' : card?.mode === 'console' && card.canEnterLoader
@@ -117,55 +133,81 @@ const errors = {
   flash_program_failed: 'Programmation interrompue. Consulte le journal avant de réessayer.',
 };
 
+function appendFiles(plan, entries) {
+  const files = [...plan.files, ...entries];
+  if (files.length > 16 || files.reduce((sum, entry) => sum + entry.file.size, 0) > 64 * 1024 * 1024) {
+    throw new Error('Un plan peut contenir jusqu’à 16 fichiers et 64 Mio.');
+  }
+  plan.files = files;
+  invalidate(plan);
+}
+
 export function wireFlashPlan({getSelected, render, observeCard}) {
   const dialog = $('erase-dialog');
   const confirmation = $('erase-confirmation');
   const confirmErase = $('erase-confirm');
   let eraseTarget;
-  function openErase(part) {
-    const card = getSelected();
+  function allowedToErase(card, region, partition) {
     const plan = planFor(card);
-    const allowed = part ? canErasePartition(card, part, plan?.available && !plan.working) : !$('erase').disabled;
-    if (!allowed || !card?.identity) return;
-    eraseTarget = {card, generation: card.identity.generation, part};
-    $('erase-title').textContent = part ? 'Confirmer l’effacement de la partition' : 'Confirmer l’effacement intégral';
-    $('erase-target').textContent = part
-      ? `${card.name} · ${part.label} · ${hex(part.address)} à ${hex(part.address + part.size)} (fin exclue) · ${part.size} octets`
-      : `${card.name} · ${card.identity.flash_size / (1024 * 1024)} Mio`;
-    $('erase-warning').textContent = part ? 'Toutes les données de cette partition seront supprimées.'
+    const available = plan?.available && !plan.working;
+    return partition ? canErasePartition(card, region, available) : canErase(card, available, region);
+  }
+  function openErase(region, partition = false) {
+    const card = getSelected();
+    if (!allowedToErase(card, region, partition)) return;
+    if (region && !validRegion(card, region)) throw new Error('Adresse et taille doivent être alignées sur 4 Kio et tenir dans la flash.');
+    eraseTarget = {card, generation: card.identity.generation, region, partition};
+    $('erase-title').textContent = partition ? 'Confirmer l’effacement de la partition'
+      : region ? 'Confirmer l’effacement de la plage' : 'Confirmer l’effacement intégral';
+    const capacity = card.identity.flash_size ?? card.lastIdentity?.flash_size;
+    const target = [card.name, region?.label];
+    if (region) target.push(`${hex(region.address)} à ${hex(region.address + region.size)} (fin exclue)`, `${region.size} octets`);
+    else if (capacity) target.push(`${capacity / (1024 * 1024)} Mio`);
+    $('erase-target').textContent = target.filter(Boolean).join(' · ');
+    const warning = region ? 'Toutes les données de cette plage seront supprimées.'
       : 'Le firmware, les partitions, les réglages et toutes les données de la flash seront supprimés.';
+    $('erase-warning').textContent = canOpenLoader(card) ? warning + ' IDLab ouvrira le chargeur et la carte peut redémarrer.' : warning;
     confirmation.value = '';
     confirmErase.disabled = true;
     dialog.showModal();
     confirmation.focus();
   }
   $('erase').onclick = () => openErase();
+  $('erase-memory').onclick = () => run(() => openErase({
+    address: flashNumber($('address').value.trim()), size: flashNumber($('size').value.trim()),
+  }));
   confirmation.oninput = () => { confirmErase.disabled = confirmation.value !== eraseTarget?.card.name; };
   $('erase-cancel').onclick = () => dialog.close();
   dialog.querySelector('form').onsubmit = event => {
     event.preventDefault();
     if (!eraseTarget || confirmErase.disabled) return;
-    const {card, generation, part} = eraseTarget;
+    const {card, generation, region, partition} = eraseTarget;
     const typed = confirmation.value;
     dialog.close();
     return run(async () => {
       const plan = planFor(card);
-      const allowed = part ? canErasePartition(card, part, plan.available && !plan.working) : !$('erase').disabled;
-      if (card !== getSelected() || card.identity?.generation !== generation || !allowed) {
+      if (card !== getSelected() || card.identity?.generation !== generation || !allowedToErase(card, region, partition)) {
         throw new Error('La carte ou sa session a changé. Confirme à nouveau l’effacement.');
       }
       invalidate(plan);
+      plan.working = true;
+      render();
       try {
-        if (part) {
-          await card.eraseFlashRegion(typed, part.address, part.size);
+        if (canOpenLoader(card)) await card.enterLoader();
+        if (card.identity?.generation !== generation || card !== getSelected()) throw new Error('La carte ou sa session a changé.');
+        if (!card.identity.capabilities.includes(eraseCapability(region))) throw new Error('Effacement indisponible pour cette carte.');
+        if (region) {
+          if (!validRegion(card, region)) throw new Error('La plage dépasse la capacité mesurée.');
+          await card.eraseFlashRegion(typed, region.address, region.size);
         } else {
           card.partitions = null;
           card.partitionStatus = null;
           await card.eraseFlash(typed);
         }
-        if (card === getSelected()) say(part ? 'Partition effacée et vérifiée à 0xFF.'
+        if (card === getSelected()) say(region ? 'Plage effacée et vérifiée à 0xFF.'
           : 'Effacement intégral vérifié. Tous les octets valent 0xFF.');
       } finally {
+        plan.working = false;
         render();
         void observeCard(card);
       }
@@ -178,14 +220,31 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
     input.value = '';
     const plan = planFor(card);
     if (!plan || plan.working || !entries.length) return;
-    const files = [...plan.files, ...entries];
-    if (files.length > 16 || files.reduce((sum, entry) => sum + entry.file.size, 0) > 64 * 1024 * 1024) {
-      plan.message = 'Un plan peut contenir jusqu’à 16 fichiers et 64 Mio.';
-    } else {
-      plan.files = files;
-      invalidate(plan);
-    }
+    try { appendFiles(plan, entries); }
+    catch (error) { plan.message = error.message; }
     render();
+  };
+  for (const id of ['manifest', 'manifest-files', 'manifest-directory']) $(id).onchange = render;
+  $('install').onclick = async () => {
+    const card = getSelected();
+    const plan = planFor(card);
+    const manifest = $('manifest').files[0];
+    if (!plan || plan.working || !manifest) return;
+    const files = [...$('manifest-files').files, ...$('manifest-directory').files];
+    plan.working = true;
+    render();
+    try {
+      const chip = card.identity?.chip ?? card.lastIdentity?.chip;
+      const entries = importManifest(JSON.parse(await manifest.text()), files, chip);
+      appendFiles(plan, entries);
+      for (const id of ['manifest', 'manifest-files', 'manifest-directory']) $(id).value = '';
+      plan.message = 'Manifeste ajouté au plan. Vérifie les adresses avant validation.';
+    } catch (error) {
+      plan.message = error.message;
+    } finally {
+      plan.working = false;
+      render();
+    }
   };
   $('clear-plan').onclick = () => {
     const plan = planFor(getSelected());

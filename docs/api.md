@@ -232,6 +232,15 @@ with lab.control(board_name, board_token) as board:
         print(operation["verification"])
 ```
 
+Le Web et le SDK acceptent un manifeste ESP Web Tools avec `builds` et
+`chipFamily`, ou un plan simple avec `parts`. Chaque élément de `parts`
+contient `path` (fichier local relatif au manifeste) et `offset` (entier en
+octets). Pour le SDK, `plan, binaries = board.prepare_flash_manifest(path)`
+prépare les mêmes données que l’ajout manuel. `board.program_flash(plan["plan_id"], binaries)`
+confirme ensuite l’écriture. Les clients ouvrent le chargeur depuis une console
+compatible avant la validation ou l’effacement. Les routes de programmation
+et d’effacement exigent toujours une session chargeur.
+
 ### Effacement intégral
 
 `POST /api/v1/devices/{name}/command` accepte `command: "flash.erase"`, la

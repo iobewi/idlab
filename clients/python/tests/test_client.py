@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import hashlib
+import json
 import os
 from pathlib import Path
 import socket
@@ -214,6 +215,43 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         entries = (await asyncio.to_thread(history.activity))["operations"]
         self.assertEqual([(entry["state"], entry["verification"]["first_non_ff"]) for entry in entries],
                          [("Terminée", None), ("Échec", 7)])
+
+    async def test_manifest_and_erase_region_open_loader_from_console(self):
+        agent = await self.connect(console=True)
+        loader = {"mode": "loader", "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
+                  "transport": "usb_uart", "flash_size": 16 * 1024 * 1024, "programmable": True,
+                  "erasable": True, "erasable_region": True, "return_to_console": True}
+
+        async def switch(expected, identity):
+            request = await agent.receive_json(timeout=2)
+            self.assertEqual(request["command"], expected)
+            await agent.send_json({"identity": identity})
+            await agent.receive_json(timeout=2)
+            await agent.send_json({"result": request["id"]})
+
+        async with self.control(agent) as console:
+            with TemporaryDirectory() as folder:
+                path = Path(folder) / "manifest.json"
+                (path.parent / "app.bin").write_bytes(b"firmware")
+                path.write_text(json.dumps({"builds": [
+                    {"chipFamily": "ESP32-C6", "parts": [{"path": "missing.bin", "offset": 0}]},
+                    {"chipFamily": "ESP32-S3", "parts": [{"path": "app.bin", "offset": 4096}]},
+                ]}), encoding="utf-8")
+                preparing = asyncio.create_task(asyncio.to_thread(console.prepare_flash_manifest, path))
+                await switch("mode.loader", loader)
+                plan, binaries = await preparing
+                self.assertEqual((plan["images"][0]["address"], binaries), (4096, [b"firmware"]))
+            back = asyncio.create_task(asyncio.to_thread(console.return_console))
+            await switch("mode.console", {"mode": "console", "transport": "usb_uart"})
+            console = await back
+            erase = asyncio.create_task(asyncio.to_thread(console.erase_flash_region, 4096, 4096,
+                                                          confirmation=console.name))
+            await switch("mode.loader", loader)
+            request = await agent.receive_json(timeout=2)
+            self.assertEqual((request["command"], request["address"], request["size"]), ("flash.erase.region", 4096, 4096))
+            verified = {"address": 4096, "size": 4096, "first_non_ff": None}
+            await agent.send_json({"result": request["id"], "value": verified})
+            self.assertEqual(await erase, verified)
 
     async def test_erase_region_requires_exact_sector_bounds(self):
         agent = await self.connect(erasable=True)

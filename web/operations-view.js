@@ -1,4 +1,4 @@
-import { $, download, element, run, say } from './dom.js';
+import { $, download, element, flashNumber, run, say } from './dom.js';
 import { decodePartitions, PARTITION_TABLE_BYTES } from './partitions.js';
 import { canErasePartition } from './flash-plan-view.js';
 
@@ -98,7 +98,7 @@ export function renderPartitions(card, canRead, available, openErase) {
       hex(part.address), hex(part.size), hex(part.address + part.size)]) row.append(element('td', value));
     const action = element('td');
     const read = iconAction('read', 'Lire la partition ' + part.label,
-      'Ouvre Lecture mémoire et lance la lecture de cette partition.');
+      'Ouvre Mémoire flash et lance la lecture de cette partition.');
     read.disabled = !canRead;
     read.onclick = () => {
       $('address').value = hex(part.address);
@@ -108,18 +108,13 @@ export function renderPartitions(card, canRead, available, openErase) {
       $('read').click();
     };
     const erase = iconAction('trash', 'Effacer cette partition… ' + part.label,
-      'Ouvre la confirmation d’effacement de cette partition. Nécessite le chargeur flash.');
+      'Ouvre la confirmation d’effacement de cette partition.');
     erase.disabled = !canErasePartition(card, part, available);
-    erase.onclick = () => openErase(part);
+    erase.onclick = () => openErase(part, true);
     action.append(read, erase);
     row.append(action);
     return row;
   }));
-}
-
-function flashNumber(value) {
-  if (!/^(0x[0-9a-f]+|[0-9]+)$/i.test(value)) throw new Error('Adresse ou taille invalide.');
-  return Number(value);
 }
 
 export function wireOperations({getSelected, render, observeCard}) {
