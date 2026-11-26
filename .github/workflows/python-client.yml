@@ -33,9 +33,12 @@ jobs:
         run: |
           python -m pip wheel --no-deps --wheel-dir dist clients/python
           python -m pip install -r core/requirements.txt dist/*.whl
+          python -m pip install -r clients/python/src/idlab_client/templates/hardware/requirements.txt
           python -m pip check
       - name: Test the installed client against the server
-        run: python -m unittest discover -s clients/python/tests -v
+        run: |
+          idlab init --help
+          python -m unittest discover -s clients/python/tests -v
       - name: Upload the tested wheel
         uses: actions/upload-artifact@v4
         with:

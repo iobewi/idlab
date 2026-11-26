@@ -131,6 +131,17 @@ aux opérations lancées dans la page.
 Pour configurer et tester l’accès depuis `rust_dev`, voir le
 [test de connexion Docker](docs/service.md#connecter-un-client-depuis-docker).
 
+### Initialiser une recette pytest
+
+Depuis la racine du projet à qualifier, avec le SDK Python IDLab 0.1.2 ou
+plus récent, exécuter `idlab init`. La commande génère `tests/hardware/` et
+préserve les fichiers existants. `idlab init --help` affiche son aide.
+
+Installer les dépendances de la recette avec `python -m pip install -r tests/hardware/requirements.txt`,
+puis suivre `tests/hardware/README.md` pour renseigner l’URL, le nom de la
+carte et son jeton de pilotage. Lancer `pytest tests/hardware/ -v` pour tester
+la réservation exclusive et la lecture de la capture UART.
+
 ## Appeler l'API HTTP
 
 La [référence API v1](docs/api.md) décrit les commandes HTTP, les opérations
@@ -199,6 +210,7 @@ racine après installation des dépendances de `core/` :
 
 ```sh
 python -m pip install -e ./clients/python
+python -m pip install -r clients/python/src/idlab_client/templates/hardware/requirements.txt
 python -m unittest discover -s clients/python/tests -v
 ```
 

@@ -3,7 +3,9 @@ from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -63,13 +65,17 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await socket.receive_json(timeout=2)
         return socket
 
-    @asynccontextmanager
-    async def control(self, socket, *, client=None):
+    async def issue_token(self, socket):
         async with self.browser.post(self.origin + "/api/v1/devices/test-board/control/token",
                                      headers={"Origin": self.origin}) as response:
             self.assertEqual(response.status, 200)
             token = (await response.json())["token"]
         self.assertEqual((await socket.receive_json(timeout=2))["control"], "available")
+        return token
+
+    @asynccontextmanager
+    async def control(self, socket, *, client=None):
+        token = await self.issue_token(socket)
         context = (client or self.client).control("test-board", token)
         board = await asyncio.to_thread(context.__enter__)
         self.assertEqual((await socket.receive_json(timeout=2))["control"], "external")
@@ -77,6 +83,47 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             yield board
         finally:
             await asyncio.to_thread(context.__exit__, None, None, None)
+
+    async def test_generated_recipe_releases_control_even_on_assertion_failure(self):
+        agent = await self.connect(console=True)
+        token = await self.issue_token(agent)
+        with TemporaryDirectory() as project:
+            init = [sys.executable, "-c", "from idlab_client.cli import main; raise SystemExit(main(['init']))"]
+            await asyncio.to_thread(subprocess.run, init, cwd=project, check=True, capture_output=True, timeout=10)
+            hardware = Path(project) / "tests" / "hardware"
+            self.assertEqual({path.name for path in hardware.iterdir()}, {
+                "README.md", "requirements.txt", "pytest.ini", "conftest.py", "test_connectivity.py",
+            })
+            readme = hardware / "README.md"
+            readme.write_text("Project documentation\n", encoding="utf-8")
+            (hardware / "requirements.txt").unlink()
+            await asyncio.to_thread(subprocess.run, init, cwd=project, check=True, capture_output=True, timeout=10)
+            self.assertEqual(readme.read_text(encoding="utf-8"), "Project documentation\n")
+            self.assertTrue((hardware / "requirements.txt").is_file())
+
+            env = dict(os.environ, IDLAB_URL=self.origin, IDLAB_BOARD="test-board", IDLAB_BOARD_TOKEN=token,
+                       IDLAB_ALLOW_INSECURE_HTTP="false", PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+            env.pop("IDLAB_TOKEN", None)
+            env.pop("PYTEST_ADDOPTS", None)
+            for expected_status in (0, 1):
+                if expected_status:
+                    (hardware / "test_failure.py").write_text(
+                        "def test_failure(board):\n    assert not board.generation\n", encoding="utf-8",
+                    )
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "-m", "pytest", "tests/hardware/", "-v", cwd=project, env=env,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                )
+                try:
+                    output, _ = await asyncio.wait_for(process.communicate(), timeout=20)
+                finally:
+                    if process.returncode is None:
+                        process.kill()
+                        await process.wait()
+                self.assertEqual(process.returncode, expected_status, output.decode(errors="replace"))
+                for _ in range(1 + expected_status):
+                    self.assertEqual((await agent.receive_json(timeout=2))["control"], "external")
+                    self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
 
     async def test_docker_http_allows_delegated_control_without_global_token(self):
         origin = self.origin.replace("127.0.0.1", "host.docker.internal")
