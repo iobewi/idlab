@@ -330,7 +330,7 @@ test('a failed flash read before any bytes restores console without retrying', a
   const scenario = fixture({failRead: true});
   const {card, events, progress} = scenario;
   await card.connect();
-  await assert.rejects(card.readFlash(0, 3), /device_command_failed/);
+  await assert.rejects(card.readFlash(0, 3), /serial_timeout/);
   assert.deepEqual(progress, [{address: 0, received: 0, total: 3, baudrate: 115200}]);
   assert.deepEqual(scenario.lastResult.read_diagnostic, {error: 'serial_timeout', console_restored: true});
   assert.equal(card.mode, 'console');
@@ -343,7 +343,7 @@ test('a failed read reports throttled progress and keeps the serial error even i
   const scenario = fixture({failRead: true, partialRead: 2, failReset: true});
   const {card, progress, events} = scenario;
   await card.connect();
-  await assert.rejects(card.readFlash(0x1000, 3), /device_command_failed/);
+  await assert.rejects(card.readFlash(0x1000, 3), /serial_timeout/);
   assert.deepEqual(progress.at(-1), {address: 0x1000, received: 2, total: 3, baudrate: 115200});
   assert.deepEqual(scenario.lastResult.read_diagnostic,
     {error: 'serial_timeout', console_restored: false, console_error: 'serial_closed'});
