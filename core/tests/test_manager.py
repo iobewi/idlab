@@ -23,7 +23,7 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.enterContext(patch.dict(os.environ, {"IDLAB_STATE_DIR": state}))
         self.service = HTTPService(port)
         self.client = TestClient(
-            TestServer(create_app(token="test-token", service=self.service)),
+            TestServer(create_app(token="test-token", service=self.service), handler_cancellation=True),
             cookie_jar=CookieJar(unsafe=True),
         )
         self.addAsyncCleanup(self.client.close)
@@ -159,6 +159,41 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         final = self.service.process
         await self.client.close()
         self.assertIsNotNone(final.returncode)
+
+    @unittest.skipUnless(
+        (Path(__file__).resolve().parents[1] / "node_modules/esptool-js/bundle.js").is_file(),
+        "npm ci --prefix core required",
+    )
+    async def test_abandoned_http_read_cancels_through_manager(self):
+        self.assertEqual((await self.request("POST", "start")).status, 200)
+        await self.wait_ready()
+        headers = self.web | {"Origin": "http://127.0.0.1:8080"}
+        self.assertEqual((await self.client.post("/api/v1/web/session", headers=headers)).status, 204)
+        agent = await self.client.ws_connect("/agent?device=board", headers=headers)
+        await agent.send_json({"chip": "esp32s3", "mac": "10:20:30:40:50:60",
+                               "loader": "stub", "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
+                               "port_key": "00000000-0000-4000-8000-000000000001"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        path = "/api/v1/devices/board"
+        payload = {"generation": generation, "address": 0, "size": 4}
+        request = asyncio.create_task(self.client.post(path + "/flash/read", headers=headers, json=payload))
+        command = await agent.receive_json(timeout=2)
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "stopping")
+        self.assertEqual(await agent.receive_json(timeout=2), {"cancel": command["id"]})
+        blocked = await self.client.post(path + "/flash/read", headers=headers, json=payload)
+        self.assertEqual(blocked.status, 409)
+        await agent.send_json({"result": command["id"], "error": "operation_cancelled",
+                               "console_restored": True})
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
+        retry = asyncio.create_task(self.client.post(path + "/flash/read", headers=headers, json=payload))
+        command = await agent.receive_json(timeout=2)
+        await agent.send_bytes(b"data")
+        await agent.send_json({"result": command["id"], "value": 16 * 1024 * 1024})
+        self.assertEqual(await (await retry).read(), b"data")
+        await agent.close()
 
     async def test_proxy_preserves_handshake_status_and_close_reason(self):
         async def upstream(request):
