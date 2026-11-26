@@ -1,5 +1,5 @@
 import { sha256 } from './board-connector.js';
-import { $, element } from './dom.js';
+import { $, element, run, say } from './dom.js';
 
 const plans = new WeakMap();
 const hex = address => '0x' + address.toString(16);
@@ -23,6 +23,7 @@ export function renderFlashPlan(card, available) {
   const canOpenLoader = Boolean(available && card?.mode === 'console' && card.canEnterLoader);
   const working = Boolean(plan?.working);
   const confirming = Boolean(plan?.confirming);
+  const canErase = Boolean(card?.identity?.capabilities.includes('flash.erase'));
   if (plan) plan.available = available;
   if (plan?.approval && (plan.generation !== card.identity?.generation ||
       !card.identity?.capabilities.includes('flash.program'))) invalidate(plan);
@@ -33,6 +34,10 @@ export function renderFlashPlan(card, available) {
   $('program-confirmation').hidden = !plan?.confirming;
   $('confirm-write').disabled = !canProgram || !plan?.confirming || plan.working;
   $('cancel-write').disabled = !plan?.confirming || plan.working;
+  $('erase').disabled = !available || !canErase || working;
+  $('erase-help').textContent = canErase
+    ? 'Efface toute la flash, puis vérifie que chaque octet vaut 0xFF.'
+    : 'Nécessite un stub actif, une capacité connue et un état de sécurité vérifié.';
   $('plan-target-help').textContent = canProgram ? '' : card?.mode === 'console' && card.canEnterLoader
     ? 'La validation ouvre le chargeur flash. La carte peut redémarrer.'
     : 'Ouvre le chargeur flash de la carte pour valider et programmer le plan.';
@@ -104,6 +109,42 @@ const errors = {
 };
 
 export function wireFlashPlan({getSelected, render, observeCard}) {
+  const dialog = $('erase-dialog');
+  const confirmation = $('erase-confirmation');
+  const confirmErase = $('erase-confirm');
+  let eraseTarget;
+  $('erase').onclick = () => {
+    const card = getSelected();
+    if ($('erase').disabled || !card?.identity) return;
+    eraseTarget = {card, generation: card.identity.generation};
+    $('erase-target').textContent = `${card.name} · ${card.identity.flash_size / (1024 * 1024)} Mio`;
+    confirmation.value = '';
+    confirmErase.disabled = true;
+    dialog.showModal();
+    confirmation.focus();
+  };
+  confirmation.oninput = () => { confirmErase.disabled = confirmation.value !== eraseTarget?.card.name; };
+  $('erase-cancel').onclick = () => dialog.close();
+  dialog.querySelector('form').onsubmit = event => {
+    event.preventDefault();
+    if (!eraseTarget || confirmErase.disabled) return;
+    const {card, generation} = eraseTarget;
+    const typed = confirmation.value;
+    dialog.close();
+    return run(async () => {
+      if (card !== getSelected() || card.identity?.generation !== generation || $('erase').disabled) {
+        throw new Error('La carte ou sa session a changé. Confirme à nouveau l’effacement.');
+      }
+      invalidate(planFor(card));
+      try {
+        await card.eraseFlash(typed);
+        if (card === getSelected()) say('Effacement intégral vérifié. Tous les octets valent 0xFF.');
+      } finally {
+        render();
+        void observeCard(card);
+      }
+    });
+  };
   $('binary').onchange = () => {
     const card = getSelected();
     const input = $('binary');

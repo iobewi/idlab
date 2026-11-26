@@ -76,6 +76,50 @@ test('ROM identifies without launching a stub; production reads use one reader',
   await assert.rejects(stub.readFlash(0, 1, () => { throw new Error('closed'); }), /closed/);
 });
 
+test('full erase verifies every block and denies erase when security is unknown or enabled', async () => {
+  let security;
+  let eraseCalls = 0;
+  let dirtyAddress = null;
+  const reads = [];
+  class Loader {
+    chip = {CHIP_NAME: 'ESP32-S3', readMac: async () => '10:20:30:40:50:60'};
+    async detectChip() { this.securityInfoCache = security; }
+    async runStub() { this.IS_STUB = true; }
+    async readFlashId() { return 0x154068; }
+    async eraseFlash() { eraseCalls++; }
+    async readFlash(address, size, progress) {
+      reads.push(address);
+      const block = new Uint8Array(size).fill(0xff);
+      if (dirtyAddress !== null && address <= dirtyAddress && dirtyAddress < address + size) {
+        block[dirtyAddress - address] = 0xfe;
+      }
+      progress(null, size);
+      return block;
+    }
+  }
+  const driver = new EspDriver({getInfo: () => ({usbVendorId: 0x303a, usbProductId: 0x1001})},
+    {...upstream, ESPLoader: Loader});
+  const flags = {SECURE_BOOT_EN: false, SECURE_DOWNLOAD_ENABLE: false};
+  for (security of [undefined, {flashCryptCnt: 1, parsedFlags: flags},
+    {flashCryptCnt: 0, parsedFlags: {...flags, SECURE_BOOT_EN: true}}]) {
+    assert.equal((await driver.connect({})).erasable, undefined);
+    await assert.rejects(driver.eraseFlash(() => {}, () => {}), /operation_unsupported/);
+  }
+  assert.equal(eraseCalls, 0);
+  security = {flashCryptCnt: 0, parsedFlags: flags};
+  assert.equal((await driver.connect({})).erasable, true);
+  const mib = 1024 * 1024;
+  for (dirtyAddress of [null, 7]) {
+    reads.length = 0;
+    const progress = [];
+    assert.deepEqual(await driver.eraseFlash(() => {}, bytes => progress.push(bytes)),
+      {address: 0, size: 2 * mib, first_non_ff: dirtyAddress});
+    assert.deepEqual(reads, [0, mib]);
+    assert.deepEqual(progress, [mib, 2 * mib]);
+  }
+  assert.equal(eraseCalls, 2);
+});
+
 test('automatic connection uses an already responding downloader without reset', async () => {
   class FakeLoader {
     chip = {

@@ -232,6 +232,25 @@ with lab.control(board_name, board_token) as board:
         print(operation["verification"])
 ```
 
+### Effacement intégral
+
+`POST /api/v1/devices/{name}/command` accepte `command: "flash.erase"`, la
+`generation` actuelle et `confirmation` égale au nom exact de la carte.
+Le navigateur propriétaire ou le client Python délégué détient le contrôle
+exclusif pendant l’effacement et la vérification. La capacité `flash.erase`
+est annoncée quand le stub est actif, la taille est connue et la ROM a confirmé
+que le démarrage sécurisé et le téléchargement sécurisé sont désactivés et que
+le compteur de chiffrement flash est nul. Si l’état est inconnu, la commande
+est indisponible.
+
+Le connecteur utilise la commande matérielle d’effacement et relit toute la
+capacité par blocs. Le champ `result` contient `address: 0`, `size` et
+`first_non_ff`. Un résultat réussi a `first_non_ff: null`. Une différence
+renvoie `502 flash_erase_verification_failed` et l’historique indique la première
+adresse différente. L’arrêt ne restaure aucune donnée déjà effacée. La carte
+reste en mode chargeur. En Python, appeler `board.erase_flash(confirmation=nom_saisi)`
+après avoir fait confirmer le nom de la carte à l’opérateur.
+
 ## Campagnes
 
 Une campagne regroupe les opérations d’un essai et son verdict. Le web

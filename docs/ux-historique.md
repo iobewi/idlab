@@ -10,7 +10,8 @@ consultent depuis le nouvel onglet correspondant.
 
 Les panneaux historiques restent visibles pour la revue. Les commandes
 qui attendent un raccordement au nouveau cœur sont grisées, notamment
-l’import de manifestes, les artefacts et l’effacement global. La
+l’import de manifestes et les artefacts. L’effacement global est accessible
+sur les cartes qui annoncent la capacité `flash.erase`. La
 [documentation historique](https://github.com/iobewi/rust_dev/blob/79fd7bf943751755de65b4212f08c5bd88a51e7c/bench/docs/interface.md)
 décrit leurs anciens comportements. En mode console, le reset est disponible
 sur les ponts UART reconnus et USB Serial/JTAG. Sur un autre transport,

@@ -256,6 +256,10 @@ export class BoardConnector {
         const verification = await this.#programFlash(socket, command, check);
         check();
         socket.send(JSON.stringify({result: command.id, value: verification}));
+      } else if (command.command === 'flash.erase') {
+        const value = await this.#eraseFlash(socket, command.id, check);
+        check();
+        socket.send(JSON.stringify({result: command.id, value}));
       } else {
         const value = await this.#runCommand(command);
         check();
@@ -267,12 +271,12 @@ export class BoardConnector {
           : error.message === 'invalid_flash_range' ? 'invalid_flash_range' : 'device_command_failed';
         socket.send(command.command === 'flash.read' && !command.stream && !this.commandCancelled ? command.id
           : JSON.stringify({result: command.id, error: code, console_restored: this.mode === 'console',
-            detail: ['mode.loader', 'identify', 'flash.program'].includes(command.command) ? error.message : undefined}));
+            detail: ['mode.loader', 'identify', 'flash.program', 'flash.erase'].includes(command.command) ? error.message : undefined}));
       }
       this.#log(error.message);
     } finally {
-      if (command.command === 'flash.program' && this.programInterrupted) {
-        this.programInterrupted = false;
+      if (this.flashTransferInterrupted) {
+        this.flashTransferInterrupted = false;
         socket.close();
       }
       this.activeCommand = null;
@@ -354,7 +358,7 @@ export class BoardConnector {
     for (const {size} of images) offsets.push(offsets.at(-1) + size);
     check();
     // An interrupted write or readback can leave the stub in a transfer.
-    this.programInterrupted = true;
+    this.flashTransferInterrupted = true;
     progress('write', images[0].address, 0, true);
     await this.session.programFlash(files, check, (index, sent, compressed) => {
       const {address, size} = images[index];
@@ -374,8 +378,28 @@ export class BoardConnector {
       }
       digests.push(await sha256(readback));
     }
-    this.programInterrupted = false;
+    this.flashTransferInterrupted = false;
     return digests;
+  }
+
+  async #eraseFlash(socket, id, check) {
+    if (!this.identity?.capabilities.includes('flash.erase') || !this.session?.identity?.erasable) {
+      throw new Error('Effacement intégral indisponible sur cette carte.');
+    }
+    const total = this.identity.flash_size;
+    let lastUpdate = -Infinity;
+    const progress = (phase, received) => {
+      const now = performance.now();
+      if (received && received < total && now - lastUpdate < 250) return;
+      lastUpdate = now;
+      socket.send(JSON.stringify({id, progress: {phase, address: 0, received, total}}));
+    };
+    this.flashTransferInterrupted = true;
+    progress('erase', 0);
+    this.#log('Effacement intégral · vérification de tous les octets après effacement');
+    const result = await this.session.eraseFlash(check, received => progress('erase-verify', received));
+    this.flashTransferInterrupted = false;
+    return result;
   }
 
   async #runCommand({command, hex, reset}) {
@@ -522,6 +546,8 @@ export class BoardConnector {
   }
 
   enterLoader() { return this.#command('mode.loader'); }
+
+  eraseFlash(confirmation) { return this.#command('flash.erase', {confirmation}); }
 
   prepareProgram(images) {
     return this.#programRequest('plan', {images});

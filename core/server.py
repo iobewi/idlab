@@ -119,6 +119,8 @@ def validate_identity(value):
     capabilities = ["identify", "flash.read"] if loader == "stub" and size else ["identify"]
     if loader == "stub" and size and value.get("programmable") is True:
         capabilities.append("flash.program")
+    if loader == "stub" and size and value.get("erasable") is True:
+        capabilities.append("flash.erase")
     if value.get("return_to_console") is True and transport in ("usb_uart", "usb_serial_jtag"):
         capabilities.append("mode.console")
     if value.get("mode") == "loader":
@@ -565,6 +567,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             fields.add("reset")
             if type(payload.get("reset")) is not bool:
                 return problem(400, "invalid_arguments")
+        elif command == "flash.erase":
+            fields.add("confirmation")
+            if payload.get("confirmation") != request.match_info["name"]:
+                return problem(400, "flash_erase_confirmation_required")
         elif command not in ("mode.loader", "mode.console", "console.reset", "rom.jedec", "identify"):
             return problem(409, "operation_unsupported")
         if not fields <= payload.keys() <= fields | {"campaign_id"}:
@@ -584,6 +590,12 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return problem(409, "operation_unsupported")
         control = board.control
         operation, record, started = start_operation(request, board, name, command, {}, campaign_id)
+        timeout = command_timeout
+        capacity = board.identity["flash_size"]
+        if command == "flash.erase":
+            board.program_plan = None
+            record.update(address=0, size=capacity)
+            timeout += read_timeout * (1 + (capacity - 1) // MAX_READ)
         complete = False
         try:
             message = {"id": operation.id, "command": command}
@@ -592,7 +604,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             elif command == "mode.rom":
                 message["reset"] = payload["reset"]
             await board.socket.send_json(message)
-            result = await asyncio.wait_for(operation.future, timeout=command_timeout)
+            result = await asyncio.wait_for(operation.future, timeout=timeout)
             if control and control.stopped:
                 return problem(403, control.stopped)
             if operation.cancelled:
@@ -602,15 +614,27 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 return problem(502, "device_session_changed")
             if result.get("error"):
                 detail = result.get("detail")
-                if command in ("mode.loader", "identify") and isinstance(detail, str) and detail:
+                if command in ("mode.loader", "identify", "flash.erase") and isinstance(detail, str) and detail:
                     record["detail"] = detail[:500]
                     return web.json_response({"error": "device_command_failed", "detail": record["detail"]}, status=502)
                 return problem(502, "device_command_failed")
-            complete = True
             value = result.get("value")
+            if command == "flash.erase":
+                if (not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
+                        value["address"] != 0 or value["size"] != capacity):
+                    return problem(502, "flash_erase_verification_incomplete")
+                first = value["first_non_ff"]
+                if first is not None and (type(first) is not int or not 0 <= first < capacity):
+                    return problem(502, "flash_erase_verification_incomplete")
+                record["verification"] = value
+                if first is not None:
+                    record["detail"] = f"Premier octet différent de 0xFF à 0x{first:x}."
+                    return web.json_response({"error": "flash_erase_verification_failed", "detail": record["detail"]}, status=502)
+                record["detail"] = "Effacement intégral vérifié. Tous les octets valent 0xFF."
             if command == "rom.jedec":
                 record["detail"] = value
                 board.identity["jedec"] = value
+            complete = True
             return web.json_response(board.describe() | {"result": value})
         except TimeoutError:
             record["detail"] = "Le connecteur n’a pas répondu à temps."

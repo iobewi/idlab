@@ -59,6 +59,9 @@ export class EspDriver {
     this.identificationAfterSync = false;
     if (romOnly && loader.syncStubDetected) throw new Error('Un stub tourne déjà. Remets la carte en mode ROM.');
     if (loader.secureDownloadMode) throw new Error('Identité indisponible en mode téléchargement sécurisé.');
+    const security = loader.securityInfoCache;
+    const erasable = security?.parsedFlags?.SECURE_BOOT_EN === false &&
+      security.parsedFlags.SECURE_DOWNLOAD_ENABLE === false && security.flashCryptCnt === 0;
 
     this.connectionStage = 'Lecture de l’identité matérielle';
     let transport = plan.transport;
@@ -84,6 +87,7 @@ export class EspDriver {
       chip, model, mac, flash_size: flashSize, flash_id: flashId, transport,
       usb_vid: usb.usbVendorId ?? null, usb_pid: usb.usbProductId ?? null,
       loader: loader.IS_STUB ? 'stub' : 'rom',
+      ...(loader.IS_STUB && flashSize && erasable ? {erasable: true} : {}),
     };
     return this.identity;
   }
@@ -149,6 +153,24 @@ export class EspDriver {
       },
     });
     checkSession();
+  }
+
+  async eraseFlash(checkSession, onProgress) {
+    if (!this.identity?.erasable || !this.loader.IS_STUB) throw new Error('operation_unsupported');
+    checkSession();
+    await this.loader.eraseFlash();
+    checkSession();
+    const size = this.identity.flash_size;
+    let first = null;
+    for (let address = 0; address < size; address += FLASH_BLOCK) {
+      const length = Math.min(FLASH_BLOCK, size - address);
+      const block = await this.readFlash(address, length, checkSession, read => onProgress(address + read));
+      if (first === null) {
+        const offset = block.findIndex(byte => byte !== 0xff);
+        if (offset >= 0) first = address + offset;
+      }
+    }
+    return {address: 0, size, first_non_ff: first};
   }
 
   async close() {

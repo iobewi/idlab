@@ -174,6 +174,19 @@ class Board:
         return self._client._request(_board_path(self.name) + "/flash/program", payload,
                                      timeout=self._client._timeout * 2 * (1 + (total - 1) // (4 * 1024 * 1024)))
 
+    def erase_flash(self, *, confirmation: str) -> dict:
+        """Erase the entire flash and verify 0xFF readback. Confirm with the board name."""
+        if confirmation != self.name:
+            raise ValueError("Confirm the full flash erase with the board name")
+        if "flash.erase" not in self.capabilities or not self.flash_size:
+            raise ValueError("Full flash erase is unavailable in this board session")
+        payload = {"generation": self.generation, "command": "flash.erase", "confirmation": confirmation}
+        if self.campaign_id is not None:
+            payload["campaign_id"] = self.campaign_id
+        blocks = 1 + (self.flash_size - 1) // (4 * 1024 * 1024)
+        return self._client._request(_board_path(self.name) + "/command", payload,
+                                     timeout=self._client._timeout * (1 + blocks))["result"]
+
 
 class IDLabClient:
     def __init__(self, base_url: str | None = None, *, token: str | None = None,

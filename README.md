@@ -144,6 +144,10 @@ le chargeur pour permettre une vérification supplémentaire avant démarrage.
 Le SDK 0.1.3 expose le même parcours via `Board.prepare_flash()` et
 `Board.program_flash()`. Voir la [référence de programmation](docs/api.md#programmation-flash).
 
+**Plan flash → Effacement global** efface toute la flash et vérifie sa relecture
+à `0xFF`. Ouvre le chargeur, puis saisis le nom de la carte dans la boîte de
+confirmation. Cette commande supprime aussi les partitions et la configuration.
+
 ### Initialiser une recette pytest
 
 Depuis la racine du projet à qualifier, avec le SDK Python IDLab 0.1.2 ou

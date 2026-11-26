@@ -52,7 +52,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 204)
         self.client = IDLabClient(self.origin, token="test-token", timeout=3)
 
-    async def connect(self, *, console=False, programmable=False):
+    async def connect(self, *, console=False, programmable=False, erasable=False):
         socket = await self.browser.ws_connect(
             self.origin + "/agent?device=test-board", origin=self.origin,
             timeout=ClientWSTimeout(ws_close=2),
@@ -61,7 +61,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await socket.send_json({"mode": "console", "transport": "usb_uart",
                                 "port_key": "00000000-0000-4000-8000-000000000001"} if console else {
             "chip": "esp32s3", "mac": "10:20:30:40:50:60", "loader": "stub",
-            "transport": "usb_uart", "flash_size": 16 * 1024 * 1024, "programmable": programmable,
+            "transport": "usb_uart", "flash_size": 16 * 1024 * 1024, "programmable": programmable, "erasable": erasable,
         })
         await socket.receive_json(timeout=2)
         return socket
@@ -184,6 +184,35 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(IDLabHTTPError) as caught:
             await asyncio.to_thread(old.read_flash, 0, 4)
         self.assertEqual((caught.exception.status, caught.exception.code), (409, "device_session_changed"))
+
+    async def test_erase_requires_confirmation_and_rejects_nonblank_readback(self):
+        agent = await self.connect(erasable=True)
+        async with self.control(agent) as board:
+            self.assertIn("flash.erase", board.capabilities)
+            with self.assertRaises(ValueError):
+                board.erase_flash(confirmation="another-board")
+            path = self.origin + "/api/v1/devices/test-board/command"
+            async with self.browser.post(path, headers={"Origin": self.origin}, json={
+                "command": "flash.erase", "generation": board.generation,
+            }) as refused:
+                self.assertEqual((await refused.json())["error"], "flash_erase_confirmation_required")
+            for first in (7, None):
+                task = asyncio.create_task(asyncio.to_thread(board.erase_flash, confirmation=board.name))
+                command = await agent.receive_json(timeout=2)
+                self.assertEqual(command["command"], "flash.erase")
+                result = {"address": 0, "size": board.flash_size, "first_non_ff": first}
+                await agent.send_json({"result": command["id"], "value": result})
+                if first is None:
+                    self.assertEqual(await task, result)
+                else:
+                    with self.assertRaises(IDLabHTTPError) as failed:
+                        await task
+                    self.assertEqual(failed.exception.code, "flash_erase_verification_failed")
+        self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
+        history = (await asyncio.to_thread(self.client.identify, "test-board"))
+        entries = (await asyncio.to_thread(history.activity))["operations"]
+        self.assertEqual([(entry["state"], entry["verification"]["first_non_ff"]) for entry in entries],
+                         [("Terminée", None), ("Échec", 7)])
 
     async def test_program_confirmed_plan_and_record_readback(self):
         agent = await self.connect(programmable=True)
