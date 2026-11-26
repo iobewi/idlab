@@ -711,6 +711,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 message.update(record_fields)
             await board.socket.send_json(message)
             result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=timeout)
+            if isinstance(result, dict) and result.get("recovery_required") is True:
+                await board.socket.close(code=1011)
             if control and control.stopped:
                 return problem(403, control.stopped)
             if operation.cancelled:
@@ -886,7 +888,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                     (operation.cancelled and result.get("error") == "operation_cancelled") or
                     (stream and result.get("console_restored") is True and board.identity.get("mode") == "console")
                 )
-                if not complete and (not recoverable or control and control.stopped):
+                if (isinstance(result, dict) and result.get('recovery_required') is True or
+                        not complete and (not recoverable or control and control.stopped)):
                     await board.socket.close(code=1011)
             finally:
                 finish_operation(request, board, record, started, succeeded)
@@ -1023,6 +1026,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         try:
             await board.socket.send_json({"id": operation.id, "command": "flash.program", "images": plan.images})
             result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=read_timeout * 2 * (1 + (total - 1) // MAX_READ))
+            if isinstance(result, dict) and result.get("recovery_required") is True:
+                await board.socket.close(code=1011)
             if control and control.stopped:
                 return problem(403, control.stopped)
             if operation.cancelled:
@@ -1056,6 +1061,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             await board.socket.close(code=1011)
             return problem(504, "flash_program_timeout")
         except ConnectionError:
+            operation.agent_disconnected = True
+            await board.socket.close(code=1011)
             return problem(502, "flash_program_failed")
         finally:
             finish_operation(request, board, record, started, complete)
