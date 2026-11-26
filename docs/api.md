@@ -407,6 +407,12 @@ curl --fail-with-body -H "$auth" -H 'Content-Type: application/json' \
 
 Les erreurs métier utilisent un objet `{"error":"code"}`. Les erreurs de
 routage ou de taille émises par le serveur HTTP peuvent avoir un autre format.
+Les refus de négociation WebSocket conservent le statut HTTP et le code métier
+dans le corps JSON, également via le manager. Le SDK les expose via
+`IDLabHTTPError.status` et `IDLabHTTPError.code`.
+Un timeout série (`502 serial_timeout`) est distinct d'un délai serveur
+(`504 flash_read_server_timeout`, `device_command_timeout` ou
+`idlab_http_timeout`). Les opérations flash ne sont pas rejouées automatiquement.
 
 | HTTP | Codes courants | Action côté script |
 |---|---|---|
