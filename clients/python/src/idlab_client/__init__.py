@@ -29,10 +29,12 @@ class IDLabError(RuntimeError):
 class IDLabHTTPError(IDLabError):
     """The server refused an operation."""
 
-    def __init__(self, status: int, code: str):
+    def __init__(self, status: int, code: str, *, operation: dict | None = None, detail: str | None = None):
         super().__init__(f"HTTP {status}: {code}")
         self.status = status
         self.code = code
+        self.operation = operation
+        self.detail = detail
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -384,16 +386,20 @@ class IDLabClient:
                     raise IDLabError("Flash read size differs from the requested size")
                 return data
         except HTTPError as error:
+            payload = None
             with error:
                 try:
-                    payload = json.loads(error.read(4096))
+                    raw = error.read(65537)
+                    payload = json.loads(raw) if len(raw) <= 65536 else None
                     code = payload.get("error") if isinstance(payload, dict) else None
                 except (ValueError, OSError, http.client.HTTPException):
                     code = None
             if hardware_operation and (code in {"idlab_http_timeout", "idlab_http_unavailable"}
                                        or (code is None and error.code >= 500)):
                 self._invalidate_control()
-            raise IDLabHTTPError(error.code, code if isinstance(code, str) else "http_error") from None
+            raise IDLabHTTPError(error.code, code if isinstance(code, str) else "http_error",
+                                 operation=payload.get("operation") if isinstance(payload, dict) and isinstance(payload.get("operation"), dict) else None,
+                                 detail=payload.get("detail") if isinstance(payload, dict) and isinstance(payload.get("detail"), str) else None) from None
         except KeyboardInterrupt:
             if hardware_operation:
                 self._invalidate_control()

@@ -1,5 +1,6 @@
 import { element } from './dom.js';
 import { ensureWebSession } from './web-session.js';
+import { campaignOperationLabel } from './flash-diagnostics.js';
 
 const labels = {
   active: 'Active',
@@ -57,7 +58,7 @@ function row(campaign) {
       const data = await response.json();
       operationsTitle.textContent = data.items.length + ' / ' + data.total + ' opérations récentes';
       operations.replaceChildren(...data.items.map(entry =>
-        element('li', entry.device + ' · ' + entry.command + ' · ' + entry.state + (entry.duration ? ' · ' + entry.duration : ''))));
+        element('li', campaignOperationLabel(entry))));
     } catch (error) {
       operationsTitle.textContent = error.message;
     }

@@ -142,9 +142,10 @@ export class EspDriver {
     return data;
   }
 
-  async programFlash(images, checkSession, onProgress) {
+  async programFlash(images, checkSession, onProgress, onWrite = () => {}) {
     if (!this.loader.IS_STUB || !this.identity?.flash_size) throw new Error('operation_unsupported');
     checkSession();
+    onWrite();
     await this.loader.writeFlash({
       fileArray: images, flashSize: 'keep', flashMode: 'keep', flashFreq: 'keep',
       eraseAll: false, compress: true,
@@ -156,7 +157,7 @@ export class EspDriver {
     checkSession();
   }
 
-  async eraseFlash(checkSession, onProgress, region) {
+  async eraseFlash(checkSession, onProgress, region, onPhase = () => {}) {
     if (!this.identity?.erasable || !this.loader.IS_STUB) throw new Error('operation_unsupported');
     const capacity = this.identity.flash_size;
     const {address: start, size} = region ?? {address: 0, size: capacity};
@@ -165,6 +166,7 @@ export class EspDriver {
       throw new Error('invalid_flash_range');
     }
     checkSession();
+    onPhase('erase');
     if (region) {
       const packet = new DataView(new ArrayBuffer(8));
       packet.setUint32(0, start, true);
@@ -175,6 +177,7 @@ export class EspDriver {
     } else {
       await this.loader.eraseFlash();
     }
+    onPhase('erase-verify');
     checkSession();
     let first = null;
     for (let offset = 0; offset < size; offset += FLASH_BLOCK) {

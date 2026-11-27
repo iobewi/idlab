@@ -1,4 +1,6 @@
 import asyncio
+from io import BytesIO
+from urllib.error import HTTPError
 from contextlib import asynccontextmanager
 import hashlib
 import json
@@ -34,6 +36,19 @@ class ConfigurationTests(unittest.TestCase):
                         client._request("/devices/board/activity")
                     self.assertEqual(refused.exception.code, "control_stopped")
                     opened.assert_called_once()
+
+    def test_http_error_preserves_large_operation_and_legacy_fallback(self):
+        operation = {"flashState": "indeterminate", "verification": [{"preview": "ab" * 256}] * 16}
+        for body, expected in (({"error": "serial_timeout", "operation": operation}, operation),
+                               ({"error": "serial_timeout"}, None)):
+            client = IDLabClient("http://127.0.0.1:8080")
+            raw = json.dumps(body).encode()
+            error = HTTPError("http://127.0.0.1:8080", 502, "failure", {}, BytesIO(raw))
+            with patch.object(client._opener, "open", side_effect=error):
+                with self.assertRaises(IDLabHTTPError) as denied:
+                    client._request("/devices/board/flash/program", {})
+            self.assertEqual(denied.exception.code, "serial_timeout")
+            self.assertEqual(denied.exception.operation, expected)
 
     def test_url_is_required_and_explicit_arguments_override_environment(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -166,6 +181,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(IDLabHTTPError) as denied:
                     await task
                 self.assertEqual((denied.exception.status, denied.exception.code), (502, expected))
+                self.assertEqual(denied.exception.operation['flashState'], 'indeterminate')
+                self.assertEqual(denied.exception.operation['error'], expected)
 
     async def test_generated_recipe_releases_control_even_on_assertion_failure(self):
         agent = await self.connect(console=True)
@@ -319,6 +336,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(IDLabHTTPError) as failed:
                         await task
                     self.assertEqual(failed.exception.code, "flash_erase_verification_failed")
+                    self.assertEqual(failed.exception.operation["flashState"], "mismatch")
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
         history = (await asyncio.to_thread(self.client.identify, "test-board"))
         entries = (await asyncio.to_thread(history.activity))["operations"]

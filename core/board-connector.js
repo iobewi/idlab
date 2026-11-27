@@ -15,12 +15,23 @@ function diagnosticCode(error, fallback = 'device_command_failed') {
   return fallback;
 }
 
+export class IDLabHTTPError extends Error {
+  constructor(status, payload) {
+    payload = payload && typeof payload === 'object' ? payload : {};
+    super(payload.error === 'operation_cancelled' ? 'Opération interrompue.'
+      : payload.detail ?? payload.error ?? ('HTTP ' + status));
+    this.name = 'IDLabHTTPError';
+    this.status = status;
+    this.code = typeof payload.error === 'string' ? payload.error : null;
+    this.operation = payload.operation ?? null;
+  }
+}
+
 async function api(path, options) {
   const response = await fetch('/api/v1' + path, options);
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.error === 'operation_cancelled' ? 'Opération interrompue.'
-      : error.detail ?? error.error ?? ('HTTP ' + response.status));
+    throw new IDLabHTTPError(response.status, error);
   }
   return response;
 }
@@ -253,6 +264,8 @@ export class BoardConnector {
     this.busy = true;
     this.activeCommand = command.id;
     const readDiagnostic = command.command === 'flash.read' ? {} : null;
+    const flashDiagnostic = ['flash.program', 'flash.erase', 'flash.erase.region'].includes(command.command)
+      ? {phase: 'prepare', progress: null, bytes_received: command.command === 'flash.program' ? 0 : null} : null;
     this.onChange();
     const check = () => {
       if (this.commandCancelled) throw new Error('Opération interrompue par l’opérateur.');
@@ -270,11 +283,11 @@ export class BoardConnector {
         check();
         terminal = {result: command.id, value: capacity};
       } else if (command.command === 'flash.program') {
-        const {digests, previews} = await this.#programFlash(socket, command, check);
+        const {digests, previews} = await this.#programFlash(socket, command, check, flashDiagnostic);
         check();
         terminal = {result: command.id, value: digests, previews};
       } else if (command.command === 'flash.erase' || command.command === 'flash.erase.region') {
-        const value = await this.#eraseFlash(socket, command, check);
+        const value = await this.#eraseFlash(socket, command, check, flashDiagnostic);
         check();
         terminal = {result: command.id, value};
       } else {
@@ -307,6 +320,7 @@ export class BoardConnector {
       this.busy = false;
       if (terminal && socket.readyState === 1) {
         if (recoveryRequired) terminal.recovery_required = true;
+        if (flashDiagnostic) terminal.flash_diagnostic = flashDiagnostic;
         // Legacy reads use the binary frame itself as the terminal response.
         if (legacyRead && !terminal.error && !recoveryRequired && legacyData) socket.send(legacyData);
         else socket.send(JSON.stringify(terminal));
@@ -368,7 +382,7 @@ export class BoardConnector {
     return capacity;
   }
 
-  async #programFlash(socket, {id, images}, check) {
+  async #programFlash(socket, {id, images}, check, diagnostic) {
     const capacity = this.identity.flash_size;
     if (this.mode !== 'loader' || this.identity.loader !== 'stub' || !capacity) {
       throw new Error('Le chargeur flash doit être ouvert pour programmer.');
@@ -385,16 +399,19 @@ export class BoardConnector {
     }
     const total = images.reduce((sum, image) => sum + image.size, 0);
     let lastUpdate = -Infinity;
-    const progress = (phase, address, received, force = false) => {
+    const progress = (phase, address, received, force = false, imageIndex = null, imageReceived = null) => {
+      diagnostic.phase = phase;
+      diagnostic.progress = {phase, address, received, total, imageIndex, imageReceived};
       const now = performance.now();
       if (!force && received < total && now - lastUpdate < 250) return;
       lastUpdate = now;
-      socket.send(JSON.stringify({id, progress: {phase, address, received, total}}));
+      socket.send(JSON.stringify({id, progress: diagnostic.progress}));
     };
     for (const [index, image] of images.entries()) {
       check();
       const response = await this.request(`/devices/${this.name}/flash/program/${id}/${index}`);
       const data = new Uint8Array(await response.arrayBuffer());
+      diagnostic.bytes_received += data.length;
       if (data.length !== image.size || await sha256(data) !== image.sha256) {
         throw new Error('Le binaire reçu diffère du plan validé.');
       }
@@ -404,33 +421,37 @@ export class BoardConnector {
     for (const {size} of images) offsets.push(offsets.at(-1) + size);
     check();
     // An interrupted write or readback can leave the stub in a transfer.
-    this.flashTransferInterrupted = true;
-    progress('write', images[0].address, 0, true);
     await this.session.programFlash(files, check, (index, sent, compressed) => {
       const {address, size} = images[index];
-      progress('write', address, offsets[index] + Math.floor(size * sent / compressed));
+      if (Number.isFinite(compressed) && compressed > 0 && Number.isFinite(sent) && sent >= 0 && sent <= compressed) {
+        progress('write', address, offsets[index] + Math.floor(size * sent / compressed), false, index);
+      }
+    }, () => {
+      this.flashTransferInterrupted = true;
+      progress('write', images[0].address, 0, true, 0);
     });
     this.#log('Programmation terminée · relecture SHA-256');
     const digests = [];
     const previews = [];
-    progress('verify', images[0].address, 0, true);
     for (const [index, {address, size}] of images.entries()) {
+      progress('verify', address, offsets[index], true, index, 0);
       const readback = new Uint8Array(size);
       for (let offset = 0; offset < size; offset += MAX_FLASH_READ) {
         check();
         const length = Math.min(size - offset, MAX_FLASH_READ);
         const block = await this.session.readFlash(address + offset, length, check,
-          received => progress('verify', address, offsets[index] + offset + received));
+          received => progress('verify', address, offsets[index] + offset + received, false, index, offset + received));
         readback.set(block, offset);
       }
       digests.push(await sha256(readback));
       previews.push(toHex(readback.subarray(0, 256)));
     }
     this.flashTransferInterrupted = false;
+    diagnostic.phase = 'result';
     return {digests, previews};
   }
 
-  async #eraseFlash(socket, command, check) {
+  async #eraseFlash(socket, command, check, diagnostic) {
     const {id, command: type} = command;
     if (!this.identity?.capabilities.includes(type) || !this.session?.identity?.erasable) {
       throw new Error('Effacement indisponible sur cette carte.');
@@ -439,17 +460,22 @@ export class BoardConnector {
     const {address, size: total} = region ?? {address: 0, size: this.identity.flash_size};
     let lastUpdate = -Infinity;
     const progress = (phase, received) => {
+      diagnostic.phase = phase;
+      diagnostic.progress = {phase, address, received, total};
       const now = performance.now();
       if (received && received < total && now - lastUpdate < 250) return;
       lastUpdate = now;
       socket.send(JSON.stringify({id, progress: {phase, address, received, total}}));
     };
-    this.flashTransferInterrupted = true;
-    progress('erase', 0);
     this.#log(region ? 'Effacement de la zone flash · vérification par relecture'
       : 'Effacement intégral · vérification de tous les octets après effacement');
-    const result = await this.session.eraseFlash(check, received => progress('erase-verify', received), region);
+    const result = await this.session.eraseFlash(check, received => progress('erase-verify', received), region,
+      phase => {
+        if (phase === 'erase') this.flashTransferInterrupted = true;
+        progress(phase, 0);
+      });
     this.flashTransferInterrupted = false;
+    diagnostic.phase = 'result';
     return result;
   }
 

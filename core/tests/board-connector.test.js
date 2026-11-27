@@ -6,7 +6,7 @@ import {BoardConnector, sha256} from '../board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
   readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
-  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false, writeBarrier, badDigest = false } = {}) {
+  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false, writeBarrier, badDigest = false, failWrite = false } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -89,6 +89,10 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
       if (writeBarrier) await writeBarrier();
       for (const [index, file] of options.fileArray.entries()) {
         writes.push(file);
+        if (failWrite) {
+          options.reportProgress(index, 1, 3);
+          throw new Error('serial_timeout');
+        }
         options.reportProgress(index, file.data.length, file.data.length);
       }
     }
@@ -418,11 +422,13 @@ test('programs only the validated bytes, then hashes the actual flash readback',
   const image = {address: 4096, size: 3, sha256: await sha256(firmware)};
   const bad = await program([{...image, sha256: await sha256(stored)}]);
   assert.equal(bad.error, 'device_command_failed');
+  assert.equal(bad.flash_diagnostic.phase, 'prepare');
   assert.equal(writes.length, 0);
   const result = await program([image]);
   assert.deepEqual(writes, [{address: 4096, data: firmware}]);
   assert.deepEqual(result.value, [await sha256(stored)]);
   assert.deepEqual(result.previews, ['010204']);
+  assert.equal(result.flash_diagnostic.phase, 'result');
   assert(progress.some(entry => entry.phase === 'write'));
   assert(progress.some(entry => entry.phase === 'verify'));
   assert.equal(card.mode, 'loader');
@@ -445,6 +451,7 @@ test('program cancellation waits for simulated write and reports recovery', asyn
   release.resolve();
   const terminal = await active;
   assert.equal(terminal.error, 'operation_cancelled');
+  assert.equal(terminal.flash_diagnostic.phase, 'write');
   assert.equal(terminal.recovery_required, true);
   assert.equal(card.busy, false);
 });
@@ -593,4 +600,30 @@ test('temporary loader timeout remains the primary error when console reset fail
     {error: 'serial_timeout', console_restored: false, console_error: 'serial_closed'});
   assert.equal(scenario.lastResult.recovery_required, true);
   assert.equal(scenario.reads.length, 1);
+});
+
+test('destructive terminal diagnostic preserves throttled write progress without claiming physical bytes', async () => {
+  const firmware = Uint8Array.of(1, 2, 3);
+  const {card, program, writes, progress} = fixture({inDownload: true, programPayload: firmware, failWrite: true});
+  await card.connect();
+  const result = await program([{address: 4096, size: 3, sha256: await sha256(firmware)}]);
+  assert.equal(result.error, 'serial_timeout');
+  assert.equal(result.flash_diagnostic.phase, 'write');
+  assert.equal(result.flash_diagnostic.progress.received, 1);
+  assert.equal(result.flash_diagnostic.bytes_received, 3);
+  assert.equal(progress.at(-1).received, 0);
+  assert.equal(result.recovery_required, true);
+  assert.equal(writes.length, 1);
+});
+
+test('program readback digest failure remains a verification failure with no replay', async () => {
+  const firmware = Uint8Array.of(1, 2, 3);
+  const {card, program, writes} = fixture({inDownload: true, programPayload: firmware, badDigest: true});
+  await card.connect();
+  const result = await program([{address: 4096, size: 3, sha256: await sha256(firmware)}]);
+  assert.equal(result.error, 'flash_read_digest_mismatch');
+  assert.equal(result.flash_diagnostic.phase, 'verify');
+  assert.equal(result.flash_diagnostic.progress.imageReceived, 3);
+  assert.equal(result.recovery_required, true);
+  assert.equal(writes.length, 1);
 });
