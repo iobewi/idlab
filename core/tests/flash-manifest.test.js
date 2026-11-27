@@ -63,7 +63,8 @@ test('manifest refuses generation or selection changes during preparation', asyn
     if (changed === 'generation') card.identity = {generation: 'g2', chip: 'esp32s3'};
     if (changed === 'selection') selected = false;
     release({generation: changed === 'response' ? 'g2' : 'g1', chip: 'esp32s3'});
-    await assert.rejects(importing, /session a changé/);
+    await assert.rejects(importing, {message: changed === 'response'
+      ? 'La session de la carte a changé.' : 'La carte ou sa session a changé.'});
   }
 });
 
