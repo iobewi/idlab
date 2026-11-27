@@ -82,6 +82,11 @@ disponible via **Essayer la connexion**.
 
 ## Piloter depuis Python
 
+Les agents IA qui développent ou utilisent IDLab depuis un projet consommateur
+doivent consulter les [consignes AGENTS.md](AGENTS.md) avant de préparer une
+recette ou d'acquérir le contrôle d'une carte. Elles ne remplacent pas les
+contrats API ni l'autorisation de l'opérateur.
+
 Les versions du client sont distribuées dans les
 [releases GitHub](https://github.com/iobewi/idlab/releases). Installer le fichier
 `.whl` de la version souhaitée avec Python 3.12 ou plus récent.

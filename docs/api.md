@@ -622,6 +622,11 @@ interpréter un retour console comme une preuve d'intégrité de la flash.
 
 ### Version installée et ergonomie du SDK (IDL-06)
 
+Pour les agents IA utilisant le SDK depuis un dépôt consommateur, consulter
+les [consignes IDLab pour agents](../AGENTS.md) avant toute recette ou prise
+de contrôle. Elles centralisent les limites d'autorisation, de récupération
+et de qualification ; ne pas les dupliquer dans chaque consommateur.
+
 `idlab --version` et `idlab_client.__version__` exposent la version des
 métadonnées de la distribution installée `idlab-client`, sans connexion au
 serveur. Installer le wheel avant utilisation. La version seule ne prouve pas
