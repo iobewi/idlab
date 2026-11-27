@@ -589,6 +589,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                         break
                     if "identity" in event and pending:
                         board.identity = validate_identity(event["identity"])
+                        if (pending.flash_record is not None and pending.flash_record["command"] == "flash.erase"
+                                and pending.flash_record.get("size") is None
+                                and "flash.erase" in board.identity["capabilities"]):
+                            pending.flash_record["size"] = board.identity["flash_size"]
                         board.recovery_mac = board.identity.get("mac") or board.recovery_mac
                         request.app[CAMPAIGNS].require_recovery(key, board.port_key, board.recovery_mac)
                         board.program_plan = None
@@ -915,7 +919,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return refusal
         if board.pending:
             return problem(409, "device_busy")
-        if command not in board.identity["capabilities"]:
+        capabilities = board.identity["capabilities"]
+        automatic_erase = erase and "mode.loader" in capabilities
+        if command not in capabilities and not automatic_erase:
             return problem(409, "operation_unsupported")
         control = board.control
         record_fields = {}
@@ -925,10 +931,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             address, size = (payload["address"], payload["size"]) if region_erase else (0, capacity)
             if region_erase and (type(address) is not int or type(size) is not int or address < 0 or
                                  size < SECTOR_SIZE or address % SECTOR_SIZE or size % SECTOR_SIZE or
-                                 address + size > capacity):
+                                 address + size > (capacity if capacity is not None else MAX_FLASH)):
                 return problem(400, "invalid_flash_range")
             record_fields.update(address=address, size=size)
-            timeout += read_timeout * (1 + (size - 1) // MAX_READ)
+            timeout += read_timeout * (1 + ((size if size is not None else MAX_FLASH) - 1) // MAX_READ)
         operation, record, started = start_operation(request, board, name, command, record_fields, campaign_id)
         if erase:
             board.program_plan = None
@@ -970,7 +976,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 return failure(agent_error_status(code), code)
             value = result.get("value")
             if erase:
-                if (not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
+                size = record["size"]
+                if (command not in board.identity["capabilities"] or type(size) is not int or
+                        size <= 0 or address + size > board.identity["flash_size"] or
+                        not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
+                        type(value["address"]) is not int or type(value["size"]) is not int or
                         value["address"] != address or value["size"] != size):
                     record["resultInvalid"] = True
                     return failure(502, "flash_erase_verification_incomplete")
