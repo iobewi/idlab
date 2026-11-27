@@ -619,11 +619,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                                 any(type(progress.get(key)) is not int for key in ("address", "received", "total")) or
                                 not 0 <= progress["received"] <= progress["total"] <= MAX_FLASH):
                             break
-                        board.progress = progress | {"source": pending.source, "session_id": pending.session_id}
                         if pending.flash_record is not None:
                             candidate = flash_progress(pending.flash_record, progress)
                             if candidate is not None and progress_advances(pending.flash_progress, candidate):
                                 pending.flash_progress = candidate
+                                board.progress = candidate | {"source": pending.source, "session_id": pending.session_id}
+                        else:
+                            board.progress = progress | {"source": pending.source, "session_id": pending.session_id}
                         previous = pending.read_progress
                         if (progress["address"] == pending.read_address and progress["total"] == pending.size and
                                 (previous is None or progress["received"] >= previous["received"])):

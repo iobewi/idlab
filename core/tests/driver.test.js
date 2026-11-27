@@ -115,6 +115,7 @@ test('full erase verifies every block and denies erase when security is unknown 
   let security;
   let eraseCalls = 0;
   let dirtyAddress = null;
+  let failure = null;
   const reads = [];
   class Loader extends ReadFlashStub {
     ESP_ERASE_REGION = 0xd1;
@@ -123,10 +124,11 @@ test('full erase verifies every block and denies erase when security is unknown 
     async detectChip() { this.securityInfoCache = security; }
     async runStub() { this.IS_STUB = true; }
     async readFlashId() { return 0x154068; }
-    async eraseFlash() { eraseCalls++; }
+    async eraseFlash() { eraseCalls++; if (failure === 'erase') throw Error('serial_timeout'); }
     timeoutPerMb() { return 30_000; }
     async checkCommand(_description, opcode, packet, checksum, responseSize, timeout) {
       if (opcode === this.ESP_READ_FLASH) return this.prepareRead(opcode, packet, (address, size) => {
+        if (failure === 'verify') throw Error('serial_timeout');
         reads.push(address);
         const block = new Uint8Array(size).fill(0xff);
         if (dirtyAddress !== null && address <= dirtyAddress && dirtyAddress < address + size) {
@@ -135,6 +137,7 @@ test('full erase verifies every block and denies erase when security is unknown 
         return block;
       });
       assert.equal(opcode, this.ESP_ERASE_REGION);
+      if (failure === 'erase') throw Error('serial_timeout');
       assert.deepEqual([...packet], [0, 16, 0, 0, 0, 32, 0, 0]);
       assert.deepEqual([checksum, responseSize, timeout], [0, 0, 30_000]);
     }
@@ -168,6 +171,17 @@ test('full erase verifies every block and denies erase when security is unknown 
     {address: 4096, size: 8192, first_non_ff: 8192});
   assert.deepEqual(reads, [4096]);
   assert.equal(eraseCalls, 2);
+  for (const region of [undefined, {address: 4096, size: 8192}]) {
+    for (failure of ['erase', 'verify']) {
+      const phases = [];
+      await assert.rejects(driver.eraseFlash(() => {}, () => {}, region, phase => phases.push(phase)), /serial_timeout/);
+      assert.deepEqual(phases, failure === 'erase' ? ['erase'] : ['erase', 'erase-verify']);
+    }
+  }
+  const phases = [];
+  await assert.rejects(driver.eraseFlash(() => {}, () => {}, {address: 1, size: 4096},
+    phase => phases.push(phase)), /invalid_flash_range/);
+  assert.deepEqual(phases, []);
 });
 
 test('automatic connection uses an already responding downloader without reset', async () => {

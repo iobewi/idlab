@@ -195,6 +195,28 @@ class ManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await (await retry).read(), b"data")
         await agent.close()
 
+    async def test_proxy_preserves_destructive_http_diagnostic(self):
+        payload = {"error": "serial_timeout", "operation": {"flashState": "indeterminate",
+                   "verification": [{"preview": "ab" * 256}] * 16}}
+        async def upstream(request):
+            return web.json_response(payload, status=502, headers={"X-IDLab-Error": "serial_timeout"})
+        app = web.Application()
+        app.router.add_post("/api/v1/devices/board/flash/program", upstream)
+        backend = TestServer(app)
+        await backend.start_server()
+        self.addAsyncCleanup(backend.close)
+        self.service.port = backend.port
+        class Running:
+            returncode = None
+        self.service.process = Running()
+        try:
+            response = await self.client.post("/api/v1/devices/board/flash/program", headers=self.web, json={})
+            self.assertEqual(response.status, 502)
+            self.assertEqual(response.headers.get("X-IDLab-Error"), "serial_timeout")
+            self.assertEqual(await response.json(), payload)
+        finally:
+            self.service.process = None
+
     async def test_proxy_preserves_handshake_status_and_close_reason(self):
         async def upstream(request):
             code = request.query.get("code")

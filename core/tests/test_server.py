@@ -67,6 +67,33 @@ class CampaignStorageTests(unittest.TestCase):
                 campaigns.close()
 
 
+    def test_destructive_diagnostics_survive_reopen_and_unfinished_is_indeterminate(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "campaigns.sqlite3"
+            campaigns = Campaigns(path)
+            campaign = campaigns.start("Diagnostics", {}, owner=None)
+            cid = campaign["id"]
+            initial = {"id": "done", "startedAt": "2026-01-01T00:00:00+00:00",
+                       "command": "flash.erase.region", "state": "En cours"}
+            record = initial | {"state": "Échec", "flashState": "unverified",
+                                "phase": "erase-verify", "error": "serial_timeout",
+                                "lastOffset": 4096, "bytesWritten": None}
+            campaigns.enter(cid, initial)
+            campaigns.leave(cid, record)
+            campaigns.enter(cid, initial | {"id": "unfinished"})
+            campaigns.close()
+            campaigns = Campaigns(path)
+            try:
+                entries = {row["id"]: row for row in campaigns.operations(cid, limit=25, offset=0)["items"]}
+                self.assertEqual(entries["done"], record)
+                self.assertEqual(entries["unfinished"]["flashState"], "indeterminate")
+                self.assertEqual(entries["unfinished"]["error"], "server_restarted")
+                self.assertIsNone(entries["unfinished"]["lastOffset"])
+                self.assertTrue(entries["unfinished"]["recoveryRequired"])
+            finally:
+                campaigns.close()
+
+
 class IdentityTests(unittest.TestCase):
     def test_identification_retains_loader_details_and_read_capability(self):
         value = {
@@ -723,6 +750,40 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(record["bytesWritten"])
             observed = await self.browser.get(path + "/activity?generation=" + generation, headers=self.local)
             self.assertEqual((await observed.json())["operations"][0], record)
+        await agent.close()
+
+    async def test_erase_diagnostic_matches_campaign_and_http(self):
+        agent = await self.browser.ws_connect("/agent?device=erase", headers=self.local)
+        await agent.send_json({"chip": "esp32s3", "mac": "10:20:30:40:50:60",
+            "loader": "stub", "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
+            "erasable": True, "erasable_region": True})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        created = await self.browser.post("/api/v1/campaigns", headers=self.local, json={"name": "Erase diagnostic"})
+        self.assertEqual(created.status, 201)
+        cid = (await created.json())["id"]
+        path = "/api/v1/devices/erase"
+        for command in ("flash.erase", "flash.erase.region"):
+            address, size = (4096, 8192) if command.endswith("region") else (0, 16 * 1024 * 1024)
+            for phase in ("erase", "erase-verify"):
+                payload = {"generation": generation, "command": command, "confirmation": "erase", "campaign_id": cid}
+                if command.endswith("region"):
+                    payload.update(address=address, size=size)
+                active = asyncio.create_task(self.browser.post(path + "/command", headers=self.local, json=payload))
+                dispatched = await agent.receive_json(timeout=2)
+                progress = {"phase": phase, "address": address, "total": size, "received": 4096 if phase == "erase-verify" else 0}
+                await agent.send_json({"id": dispatched["id"], "progress": progress})
+                await agent.send_json({"result": dispatched["id"], "error": "serial_timeout",
+                    "flash_diagnostic": {"phase": phase, "progress": progress}})
+                response = await active
+                self.assertEqual(response.status, 502)
+                record = (await response.json())["operation"]
+                self.assertEqual(record["phase"], phase)
+                self.assertEqual(record["flashState"], "unverified" if phase == "erase-verify" else "indeterminate")
+                self.assertEqual(record["lastOffset"], address + 4096 if phase == "erase-verify" else None)
+                self.assertEqual(record["error"], "serial_timeout")
+                self.assertIsNone(record["bytesWritten"])
+                history = await self.browser.get("/api/v1/campaigns/" + cid + "/operations", headers=self.local)
+                self.assertIn(record, (await history.json())["items"])
         await agent.close()
 
     async def test_recovery_follows_renamed_card_and_preserves_distinct_board(self):
