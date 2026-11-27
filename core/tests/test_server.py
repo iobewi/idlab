@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -14,6 +16,25 @@ from server import create_app, validate_identity
 
 
 class CampaignStorageTests(unittest.TestCase):
+    def test_recovery_marker_survives_database_reopen(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "campaigns.sqlite3"
+            key = ("owner", "board")
+            campaigns = Campaigns(path)
+            campaigns.require_recovery(key)
+            campaigns.close()
+            campaigns = Campaigns(path)
+            try:
+                self.assertEqual(campaigns.recovery_keys(), {key})
+                campaigns.clear_recovery(key)
+            finally:
+                campaigns.close()
+            campaigns = Campaigns(path)
+            try:
+                self.assertEqual(campaigns.recovery_keys(), set())
+            finally:
+                campaigns.close()
+
     def test_migrates_existing_campaigns_and_recovers_unfinished_operations(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "campaigns.sqlite3"
@@ -609,6 +630,49 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(generation, new_generation)
         self.assertEqual((await self.read("board", generation)).status, 409)
         await new.close()
+
+    async def test_destructive_operations_hold_reservation_until_terminal_result(self):
+        for command in ("flash.erase.region", "flash.program"):
+            with self.subTest(command=command):
+                name = "erase" if command == "flash.erase.region" else "program"
+                agent = await self.browser.ws_connect("/agent?device=" + name, headers=self.local)
+                await agent.send_json({"chip": "esp32s3", "mac": "10:20:30:40:50:60",
+                    "loader": "stub", "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
+                    "erasable": True, "erasable_region": True, "programmable": True})
+                generation = (await agent.receive_json(timeout=2))["generation"]
+                path = "/api/v1/devices/" + name
+                if command == "flash.program":
+                    data = b"firmware"
+                    plan = await self.browser.post(path + "/flash/plan", headers=self.local,
+                        json={"generation": generation, "images": [{"address": 0,
+                            "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}]})
+                    self.assertEqual(plan.status, 201)
+                    payload = {"generation": generation, "plan_id": (await plan.json())["plan_id"],
+                               "binaries": [base64.b64encode(data).decode()]}
+                    endpoint = "/flash/program"
+                else:
+                    payload = {"generation": generation, "command": command, "confirmation": name,
+                               "address": 0, "size": 4096}
+                    endpoint = "/command"
+                active = asyncio.create_task(self.browser.post(path + endpoint, headers=self.local, json=payload))
+                dispatched = await agent.receive_json(timeout=2)
+                self.assertEqual(dispatched["command"], command)
+                stop = await self.browser.post(path + "/control/stop", headers=self.local)
+                self.assertEqual(await stop.json(), {"control": "stopping"})
+                self.assertEqual((await agent.receive_json(timeout=2))["control"], "stopping")
+                self.assertEqual(await agent.receive_json(timeout=2), {"cancel": dispatched["id"]})
+                blocked = await self.read(name, generation)
+                self.assertEqual(blocked.status, 409)
+                self.assertFalse(active.done())
+                await agent.send_json({"result": dispatched["id"], "error": "operation_cancelled",
+                                       "recovery_required": True})
+                self.assertEqual((await agent.receive(timeout=2)).type.name, "CLOSE")
+                response = await active
+                self.assertEqual((response.status, await response.json()), (409, {"error": "operation_cancelled"}))
+                fresh, new_generation = await self.board(name)
+                blocked = await self.read(name, new_generation)
+                self.assertEqual((blocked.status, await blocked.json()), (409, {"error": "device_recovery_required"}))
+                await fresh.close()
 
     async def test_timeout_invalidates_session_without_replay(self):
         ws, generation = await self.board("board")
