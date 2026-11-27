@@ -1,4 +1,5 @@
 import { serialTransport } from './serial-transport.js';
+import { readFlashVerified } from './flash-read.js';
 
 const UART_BRIDGES = new Set([0x0403, 0x067b, 0x10c4, 0x1a86]);
 const FLASH_BLOCK = 1024 * 1024;
@@ -131,12 +132,9 @@ export class EspDriver {
     const data = new Uint8Array(size);
     for (let offset = 0; offset < size; offset += FLASH_BLOCK) {
       checkSession();
-      // Keep the standard reader's cumulative copies bounded to one block.
       const length = Math.min(FLASH_BLOCK, size - offset);
-      const block = await this.loader.readFlash(address + offset, length, (_packet, received) => {
-        checkSession();
-        onProgress(offset + received);
-      });
+      const block = await readFlashVerified(this.loader, address + offset, length, checkSession,
+        received => onProgress(offset + received));
       if (block.length !== length) throw new Error('incomplete_flash_read');
       data.set(block, offset);
     }

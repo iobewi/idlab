@@ -22,7 +22,8 @@ from flash_plan import MAX_FLASH, MAX_PROGRAM_BODY, SECTOR_SIZE, decode_images, 
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT.parent / "web"
 BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
-SERIAL_MODULES = ("board-connector.js", "esp-driver.js", "serial-console.js", "serial-transport.js")
+SERIAL_MODULES = ("board-connector.js", "esp-driver.js", "serial-console.js", "serial-transport.js",
+                  "flash-read.js", "md5.js")
 MAX_READ = 4 * 1024 * 1024
 UART_BUFFER = 1024 * 1024
 UART_PAGE = 64 * 1024
@@ -97,7 +98,7 @@ class Board:
         self.journal.append(entry)
 
 
-AGENT_ERROR_CODES = frozenset(["device_command_failed","operation_cancelled","device_session_changed","operation_unsupported","invalid_flash_range","incomplete_flash_read","serial_closed","serial_timeout","serial_partial_packet","serial_invalid_escape","serial_frame_too_large","flash_program_failed"])
+AGENT_ERROR_CODES = frozenset(["device_command_failed","operation_cancelled","device_session_changed","operation_unsupported","invalid_flash_range","incomplete_flash_read","flash_read_invalid_digest","flash_read_digest_mismatch","serial_buffer_overrun","serial_framing_error","serial_break_error","serial_parity_error","serial_closed","serial_timeout","serial_partial_packet","serial_invalid_escape","serial_frame_too_large","flash_program_failed"])
 
 
 def agent_error_code(value):

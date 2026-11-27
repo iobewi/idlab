@@ -600,6 +600,9 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_nonstream_error_status_survives_recovery(self):
         for code, status in (("device_session_changed", 409), ("operation_unsupported", 409),
                              ("invalid_flash_range", 400), ("serial_timeout", 502),
+                             ("flash_read_digest_mismatch", 502), ("flash_read_invalid_digest", 502),
+                             ("serial_buffer_overrun", 502), ("serial_framing_error", 502),
+                             ("serial_break_error", 502), ("serial_parity_error", 502),
                              ("unrecognized_internal_message", 502)):
             with self.subTest(code=code):
                 agent, generation = await self.board("board")

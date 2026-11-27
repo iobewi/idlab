@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {createHash} from 'node:crypto';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector, sha256} from '../board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
   readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
-  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false, writeBarrier } = {}) {
+  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false, writeBarrier, badDigest = false } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -18,6 +19,8 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
   const port = {getInfo: () => ({usbVendorId: vid, usbProductId: pid})};
   class Loader {
     ESP_CHANGE_BAUDRATE = 0x0f;
+    ESP_READ_FLASH = 0xd2;
+    FLASH_READ_TIMEOUT = 100000;
     chip = {
       CHIP_NAME: 'ESP32-S3',
       readMac: async () => '10:20:30:40:50:60',
@@ -26,6 +29,11 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     constructor({transport, romBaudrate}) {
       this.transport = transport;
       this.initialBaud = romBaudrate;
+      this.transport.read = async () => {
+        if (!this.frames.length) throw new Error(typeof failRead === 'string' ? failRead : 'serial_timeout');
+        return this.frames.shift();
+      };
+      this.transport.write = async () => {};
     }
     async detectChip(entry, attempts) {
       events.push('detect:' + entry);
@@ -46,6 +54,24 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
       this.IS_STUB = true;
     }
     async checkCommand(_description, opcode, data) {
+      if (opcode === this.ESP_READ_FLASH) {
+        const payload = new DataView(data.buffer);
+        const address = payload.getUint32(0, true), size = payload.getUint32(4, true);
+        this.frames = [];
+        if (failRead) {
+          // A partial final packet must now be rejected before ACK.
+          if (partialRead) this.frames.push(new Uint8Array(partialRead));
+          return 0;
+        }
+        if (address === shortResponseAt) { this.frames.push(new Uint8Array(1)); return 0; }
+        const block = readBlock ? readBlock(address, size) : bytes;
+        assert.equal(size, block.length);
+        for (let offset = 0; offset < size; offset += 4096) this.frames.push(block.subarray(offset, offset + 4096));
+        const digest = new Uint8Array(createHash('md5').update(block).digest());
+        if (badDigest) digest[0] ^= 1;
+        this.frames.push(digest);
+        return 0;
+      }
       assert.equal(opcode, 0x0f);
       const payload = new DataView(data.buffer);
       assert.equal(payload.getUint32(4, true), deviceBaud);
@@ -54,17 +80,6 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     }
     async isResponsive() { return !failBaud && this.transport.baudrate === deviceBaud; }
     async readFlashId() { return 0x184068; }
-    async readFlash(address, size, onPacket) {
-      if (failRead) {
-        if (partialRead) onPacket(new Uint8Array(partialRead), partialRead);
-        throw new Error(typeof failRead === 'string' ? failRead : 'serial_timeout');
-      }
-      if (address === shortResponseAt) return new Uint8Array(1);
-      const block = readBlock ? readBlock(address, size) : bytes;
-      assert.equal(size, block.length);
-      onPacket(block, block.length);
-      return block;
-    }
     async openAndSync() {}
     async writeFlash(options) {
       assert.equal(options.eraseAll, false);
@@ -363,10 +378,10 @@ test('a failed read reports throttled progress and keeps the serial error even i
   const scenario = fixture({failRead: true, partialRead: 2, failReset: true});
   const {card, progress, events} = scenario;
   await card.connect();
-  await assert.rejects(card.readFlash(0x1000, 3), /serial_timeout/);
-  assert.deepEqual(progress.at(-1), {address: 0x1000, received: 2, total: 3, baudrate: 115200});
+  await assert.rejects(card.readFlash(0x1000, 3), /incomplete_flash_read/);
+  assert.deepEqual(progress.at(-1), {address: 0x1000, received: 0, total: 3, baudrate: 115200});
   assert.deepEqual(scenario.lastResult.read_diagnostic,
-    {error: 'serial_timeout', console_restored: false, console_error: 'serial_closed'});
+    {error: 'incomplete_flash_read', console_restored: false, console_error: 'serial_closed'});
   assert.equal(events.filter(event => event === 'reset').length, 1);
 });
 
@@ -515,4 +530,67 @@ test('the ROM action can request a reset from a console on a supported transport
   assert.equal(card.consoleUnavailable, true);
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console', 'detect:default_reset']);
   await card.disconnect();
+});
+
+test('persistent loader read failures require recovery and do not retry', async () => {
+  for (const [options, code] of [[{failRead: true}, 'serial_timeout'],
+      [{badDigest: true}, 'flash_read_digest_mismatch']]) {
+    const scenario = fixture({inDownload: true, ...options});
+    const {card, reads, events} = scenario;
+    await card.connect();
+    const socket = card.socket;
+    await assert.rejects(card.readFlash(0, 3), new RegExp(code));
+    assert.equal(scenario.lastResult.error, code);
+    assert.equal(scenario.lastResult.recovery_required, true);
+    assert.equal(socket.readyState, 3);
+    assert.equal(card.mode, 'disconnected');
+    assert.equal(card.busy, false);
+    assert.equal(reads.length, 1);
+    assert.equal(events.filter(e => e === 'reset').length, 0);
+    await assert.rejects(card.readFlash(0, 3), /Carte indisponible/);
+    assert.equal(reads.length, 1);
+  }
+});
+
+test('successful persistent loader reads keep the same reusable session', async () => {
+  const scenario = fixture({inDownload: true});
+  const {card, reads, events} = scenario;
+  await card.connect();
+  const session = card.session, socket = card.socket;
+  for (let i = 0; i < 2; i++) {
+    const {blob} = await card.readFlash(i * 4096, 3);
+    assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), Uint8Array.of(0,255,13));
+    assert.equal(scenario.lastResult.recovery_required, undefined);
+    assert.equal(card.session, session);
+    assert.equal(card.socket, socket);
+    assert.equal(card.mode, 'loader');
+    assert.equal(card.busy, false);
+  }
+  assert.equal(reads.length, 2);
+  assert.equal(events.filter(e => e === 'reset').length, 0);
+  await card.disconnect();
+});
+
+test('temporary loader digest failure restores console without replay', async () => {
+  const scenario = fixture({badDigest: true});
+  const {card, reads, events} = scenario;
+  await card.connect();
+  await assert.rejects(card.readFlash(0, 3), /flash_read_digest_mismatch/);
+  assert.deepEqual(scenario.lastResult.read_diagnostic,
+    {error: 'flash_read_digest_mismatch', console_restored: true});
+  assert.equal(scenario.lastResult.recovery_required, false);
+  assert.equal(card.mode, 'console');
+  assert.equal(reads.length, 1);
+  assert.equal(events.filter(e => e === 'reset').length, 1);
+  await card.disconnect();
+});
+
+test('temporary loader timeout remains the primary error when console reset fails', async () => {
+  const scenario = fixture({failRead: true, failReset: true});
+  await scenario.card.connect();
+  await assert.rejects(scenario.card.readFlash(0, 3), /serial_timeout/);
+  assert.deepEqual(scenario.lastResult.read_diagnostic,
+    {error: 'serial_timeout', console_restored: false, console_error: 'serial_closed'});
+  assert.equal(scenario.lastResult.recovery_required, true);
+  assert.equal(scenario.reads.length, 1);
 });
