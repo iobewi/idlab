@@ -56,6 +56,11 @@ requires a demonstrated need and an explicitly scoped task.
 
 ## Using IDLab from a consumer or test agent
 
+Acquiring exclusive control changes laboratory state even when no command
+is sent to the device. It requires explicit operator authorization and must
+not be treated as passive metadata inspection. This also applies to the
+generated pytest connectivity fixture.
+
 1. Identify the intended scenario, expected results, board name, expected
    chip/transport and exact candidate firmware hash. Establish the
    authorization boundary and record it.
@@ -106,6 +111,14 @@ requires a demonstrated need and an explicitly scoped task.
   timeout is not a default for lengthy hardware tests.
 
 ## Development and qualification
+
+- Preserve the global objective and acceptance criteria. Do not recursively
+  decompose a problem beyond the granularity needed to make a decision.
+  Analyse existing source code and evidence before introducing additional
+  instrumentation or experiments. Each investigation must answer a concrete
+  unresolved question. Stop investigating once the evidence is sufficient
+  to resolve the stated problem; report remaining uncertainties without
+  expanding the scope.
 
 - Read the issue, current main/target SHA, existing implementation and
   relevant tests before changing code. Prefer a targeted correction over
