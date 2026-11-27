@@ -128,15 +128,17 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_control_context_invalidates_all_snapshots(self):
         agent = await self.connect()
+        token = await self.issue_token(agent)
         for exceptional in (False, True):
-            token = await self.issue_token(agent)
             context = self.client.control("test-board", token)
             board = await asyncio.to_thread(context.__enter__)
             await agent.receive_json(timeout=2)
             refreshed = await asyncio.to_thread(board.refresh)
             error = RuntimeError("recipe failed") if exceptional else None
             await asyncio.to_thread(context.__exit__, type(error) if error else None, error, None)
-            await agent.receive_json(timeout=2)
+            released = await agent.receive_json(timeout=2)
+            self.assertEqual(released["control"], "available")
+            self.assertTrue(released["has_token"])
             with patch.object(board._client._opener, "open") as opened:
                 for snapshot in (board, refreshed):
                     with self.assertRaises(IDLabHTTPError) as refused:
