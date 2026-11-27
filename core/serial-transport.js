@@ -12,6 +12,7 @@ export function serialTransport(Transport, ESPError) {
     async connect(...args) {
       this.generation = (this.generation ?? 0) + 1;
       this.closed = false;
+      this.readFailure = null;
       this.buffer = empty;
       return super.connect(...args);
     }
@@ -19,7 +20,24 @@ export function serialTransport(Transport, ESPError) {
     async readLoop() {
       const generation = this.generation;
       try {
-        await super.readLoop();
+        while (!this.closed && this.generation === generation && this.device.readable) {
+          const reader = this.device.readable.getReader();
+          this.reader = reader;
+          try {
+            const {value, done} = await reader.read();
+            if (done || this.closed || this.generation !== generation) break;
+            if (value?.length) this.buffer = this.appendArray(this.buffer, Uint8Array.from(value));
+          } catch (cause) {
+            if (!this.closed && this.generation === generation) {
+              const codes = {BufferOverrunError: 'serial_buffer_overrun', FramingError: 'serial_framing_error',
+                BreakError: 'serial_break_error', ParityError: 'serial_parity_error'};
+              this.readFailure = new ESPError(codes[cause?.name] ?? 'serial_closed');
+            }
+            break;
+          } finally {
+            reader.releaseLock();
+          }
+        }
       } finally {
         if (this.generation === generation) {
           this.closed = true;
@@ -35,6 +53,7 @@ export function serialTransport(Transport, ESPError) {
     }
 
     async write(bytes) {
+      if (this.readFailure) throw this.readFailure;
       if (this.closed || !this.device.writable) throw new ESPError('serial_closed');
       const writer = this.device.writable.getWriter();
       try {
@@ -50,6 +69,7 @@ export function serialTransport(Transport, ESPError) {
       let length = 0;
       let escaped = false;
       for (;;) {
+        if (this.readFailure) throw this.readFailure;
         if (this.closed) throw new ESPError('serial_closed');
         const chunk = this.buffer;
         this.buffer = empty;

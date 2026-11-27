@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {createHash} from 'node:crypto';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
 import {BoardConnector, sha256} from '../board-connector.js';
 
@@ -18,6 +19,8 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
   const port = {getInfo: () => ({usbVendorId: vid, usbProductId: pid})};
   class Loader {
     ESP_CHANGE_BAUDRATE = 0x0f;
+    ESP_READ_FLASH = 0xd2;
+    FLASH_READ_TIMEOUT = 100000;
     chip = {
       CHIP_NAME: 'ESP32-S3',
       readMac: async () => '10:20:30:40:50:60',
@@ -26,6 +29,11 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     constructor({transport, romBaudrate}) {
       this.transport = transport;
       this.initialBaud = romBaudrate;
+      this.transport.read = async () => {
+        if (!this.frames.length) throw new Error(typeof failRead === 'string' ? failRead : 'serial_timeout');
+        return this.frames.shift();
+      };
+      this.transport.write = async () => {};
     }
     async detectChip(entry, attempts) {
       events.push('detect:' + entry);
@@ -46,6 +54,22 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
       this.IS_STUB = true;
     }
     async checkCommand(_description, opcode, data) {
+      if (opcode === this.ESP_READ_FLASH) {
+        const payload = new DataView(data.buffer);
+        const address = payload.getUint32(0, true), size = payload.getUint32(4, true);
+        this.frames = [];
+        if (failRead) {
+          // A partial final packet must now be rejected before ACK.
+          if (partialRead) this.frames.push(new Uint8Array(partialRead));
+          return 0;
+        }
+        if (address === shortResponseAt) { this.frames.push(new Uint8Array(1)); return 0; }
+        const block = readBlock ? readBlock(address, size) : bytes;
+        assert.equal(size, block.length);
+        for (let offset = 0; offset < size; offset += 4096) this.frames.push(block.subarray(offset, offset + 4096));
+        this.frames.push(new Uint8Array(createHash('md5').update(block).digest()));
+        return 0;
+      }
       assert.equal(opcode, 0x0f);
       const payload = new DataView(data.buffer);
       assert.equal(payload.getUint32(4, true), deviceBaud);
@@ -54,17 +78,6 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     }
     async isResponsive() { return !failBaud && this.transport.baudrate === deviceBaud; }
     async readFlashId() { return 0x184068; }
-    async readFlash(address, size, onPacket) {
-      if (failRead) {
-        if (partialRead) onPacket(new Uint8Array(partialRead), partialRead);
-        throw new Error(typeof failRead === 'string' ? failRead : 'serial_timeout');
-      }
-      if (address === shortResponseAt) return new Uint8Array(1);
-      const block = readBlock ? readBlock(address, size) : bytes;
-      assert.equal(size, block.length);
-      onPacket(block, block.length);
-      return block;
-    }
     async openAndSync() {}
     async writeFlash(options) {
       assert.equal(options.eraseAll, false);
@@ -363,10 +376,10 @@ test('a failed read reports throttled progress and keeps the serial error even i
   const scenario = fixture({failRead: true, partialRead: 2, failReset: true});
   const {card, progress, events} = scenario;
   await card.connect();
-  await assert.rejects(card.readFlash(0x1000, 3), /serial_timeout/);
-  assert.deepEqual(progress.at(-1), {address: 0x1000, received: 2, total: 3, baudrate: 115200});
+  await assert.rejects(card.readFlash(0x1000, 3), /incomplete_flash_read/);
+  assert.deepEqual(progress.at(-1), {address: 0x1000, received: 0, total: 3, baudrate: 115200});
   assert.deepEqual(scenario.lastResult.read_diagnostic,
-    {error: 'serial_timeout', console_restored: false, console_error: 'serial_closed'});
+    {error: 'incomplete_flash_read', console_restored: false, console_error: 'serial_closed'});
   assert.equal(events.filter(event => event === 'reset').length, 1);
 });
 

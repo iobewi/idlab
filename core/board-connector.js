@@ -5,7 +5,7 @@ const CONSOLE_BAUD = 115200;
 const toHex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 export const sha256 = async bytes => toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
 
-const AGENT_ERROR_CODES = new Set(["device_command_failed","operation_cancelled","device_session_changed","operation_unsupported","invalid_flash_range","incomplete_flash_read","serial_closed","serial_timeout","serial_partial_packet","serial_invalid_escape","serial_frame_too_large","flash_program_failed"]);
+const AGENT_ERROR_CODES = new Set(["device_command_failed","operation_cancelled","device_session_changed","operation_unsupported","invalid_flash_range","incomplete_flash_read","flash_read_invalid_digest","flash_read_digest_mismatch","serial_buffer_overrun","serial_framing_error","serial_break_error","serial_parity_error","serial_closed","serial_timeout","serial_partial_packet","serial_invalid_escape","serial_frame_too_large","flash_program_failed"]);
 
 function diagnosticCode(error, fallback = 'device_command_failed') {
   for (const cause of [error, error?.cause]) {
@@ -350,7 +350,11 @@ export class BoardConnector {
       for (let offset = 0; offset < size; offset += MAX_FLASH_READ) {
         check();
         const length = Math.min(MAX_FLASH_READ, size - offset);
+        // A failed persistent-loader read can leave the stub waiting for ACKs.
+        // Temporary loaders retain the existing console cleanup contract.
+        if (!this.temporaryLoader) this.flashTransferInterrupted = true;
         const data = await this.session.readFlash(address + offset, length, check, count => progress(offset + count));
+        this.flashTransferInterrupted = false;
         if (received < offset + data.length) progress(offset + data.length);
         check();
         emit(data);
