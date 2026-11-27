@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import base64
 import hashlib
+from importlib.metadata import version
 import http.client
 import json
 import os
@@ -19,15 +20,17 @@ from websockets.sync.client import connect
 
 from .flash_manifest import read_flash_manifest
 
-__all__ = ["Board", "IDLabClient", "IDLabError", "IDLabHTTPError"]
+__version__ = version("idlab-client")
+
+__all__ = ["Board", "IDLabClient", "IDLabError", "IDLabHTTPError", "__version__"]
 
 
 class IDLabError(RuntimeError):
-    """The server could not be reached or returned an invalid response."""
+    """Base SDK error; non-HTTP instances describe communication or response failures."""
 
 
 class IDLabHTTPError(IDLabError):
-    """The server refused an operation."""
+    """HTTP refusal with status, business code and optional operation diagnostics."""
 
     def __init__(self, status: int, code: str, *, operation: dict | None = None, detail: str | None = None):
         super().__init__(f"HTTP {status}: {code}")
@@ -348,7 +351,11 @@ class IDLabClient:
             board = client.identify(name)
             if board.generation != generation:
                 raise IDLabHTTPError(409, "device_session_changed")
-            yield board
+            try:
+                yield board
+            finally:
+                # All snapshots sharing this delegated client expire with the context.
+                client._control_invalidated = True
 
     def _board(self, name, payload):
         try:

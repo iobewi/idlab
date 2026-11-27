@@ -510,3 +510,37 @@ Aucune reconnexion implicite, aucun rejeu destructif. Les commandes explicites
 mode.loader, mode.console et mode.rom restent disponibles pour les usages avancés.
 Un échec de transition suit les règles de récupération existantes ; ne pas
 interpréter un retour console comme une preuve d'intégrité de la flash.
+
+
+### Version installée et ergonomie du SDK (IDL-06)
+
+`idlab --version` et `idlab_client.__version__` exposent la version des
+métadonnées de la distribution installée `idlab-client`, sans connexion au
+serveur. Installer le wheel avant utilisation. La version seule ne prouve pas
+la provenance exacte d'un wheel de qualification non publié.
+
+```python
+from idlab_client import IDLabClient, IDLabError, IDLabHTTPError, __version__
+
+print(__version__)
+lab = IDLabClient()
+with lab.control(board_name, board_token) as board:
+    current = board.refresh()
+    data, cursor, dropped = current.read_uart()
+```
+
+Les instantanés ne se mettent pas à jour automatiquement. `refresh()` conserve
+la génération et ne commande pas le matériel. Tous les instantanés délégués
+expirent à la sortie du contexte, même en cas d'exception ; une requête via
+ces objets est alors refusée localement avec `403 control_stopped`. Le client
+parent reste utilisable selon ses propres autorisations.
+
+Intercepter `IDLabHTTPError` avant `IDLabError` (sa classe de base). Le premier
+expose `status`, `code`, `operation` et `detail` ; les deux derniers peuvent
+être absents (`None`). Le code local `control_stopped` signale également un
+contrôle invalidé. Les autres `IDLabError` signalent notamment une erreur de
+transport ou de réponse. `ValueError` peut signaler un argument local invalide.
+Une erreur de transport ou une interruption ne prouve pas l'absence d'effet
+matériel : consulter le diagnostic et appliquer la procédure de récupération,
+sans rejeu automatique. `idlab init` génère uniquement une recette pytest,
+sans écraser les fichiers existants ni implémenter de moteur métier.

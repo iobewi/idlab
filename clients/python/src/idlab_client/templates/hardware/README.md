@@ -4,6 +4,7 @@ Installer le SDK Python IDLab, puis les dépendances de la recette depuis la
 racine du projet.
 
 ```bash
+idlab --version
 python -m pip install -r tests/hardware/requirements.txt
 ```
 
@@ -29,3 +30,8 @@ La recette prend le contrôle exclusif, récupère l’état de la carte et lit 
 capture UART disponible. Une capture vide est valide. Elle libère le contrôle
 en fin de test, y compris si une assertion échoue. Elle fonctionne avec le
 seul jeton de carte et n’envoie aucune commande au matériel.
+
+Les objets `Board` sont des instantanés liés à la génération et au contexte de
+contrôle. Utiliser `board.refresh()` pour actualiser l'état sans commande
+matérielle. Ne pas conserver un objet délégué pour une utilisation après la
+sortie de la fixture.
