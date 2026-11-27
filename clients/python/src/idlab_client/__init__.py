@@ -222,16 +222,13 @@ class Board:
     def _erase_flash(self, command: str, confirmation: str, size: int | None = None, **region) -> dict:
         if confirmation != self.name:
             raise ValueError("Confirm the flash erase with the board name")
-        board = self._flash_loader()
-        if command not in board.capabilities or not board.flash_size:
-            raise ValueError("Flash erase is unavailable in this board session")
-        size = board.flash_size if size is None else size
-        payload = {"generation": board.generation, "command": command, "confirmation": confirmation}
+        payload = {"generation": self.generation, "command": command, "confirmation": confirmation}
         if region:
             payload.update(region, size=size)
         if self.campaign_id is not None:
             payload["campaign_id"] = self.campaign_id
-        blocks = 1 + (size - 1) // (4 * 1024 * 1024)
+        timeout_size = size if size is not None else 64 * 1024 * 1024
+        blocks = 1 + (timeout_size - 1) // (4 * 1024 * 1024)
         return self._client._request(_board_path(self.name) + "/command", payload,
                                      timeout=self._client._timeout * (1 + blocks))["result"]
 
