@@ -647,7 +647,7 @@ export class BoardConnector {
   }
 
   prepareProgram(images) {
-    return this.#programRequest('plan', {images});
+    return this.#programRequest('plan', {images}, true);
   }
 
   programFlash(planId, binaries) {
