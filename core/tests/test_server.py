@@ -692,6 +692,55 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await fresh.receive_json(timeout=2))["control"], "available")
                 await fresh.close()
 
+    async def test_reconnect_preserves_history_and_permanent_token_not_session(self):
+        port_key = "00000000-0000-4000-8000-000000000001"
+        agent, generation = await self.board("board", port_key=port_key)
+        path = "/api/v1/devices/board"
+        await agent.send_json({"journal": "before disconnect"})
+        operation = asyncio.create_task(self.read("board", generation))
+        command = await agent.receive_json(timeout=2)
+        await agent.send_bytes(b"data")
+        await agent.send_json({"result": command["id"], "value": 16777216})
+        response = await operation
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.read(), b"data")
+        issued = await self.browser.post(path + "/control/token", headers=self.local)
+        self.assertEqual(issued.status, 200)
+        token = (await issued.json())["token"]
+        await agent.receive_json(timeout=2)
+        headers = self.script | {"Authorization": "Bearer " + token}
+        control = await self.browser.ws_connect(path + "/control/connect", headers=headers)
+        old_session = (await control.receive_json(timeout=2))["session"]
+        await agent.close()
+        await control.receive(timeout=2)
+        await control.close()
+        fresh, new_generation = await self.board("board", port_key=port_key)
+        self.assertNotEqual(generation, new_generation)
+        activity = await (await self.browser.get(path + "/activity?generation=" + new_generation,
+                                                  headers=self.local)).json()
+        self.assertIn("before disconnect", [entry["message"] for entry in activity["journal"]])
+        self.assertEqual(activity["operations"][0]["id"], command["id"])
+        stale = await self.browser.get(path + "/uart?generation=" + generation,
+                                       headers=self.script | {"Authorization": "Bearer " + old_session})
+        self.assertEqual(stale.status, 401)
+        new_control = await self.browser.ws_connect(path + "/control/connect", headers=headers)
+        session = await new_control.receive_json(timeout=2)
+        self.assertEqual(session["generation"], new_generation)
+        self.assertNotEqual(session["session"], old_session)
+        await new_control.close()
+        await fresh.close()
+
+    async def test_reconnect_different_port_does_not_inherit_history(self):
+        first, generation = await self.board("board", port_key="00000000-0000-4000-8000-000000000001")
+        await first.send_json({"journal": "private previous port"})
+        await first.close()
+        fresh, generation = await self.board("board", port_key="00000000-0000-4000-8000-000000000002")
+        activity = await (await self.browser.get("/api/v1/devices/board/activity?generation=" + generation,
+                                                  headers=self.local)).json()
+        self.assertNotIn("private previous port", [entry["message"] for entry in activity["journal"]])
+        self.assertEqual(activity["operations"], [])
+        await fresh.close()
+
     async def test_revocation_preserves_secondary_serial_error(self):
         port_key = "00000000-0000-4000-8000-000000000001"
         agent, generation = await self.board("board", port_key=port_key)

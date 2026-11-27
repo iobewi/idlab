@@ -45,9 +45,10 @@ export function watchConsole(onUpdate) {
     active = null;
     if (!generation) return;
     if (card.uartGeneration !== generation) {
+      if (card.uartGeneration) card.capture.note('MARK', 'Nouvelle génération · reconnexion');
+      else card.capture = new ConsoleBuffer();
       card.uartGeneration = generation;
       card.uartCursor = 0;
-      card.capture = new ConsoleBuffer();
       card.boot = new BootIdentity();
       card.pausedAt = null;
     }

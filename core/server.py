@@ -229,7 +229,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             raise ValueError("IDLAB_PUBLIC_ORIGIN must be an HTTPS origin without a path")
         origins.add(public_origin)
     boards = {}
-    detached_reads = {}
+    detached_history = {}
     recovery_keys = set()
     finalizing = set()
     tokens = {}
@@ -575,7 +575,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 raise ValueError("invalid_port_key")
             board = Board(uuid.uuid4().hex, socket, identity, port_key=port_key)
             if port_key:
-                board.operations.extend(detached_reads.pop((*key, port_key), ()))
+                previous = detached_history.pop((*key, port_key), None)
+                if previous is not None:
+                    # Preserve history even if the old supervisor is still finalizing.
+                    board.journal, board.operations = previous
+                    board.log("Agent reconnecté · nouvelle génération")
             board.recovery_mac = identity.get("mac")
             matched, uncertain = recovery_candidates(request.app[CAMPAIGNS], key, board)
             board.recovery_required = bool(matched or uncertain or key in finalizing)
@@ -670,13 +674,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                     recovery_keys.add(key)
                 del boards[key]
                 if board.port_key:
-                    # Keep recent failed reads in the existing history when the same connector reconnects.
-                    failures = [entry for entry in board.operations
-                                if entry["command"] == "flash.read" and entry["state"] != "Terminée"]
-                    if failures:
-                        detached_reads[(*key, board.port_key)] = failures
-                        if len(detached_reads) > 32:
-                            detached_reads.pop(next(iter(detached_reads)))
+                    board.log("Liaison agent interrompue")
+                    detached_history[(*key, board.port_key)] = (board.journal, board.operations)
+                    if len(detached_history) > 32:
+                        detached_history.pop(next(iter(detached_history)))
                 board.uart_changed.set()
                 if board.pending and not board.pending.future.done():
                     board.pending.agent_disconnected = True
