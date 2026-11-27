@@ -257,8 +257,11 @@ octets). Pour le SDK, `plan, binaries = board.prepare_flash_manifest(path)`
 prépare les mêmes données que l’ajout manuel. `board.program_flash(plan["plan_id"], binaries)`
 confirme ensuite l’écriture. IDLab ouvre le chargeur depuis une console compatible pendant la préparation
 ou l’effacement. La programmation exige toujours un plan valide et un stub actif.
-Pour sélectionner un manifeste par famille, le SDK peut demander une identification
-active préalable, puis préparer le plan.
+Pour sélectionner un manifeste par famille lorsque le MCU est inconnu, le SDK
+utilise `flash.prepare` (commande sans écriture), qui ouvre un stub persistant
+si nécessaire et renvoie son identité. La préparation du plan réutilise cette
+session ; aucun retour intermédiaire en console. Si le manifeste est invalide,
+le stub reste ouvert. `identify_live()` conserve son contrat de retour au mode initial.
 
 ### Effacement intégral
 
