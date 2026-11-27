@@ -121,6 +121,12 @@ class Campaigns:
             "SELECT owner, device FROM device_recovery WHERE owner = ? AND "
             "(device = ? OR port_key = ? OR mac = ?)", (*key, port_key, mac))}
 
+    def uncertain_recovery(self, key, port_key=None, mac=None):
+        matched = self.matching_recovery(key, port_key, mac)
+        return {(row["owner"], row["device"]) for row in self.db.execute(
+            "SELECT owner, device FROM device_recovery WHERE owner = ? AND "
+            "(mac IS NULL OR ? IS NULL)", (key[0], mac))} - matched
+
     def require_recovery(self, key, port_key=None, mac=None):
         with self.db:
             self.db.execute("""INSERT INTO device_recovery (owner, device, port_key, mac) VALUES (?, ?, ?, ?)

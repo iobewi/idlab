@@ -80,6 +80,8 @@ class Board:
     progress: dict | None = None
     program_plan: ProgramPlan | None = None
     recovery_required: bool = False
+    recovery_exclusions: set = field(default_factory=set)
+    recovery_mac: str | None = None
 
     def describe(self):
         stopping = (self.control and self.control.stopped) or (self.pending and self.pending.cancelled)
@@ -408,6 +410,28 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             except ConnectionError:
                 pass
 
+    def recovery_candidates(storage, key, board):
+        mac = board.identity.get("mac") or board.recovery_mac
+        matched = storage.matching_recovery(key, board.port_key, mac)
+        uncertain = storage.uncertain_recovery(key, board.port_key, mac)
+        # Distinct live ports are already registered; their in-flight intents
+        # alone do not establish an identity ambiguity.
+        uncertain -= {other for other, live in boards.items() if live.pending}
+        return matched, uncertain - board.recovery_exclusions
+
+    async def refresh_recovery(storage, *, exclude=None):
+        changed = []
+        for key, board in boards.items():
+            if board is exclude or board.pending or not board.recovery_required:
+                continue
+            matched, uncertain = recovery_candidates(storage, key, board)
+            required = bool(matched or uncertain or key in finalizing)
+            if required != board.recovery_required:
+                board.recovery_required = required
+                changed.append((key, board))
+        for key, board in changed:
+            await publish_control(board, key)
+
     async def manage_control(request):
         if not request[LOCAL_OPERATOR]:
             return problem(403, "local_operator_required")
@@ -423,17 +447,39 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 payload = await request.json()
             except (ValueError, TypeError):
                 return problem(400, "invalid_json")
-            if payload != {"generation": board.generation, "confirmation": key[1]}:
+            if (not isinstance(payload, dict) or
+                    payload.keys() - {"generation", "confirmation", "distinct", "candidate"} or
+                    payload.get("generation") != board.generation or payload.get("confirmation") != key[1] or
+                    ("distinct" in payload and payload["distinct"] is not True) or
+                    ("candidate" in payload and not isinstance(payload["candidate"], str)) or
+                    ("distinct" in payload and "candidate" in payload)):
                 return problem(400, "recovery_confirmation_required")
             if boards.get(key) is not board or board.pending or board.control or board.socket.closed or key in finalizing:
                 return problem(409, "device_session_changed")
             if not board.recovery_required:
                 return web.json_response({"control": board.describe()["control"]})
-            request.app[CAMPAIGNS].clear_recovery(key)
-            recovery_keys.discard(key)
-            board.recovery_required = False
-            board.log("Récupération matérielle confirmée par l’opérateur")
-            await publish_control(board, key)
+            storage = request.app[CAMPAIGNS]
+            matched, uncertain = recovery_candidates(storage, key, board)
+            candidates = matched | uncertain
+            if candidates & finalizing or any(boards.get(k) and boards[k].pending for k in candidates):
+                return problem(409, "device_busy")
+            if payload.get("distinct"):
+                if matched:
+                    return problem(409, "recovery_identity_matched")
+                board.recovery_exclusions.update(uncertain)
+                board.log("Carte distincte confirmée par l’opérateur")
+            else:
+                candidate = (key[0], payload["candidate"]) if "candidate" in payload else None
+                if candidate is not None and candidate not in uncertain:
+                    return problem(400, "recovery_confirmation_required")
+                if uncertain and candidate is None:
+                    return web.json_response({"error": "recovery_identity_indeterminate",
+                                              "candidates": sorted(k[1] for k in uncertain)}, status=409)
+                for marker in matched | ({candidate} if candidate else set()):
+                    storage.clear_recovery(marker)
+                    recovery_keys.discard(marker)
+                board.log("Récupération matérielle confirmée par l’opérateur")
+            await refresh_recovery(storage)
             return web.json_response({"control": board.describe()["control"]})
         if action == "token":
             if not board or board.socket.closed:
@@ -513,7 +559,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             board = Board(uuid.uuid4().hex, socket, identity, port_key=port_key)
             if port_key:
                 board.operations.extend(detached_reads.pop((*key, port_key), ()))
-            board.recovery_required = key in request.app[CAMPAIGNS].recovery_keys() or key in finalizing
+            board.recovery_mac = identity.get("mac")
+            matched, uncertain = recovery_candidates(request.app[CAMPAIGNS], key, board)
+            board.recovery_required = bool(matched or uncertain or key in finalizing)
             boards[key] = board
             await socket.send_json({"generation": board.generation, "has_token": key in tokens})
             async for message in socket:
@@ -524,6 +572,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                         break
                     if "identity" in event and pending:
                         board.identity = validate_identity(event["identity"])
+                        board.recovery_mac = board.identity.get("mac") or board.recovery_mac
+                        request.app[CAMPAIGNS].require_recovery(key, board.port_key, board.recovery_mac)
                         board.program_plan = None
                         await socket.send_json({"identity": board.describe()})
                     elif "uart" in event and board.identity.get("mode") == "console":
@@ -644,7 +694,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             request.app[CAMPAIGNS].require_owner(campaign_id, *owners)
             request.app[CAMPAIGNS].enter(campaign_id, record)
         # Persist the intent before dispatch, so a process crash fails closed.
-        request.app[CAMPAIGNS].require_recovery(request[BOARD_KEY])
+        request.app[CAMPAIGNS].require_recovery(request[BOARD_KEY], board.port_key, board.recovery_mac)
         operation.task = asyncio.current_task()
         board.pending = operation
         board.operations.appendleft(record)
@@ -675,9 +725,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         else:
             request.app[CAMPAIGNS].clear_recovery(request[BOARD_KEY])
             recovery_keys.discard(request[BOARD_KEY])
-            replacement = boards.get(request[BOARD_KEY])
-            if replacement is not None and replacement is not board:
-                replacement.recovery_required = False
+
         finalizing.discard(request[BOARD_KEY])
         record["state"] = "Terminée" if result else "Échec"
         if not result:
@@ -690,9 +738,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         board.progress = board.pending = None
         if "campaign_id" in record:
             request.app[CAMPAIGNS].leave(record["campaign_id"], record)
-        replacement = boards.get(request[BOARD_KEY])
-        if replacement is not None and replacement is not board:
-            await publish_control(replacement, request[BOARD_KEY])
+        await refresh_recovery(request.app[CAMPAIGNS], exclude=board)
 
     async def device_command(request):
         try:

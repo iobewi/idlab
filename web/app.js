@@ -375,11 +375,22 @@ $('reset-device').onclick = () => run(async () => {
   card.recovering = true;
   render();
   try {
-    const response = await fetch('/api/v1/devices/' + card.name + '/control/recover', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({generation, confirmation}),
-    });
-    const result = await response.json();
+    const recover = async extra => {
+      const response = await fetch('/api/v1/devices/' + card.name + '/control/recover', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({generation, confirmation, ...extra}),
+      });
+      return {response, result: await response.json()};
+    };
+    let {response, result} = await recover({});
+    if (result.error === 'recovery_identity_indeterminate') {
+      const candidate = window.prompt('Identité indéterminée. Saisis le nom de la carte précédente récupérée (' +
+        result.candidates.join(', ') + ') ou DISTINCTE si cette carte est physiquement différente.');
+      if (card.identity?.generation !== generation || candidate === null) return;
+      if (candidate === 'DISTINCTE') ({response, result} = await recover({distinct: true}));
+      else if (result.candidates.includes(candidate)) ({response, result} = await recover({candidate}));
+      else return;
+    }
     if (!response.ok) throw new Error(result.error ?? ('HTTP ' + response.status));
     if (card.identity?.generation !== generation) return;
     card.control = result.control;

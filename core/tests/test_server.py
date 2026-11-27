@@ -94,10 +94,10 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.browser.close()
 
-    async def board(self, name, loader="stub", *, browser=None, port_key=None):
+    async def board(self, name, loader="stub", *, browser=None, port_key=None, mac="10:20:30:40:50:60"):
         ws = await (browser or self.browser).ws_connect("/agent?device=" + name, headers=self.local)
         await ws.send_json({
-            "chip": "esp32s3", "mac": "10:20:30:40:50:60",
+            "chip": "esp32s3", "mac": mac,
             "loader": loader, "transport": "usb_serial_jtag",
             "flash_size": 16 * 1024 * 1024 if loader == "stub" else None,
             "port_key": port_key,
@@ -669,10 +669,33 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await agent.receive(timeout=2)).type.name, "CLOSE")
                 response = await active
                 self.assertEqual((response.status, await response.json()), (409, {"error": "operation_cancelled"}))
-                fresh, new_generation = await self.board(name)
+                fresh, new_generation = await self.board(name, mac="10:20:30:40:50:61" if name == "program" else "10:20:30:40:50:60")
                 blocked = await self.read(name, new_generation)
                 self.assertEqual((blocked.status, await blocked.json()), (409, {"error": "device_recovery_required"}))
+                recovered = await self.browser.post(path + "/control/recover", headers=self.local,
+                    json={"generation": new_generation, "confirmation": name})
+                self.assertEqual(recovered.status, 200)
                 await fresh.close()
+
+    async def test_recovery_follows_renamed_card_and_preserves_distinct_board(self):
+        old, generation = await self.board("old")
+        read = asyncio.create_task(self.read("old", generation))
+        await old.receive_json(timeout=2)
+        await old.close()
+        await read
+        renamed, new_generation = await self.board("renamed")
+        blocked = await self.read("renamed", new_generation)
+        self.assertEqual((blocked.status, await blocked.json()), (409, {"error": "device_recovery_required"}))
+        other, other_generation = await self.board("other", mac="10:20:30:40:50:62")
+        operation = asyncio.create_task(self.read("other", other_generation))
+        await other.receive_json(timeout=2)
+        await other.send_bytes(b"data")
+        self.assertEqual(await (await operation).read(), b"data")
+        recovered = await self.browser.post("/api/v1/devices/renamed/control/recover", headers=self.local,
+            json={"generation": new_generation, "confirmation": "renamed"})
+        self.assertEqual((recovered.status, await recovered.json()), (200, {"control": "available"}))
+        await renamed.close()
+        await other.close()
 
     async def test_timeout_invalidates_session_without_replay(self):
         ws, generation = await self.board("board")
