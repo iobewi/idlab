@@ -287,6 +287,10 @@ export class BoardConnector {
         check();
         terminal = {result: command.id, value: digests, previews};
       } else if (command.command === 'flash.erase' || command.command === 'flash.erase.region') {
+        if (this.mode === 'console' && this.canEnterLoader) {
+          await this.#enterLoaderFromConsole();
+          check();
+        }
         const value = await this.#eraseFlash(socket, command, check, flashDiagnostic);
         check();
         terminal = {result: command.id, value};
@@ -454,7 +458,7 @@ export class BoardConnector {
   async #eraseFlash(socket, command, check, diagnostic) {
     const {id, command: type} = command;
     if (!this.identity?.capabilities.includes(type) || !this.session?.identity?.erasable) {
-      throw new Error('Effacement indisponible sur cette carte.');
+      throw new Error('operation_unsupported');
     }
     const region = type === 'flash.erase.region' ? {address: command.address, size: command.size} : undefined;
     const {address, size: total} = region ?? {address: 0, size: this.identity.flash_size};
@@ -634,6 +638,8 @@ export class BoardConnector {
     });
   }
 
+  prepareFlashSession() { return this.#command('flash.prepare'); }
+
   enterLoader() { return this.#command('mode.loader'); }
 
   eraseFlash(confirmation) { return this.#command('flash.erase', {confirmation}); }
@@ -643,7 +649,7 @@ export class BoardConnector {
   }
 
   prepareProgram(images) {
-    return this.#programRequest('plan', {images});
+    return this.#programRequest('plan', {images}, true);
   }
 
   programFlash(planId, binaries) {

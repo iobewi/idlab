@@ -75,6 +75,8 @@ class Board:
 
     def _command(self, command: str, **params) -> "Board":
         board = self._client._board(self.name, self._operate(command, **params))
+        if board.generation != self.generation:
+            raise IDLabHTTPError(409, "device_session_changed")
         return replace(board, campaign_id=self.campaign_id)
 
     def _operate(self, command: str, **params) -> dict:
@@ -107,7 +109,22 @@ class Board:
 
     def identify_live(self) -> "Board":
         """Measure hardware identity, temporarily entering the loader if needed."""
-        board = self._client._board(self.name, self._operate("identify")["result"])
+        response = self._operate("identify")
+        board = self._client._board(self.name, response)
+        measured = response.get("result")
+        if not isinstance(measured, dict):
+            raise IDLabError("Invalid measured board identity")
+        if board.generation != self.generation:
+            raise IDLabHTTPError(409, "device_session_changed")
+        return replace(board, chip=measured.get("chip"), mac=measured.get("mac"),
+                       flash_size=measured.get("flash_size"), campaign_id=self.campaign_id)
+
+    def refresh(self) -> "Board":
+        """Refresh the snapshot without changing hardware mode or accepting a new generation."""
+        board = self._client._board(self.name, self._client._request(
+            _board_path(self.name) + "?" + urlencode({"generation": self.generation})))
+        if board.generation != self.generation:
+            raise IDLabHTTPError(409, "device_session_changed")
         return replace(board, campaign_id=self.campaign_id)
 
     def activity(self) -> dict:
@@ -162,25 +179,20 @@ class Board:
             raise ValueError("Expected 1 to 16 nonempty flash images as bytes")
         descriptors = [{"address": address, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
                        for address, data in images]
-        board = self._flash_loader()
-        return self._client._request(_board_path(self.name) + "/flash/plan",
-                                     {"generation": board.generation, "images": descriptors})
+        payload = {"generation": self.generation, "images": descriptors}
+        if self.campaign_id is not None:
+            payload["campaign_id"] = self.campaign_id
+        return self._client._request(_board_path(self.name) + "/flash/plan", payload)
 
     def prepare_flash_manifest(self, path: str | Path) -> tuple[dict, list[bytes]]:
         """Load a local manifest, validate its plan, and return the corresponding binaries."""
-        board = self._flash_loader()
+        board = self.refresh()
+        if board.chip is None:
+            board = board._command("flash.prepare")
+        if board.chip is None:
+            raise IDLabError("Hardware identity is required to prepare a flash manifest")
         images = read_flash_manifest(path, board.chip)
         return board.prepare_flash(images), [data for _, data in images]
-
-    def _flash_loader(self) -> "Board":
-        board = self._client.identify(self.name)
-        if board.generation != self.generation:
-            raise IDLabHTTPError(409, "device_session_changed")
-        if board.mode == "console" and "mode.loader" in board.capabilities:
-            board = board.for_campaign(self.campaign_id).enter_loader()
-            if board.generation != self.generation:
-                raise IDLabHTTPError(409, "device_session_changed")
-        return board
 
     def program_flash(self, plan_id: str, binaries: Sequence[bytes]) -> dict:
         """Confirm a validated plan and return its flash write and readback result."""
@@ -211,16 +223,13 @@ class Board:
     def _erase_flash(self, command: str, confirmation: str, size: int | None = None, **region) -> dict:
         if confirmation != self.name:
             raise ValueError("Confirm the flash erase with the board name")
-        board = self._flash_loader()
-        if command not in board.capabilities or not board.flash_size:
-            raise ValueError("Flash erase is unavailable in this board session")
-        size = board.flash_size if size is None else size
-        payload = {"generation": board.generation, "command": command, "confirmation": confirmation}
+        payload = {"generation": self.generation, "command": command, "confirmation": confirmation}
         if region:
             payload.update(region, size=size)
         if self.campaign_id is not None:
             payload["campaign_id"] = self.campaign_id
-        blocks = 1 + (size - 1) // (4 * 1024 * 1024)
+        timeout_size = size if size is not None else 64 * 1024 * 1024
+        blocks = 1 + (timeout_size - 1) // (4 * 1024 * 1024)
         return self._client._request(_board_path(self.name) + "/command", payload,
                                      timeout=self._client._timeout * (1 + blocks))["result"]
 
@@ -364,7 +373,7 @@ class IDLabClient:
         if self._control_invalidated:
             raise IDLabHTTPError(403, "control_stopped")
         hardware_operation = arguments is not None and path.endswith(
-            ("/command", "/flash/read", "/flash/program"))
+            ("/command", "/flash/read", "/flash/program", "/flash/plan"))
         headers = {"X-IDLab-Client": "python"}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"

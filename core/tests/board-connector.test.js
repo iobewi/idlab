@@ -6,11 +6,12 @@ import {BoardConnector, sha256} from '../board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
   readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
-  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false, writeBarrier, badDigest = false, failWrite = false } = {}) {
+  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false, writeBarrier, badDigest = false, failWrite = false, eraseAllowed = false, loaderBarrier } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
   const writes = [];
+  const erases = [];
   let identity, socket, commandResult;
   const responseParts = [];
   const uart = [];
@@ -50,10 +51,12 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
       }
     }
     async runStub() {
+      if (loaderBarrier) await loaderBarrier();
       if (stubTimeout) throw new Error('serial_timeout');
       this.IS_STUB = true;
     }
     async checkCommand(_description, opcode, data) {
+      if (opcode === this.ESP_ERASE_REGION) { erases.push('region'); return 0; }
       if (opcode === this.ESP_READ_FLASH) {
         const payload = new DataView(data.buffer);
         const address = payload.getUint32(0, true), size = payload.getUint32(4, true);
@@ -81,6 +84,9 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     async isResponsive() { return !failBaud && this.transport.baudrate === deviceBaud; }
     async readFlashId() { return 0x184068; }
     async openAndSync() {}
+    securityInfoCache = eraseAllowed ? {parsedFlags: {SECURE_BOOT_EN: false, SECURE_DOWNLOAD_ENABLE: false}, flashCryptCnt: 0} : undefined;
+    ESP_ERASE_REGION = 0xd1;
+    async eraseFlash() { erases.push('full'); }
     async writeFlash(options) {
       assert.equal(options.eraseAll, false);
       assert.equal(options.flashSize, 'keep');
@@ -140,6 +146,8 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
           identity = {...(payload.identity ?? payload), generation: 'generation',
             capabilities: ['identify', 'flash.read']};
           if (identity.loader === 'rom' || identity.mode === 'console') identity.capabilities = ['identify'];
+          if (identity.erasable) identity.capabilities.push('flash.erase');
+          if (identity.erasable_region) identity.capabilities.push('flash.erase.region');
           const reply = payload.identity ? {identity} : {generation: 'generation'};
           queueMicrotask(() => socket.onmessage({data: JSON.stringify(reply)}));
         },
@@ -181,7 +189,12 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     },
   });
   port.readable = null;
-  return {card, events, reads, progress, uart, writes,
+  return {card, events, reads, progress, uart, writes, erases,
+    async erase(region) {
+      commandResult = null;
+      await socket.onmessage({data: JSON.stringify({command: region ? 'flash.erase.region' : 'flash.erase', id: 'erase', ...region})});
+      return commandResult;
+    },
     get lastResult() { return commandResult; },
     cancel(id) { return socket.onmessage({data: JSON.stringify({cancel: id})}); },
     async program(images) {
@@ -626,4 +639,49 @@ test('program readback digest failure remains a verification failure with no rep
   assert.equal(result.flash_diagnostic.progress.imageReceived, 3);
   assert.equal(result.recovery_required, true);
   assert.equal(writes.length, 1);
+});
+
+
+test('automatic erase refuses an unqualified stub before destructive dispatch', async () => {
+  const scenario = fixture();
+  await scenario.card.connect();
+  const terminal = await scenario.erase();
+  assert.equal(terminal.error, 'operation_unsupported');
+  assert.equal(terminal.flash_diagnostic.phase, 'prepare');
+  assert.equal(terminal.recovery_required, false);
+  assert.deepEqual(scenario.erases, []);
+  assert.equal(scenario.card.mode, 'loader');
+  await scenario.card.disconnect();
+});
+
+test('cancellation during automatic loader entry prevents erase', async () => {
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const scenario = fixture({eraseAllowed: true, loaderBarrier: async () => {
+    entered.resolve(); await release.promise;
+  }});
+  await scenario.card.connect();
+  const active = scenario.erase();
+  await entered.promise;
+  await scenario.cancel('erase');
+  assert.equal(scenario.card.busy, true);
+  release.resolve();
+  const terminal = await active;
+  assert.equal(terminal.error, 'operation_cancelled');
+  assert.equal(terminal.flash_diagnostic.phase, 'prepare');
+  assert.deepEqual(scenario.erases, []);
+  assert.equal(scenario.card.busy, false);
+  await scenario.card.disconnect();
+});
+
+
+test('automatic regional erase rejects range beyond measured flash before dispatch', async () => {
+  const scenario = fixture({eraseAllowed: true});
+  await scenario.card.connect();
+  const terminal = await scenario.erase({address: 16 * 1024 * 1024, size: 4096});
+  assert.equal(terminal.error, 'invalid_flash_range');
+  assert.equal(terminal.flash_diagnostic.phase, 'prepare');
+  assert.deepEqual(scenario.erases, []);
+  assert.equal(scenario.card.mode, 'loader');
+  await scenario.card.disconnect();
 });

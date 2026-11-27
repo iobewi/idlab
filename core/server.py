@@ -589,6 +589,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                         break
                     if "identity" in event and pending:
                         board.identity = validate_identity(event["identity"])
+                        if (pending.flash_record is not None and pending.flash_record["command"] == "flash.erase"
+                                and pending.flash_record.get("size") is None
+                                and "flash.erase" in board.identity["capabilities"]):
+                            pending.flash_record["size"] = board.identity["flash_size"]
                         board.recovery_mac = board.identity.get("mac") or board.recovery_mac
                         request.app[CAMPAIGNS].require_recovery(key, board.port_key, board.recovery_mac)
                         board.program_plan = None
@@ -900,7 +904,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 fields.update(("address", "size"))
             if payload.get("confirmation") != request.match_info["name"]:
                 return problem(400, "flash_erase_confirmation_required")
-        elif command not in ("mode.loader", "mode.console", "console.reset", "rom.jedec", "identify"):
+        elif command not in ("mode.loader", "mode.console", "console.reset", "rom.jedec", "identify", "flash.prepare"):
             return problem(409, "operation_unsupported")
         if not fields <= payload.keys() <= fields | {"campaign_id"}:
             return problem(400, "invalid_arguments")
@@ -915,7 +919,12 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return refusal
         if board.pending:
             return problem(409, "device_busy")
-        if command not in board.identity["capabilities"]:
+        capabilities = board.identity["capabilities"]
+        automatic_erase = erase and "mode.loader" in capabilities
+        prepare = command == "flash.prepare"
+        if prepare and "flash.program" in capabilities:
+            return web.json_response(board.describe() | {"result": None})
+        if command not in capabilities and not automatic_erase and not (prepare and "mode.loader" in capabilities):
             return problem(409, "operation_unsupported")
         control = board.control
         record_fields = {}
@@ -925,10 +934,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             address, size = (payload["address"], payload["size"]) if region_erase else (0, capacity)
             if region_erase and (type(address) is not int or type(size) is not int or address < 0 or
                                  size < SECTOR_SIZE or address % SECTOR_SIZE or size % SECTOR_SIZE or
-                                 address + size > capacity):
+                                 address + size > (capacity if capacity is not None else MAX_FLASH)):
                 return problem(400, "invalid_flash_range")
             record_fields.update(address=address, size=size)
-            timeout += read_timeout * (1 + (size - 1) // MAX_READ)
+            timeout += read_timeout * (1 + ((size if size is not None else MAX_FLASH) - 1) // MAX_READ)
         operation, record, started = start_operation(request, board, name, command, record_fields, campaign_id)
         if erase:
             board.program_plan = None
@@ -943,7 +952,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return web.json_response({"error": code, "detail": detail}, status=status) if detail else problem(status, code)
 
         try:
-            message = {"id": operation.id, "command": command}
+            message = {"id": operation.id, "command": "mode.loader" if prepare else command}
             if command == "uart.write":
                 message["hex"] = payload["hex"]
             elif command == "mode.rom":
@@ -969,8 +978,14 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                     return failure(agent_error_status(code), code, record["detail"])
                 return failure(agent_error_status(code), code)
             value = result.get("value")
+            if prepare and "flash.program" not in board.identity["capabilities"]:
+                return failure(409, "operation_unsupported")
             if erase:
-                if (not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
+                size = record["size"]
+                if (command not in board.identity["capabilities"] or type(size) is not int or
+                        size <= 0 or address + size > board.identity["flash_size"] or
+                        not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
+                        type(value["address"]) is not int or type(value["size"]) is not int or
                         value["address"] != address or value["size"] != size):
                     record["resultInvalid"] = True
                     return failure(502, "flash_erase_verification_incomplete")
@@ -1009,7 +1024,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         key = request[BOARD_KEY]
         board = boards.get(key)
         if not board or board.socket.closed:
-            return problem(404, "device_disconnected")
+            return problem(409 if "generation" in request.query else 404,
+                           "device_session_changed" if "generation" in request.query else "device_disconnected")
         if request.query.get("generation") != board.generation:
             return problem(409, "device_session_changed")
         start = board.uart_end - len(board.uart)
@@ -1030,7 +1046,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             except TimeoutError:
                 pass
             if boards.get(key) is not board or board.socket.closed:
-                return problem(404, "device_disconnected")
+                return problem(409, "device_session_changed")
             if scoped and (board.control is not control or control.stopped):
                 return problem(403, "control_session_required")
             start = board.uart_end - len(board.uart)
@@ -1043,7 +1059,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         key = request[BOARD_KEY]
         board = boards.get(key)
         if not board or board.socket.closed:
-            return problem(404, "device_disconnected")
+            return problem(409 if "generation" in request.query else 404,
+                           "device_session_changed" if "generation" in request.query else "device_disconnected")
         if request.query.get("generation") != board.generation:
             return problem(409, "device_session_changed")
         return web.json_response({"device": board.describe(), "external_control": bool(board.control),
@@ -1191,7 +1208,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             detail.append("Récupération console non renseignée")
         record["detail"] = " · ".join(detail)
 
-    def programming_board(request, generation):
+    def programming_board(request, generation, *, allow_console=False):
         board = boards.get(request[BOARD_KEY])
         if not board or board.socket.closed or generation != board.generation:
             return None, problem(409, "device_session_changed")
@@ -1200,7 +1217,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return None, refusal
         if board.pending:
             return None, problem(409, "device_busy")
-        if "flash.program" not in board.identity["capabilities"]:
+        capabilities = board.identity["capabilities"]
+        if "flash.program" not in capabilities and not (allow_console and "mode.loader" in capabilities):
             return None, problem(409, "operation_unsupported")
         return board, None
 
@@ -1209,12 +1227,62 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             payload = await request.json()
         except (TypeError, ValueError):
             return problem(400, "invalid_json")
-        if not isinstance(payload, dict) or payload.keys() != {"generation", "images"}:
+        required = {"generation", "images"}
+        if not isinstance(payload, dict) or not required <= payload.keys() <= required | {"campaign_id"}:
             return problem(400, "invalid_arguments")
-        board, refusal = programming_board(request, payload["generation"])
+        board, refusal = programming_board(request, payload["generation"], allow_console=True)
         if refusal is not None:
             return refusal
+        campaign_id = operation_campaign(payload)
         images = payload["images"]
+        if "mode.loader" in board.identity["capabilities"]:
+            try:
+                validate_images(images, MAX_FLASH)
+            except ValueError as error:
+                return problem(400, str(error))
+            control = board.control
+            key = request[BOARD_KEY]
+            operation, record, started = start_operation(request, board, key[1], "flash.prepare", {}, campaign_id)
+            complete = False
+            try:
+                await board.socket.send_json({"id": operation.id, "command": "mode.loader"})
+                result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=command_timeout)
+                if isinstance(result, dict) and result.get("recovery_required") is True:
+                    await board.socket.close(code=1011)
+                    return problem(502, "device_session_changed")
+                if control and control.stopped:
+                    return problem(403, control.stopped)
+                if operation.cancelled:
+                    return problem(409, "operation_cancelled")
+                if not isinstance(result, dict) or board.socket.closed or boards.get(key) is not board:
+                    return problem(502, "device_session_changed")
+                if result.get("error"):
+                    code = agent_error_code(result["error"]) or "device_command_failed"
+                    return problem(agent_error_status(code), code)
+                complete = True
+                if "flash.program" not in board.identity["capabilities"]:
+                    return problem(409, "operation_unsupported")
+                try:
+                    validate_images(images, board.identity["flash_size"])
+                except ValueError as error:
+                    return problem(400, str(error))
+                plan = ProgramPlan(secrets.token_urlsafe(32), images, control, asyncio.get_running_loop().time() + 600)
+                board.program_plan = plan
+                return web.json_response({"plan_id": plan.id, "images": plan.images}, status=201)
+            except TimeoutError:
+                await board.socket.close(code=1011)
+                return problem(504, "device_command_timeout")
+            except ConnectionError:
+                await board.socket.close(code=1011)
+                return problem(502, "device_session_changed")
+            finally:
+                await finish_operation(request, board, record, started, complete)
+                if control and control.stopped and board.control is control:
+                    board.control = None
+                    board.program_plan = None
+                    await publish_control(board, key)
+                elif operation.cancelled and not control:
+                    await publish_control(board, key)
         try:
             validate_images(images, board.identity["flash_size"])
         except ValueError as error:
@@ -1337,6 +1405,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
     async def identify(request):
         key = request[BOARD_KEY]
         board = boards.get(key)
+        generation = request.query.get("generation")
+        if generation is not None and (not board or board.socket.closed or generation != board.generation):
+            return problem(409, "device_session_changed")
         return web.json_response(board.describe()) if board and not board.socket.closed else problem(404, "device_disconnected")
 
     def supervise_operation(handler):
@@ -1403,7 +1474,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         web.get("/api/v1/devices/{name}/uart", read_uart),
         web.get("/api/v1/devices/{name}/activity", read_activity),
         web.post("/api/v1/devices/{name}/flash/read", supervise_operation(read_flash)),
-        web.post("/api/v1/devices/{name}/flash/plan", prepare_program),
+        web.post("/api/v1/devices/{name}/flash/plan", supervise_operation(prepare_program)),
         web.post("/api/v1/devices/{name}/flash/program", supervise_operation(program_flash)),
         web.get(r"/api/v1/devices/{name}/flash/program/{operation_id:[0-9a-f]{32}}/{index:[0-9]{1,2}}", program_image),
         web.get("/agent", agent),

@@ -204,8 +204,9 @@ lectures associées à une campagne conservent leur diagnostic dans la campagne.
 
 ## Programmation flash
 
-La carte doit être en mode chargeur avec un stub, une capacité connue et la
-capacité `flash.program`. Le Web et une session Python déléguée utilisent
+La programmation exige un stub actif, une capacité connue et la capacité
+`flash.program`. La préparation du plan peut ouvrir ce stub depuis une console
+compatible, sous réservation exclusive par le serveur. Le Web et une session Python déléguée utilisent
 les mêmes routes sous `/api/v1/devices/{name}/flash`.
 
 | Méthode et chemin | Corps JSON | Résultat |
@@ -216,7 +217,8 @@ les mêmes routes sous `/api/v1/devices/{name}/flash`.
 Un plan comprend de 1 à 16 images pour un total de 64 Mio maximum, dans la
 limite de la capacité mesurée. Chaque adresse de départ est alignée sur 4 Kio.
 Les secteurs occupés sont arrondis au secteur supérieur et ne peuvent pas se
-chevaucher. La validation ne fait aucun accès à la flash. Le plan est valable dix
+chevaucher. La validation des descripteurs ne modifie pas la flash ; depuis la console,
+la préparation peut toutefois provoquer une transition matérielle. Le plan est valable dix
 minutes dans la même génération et le même contexte de pilotage. Un nouveau
 plan remplace le précédent. Un plan consommé doit être validé à nouveau.
 
@@ -241,8 +243,6 @@ from pathlib import Path
 
 firmware = Path(firmware_path).read_bytes()
 with lab.control(board_name, board_token) as board:
-    if board.mode == "console":
-        board = board.enter_loader()
     plan = board.prepare_flash([(firmware_address, firmware)])
     print(plan["images"])
     if input("Confirmer la programmation [oui/non] ? ") == "oui":
@@ -255,9 +255,13 @@ Le Web et le SDK acceptent un manifeste ESP Web Tools avec `builds` et
 contient `path` (fichier local relatif au manifeste) et `offset` (entier en
 octets). Pour le SDK, `plan, binaries = board.prepare_flash_manifest(path)`
 prépare les mêmes données que l’ajout manuel. `board.program_flash(plan["plan_id"], binaries)`
-confirme ensuite l’écriture. Les clients ouvrent le chargeur depuis une console
-compatible avant la validation ou l’effacement. Les routes de programmation
-et d’effacement exigent toujours une session chargeur.
+confirme ensuite l’écriture. IDLab ouvre le chargeur depuis une console compatible pendant la préparation
+ou l’effacement. La programmation exige toujours un plan valide et un stub actif.
+Pour sélectionner un manifeste par famille lorsque le MCU est inconnu, le SDK
+utilise `flash.prepare` (commande sans écriture), qui ouvre un stub persistant
+si nécessaire et renvoie son identité. La préparation du plan réutilise cette
+session ; aucun retour intermédiaire en console. Si le manifeste est invalide,
+le stub reste ouvert. `identify_live()` conserve son contrat de retour au mode initial.
 
 ### Effacement intégral
 
@@ -478,3 +482,31 @@ terminaison inconnue, récupération requise et progression/offset inconnus
 (`null`). La dernière progression observée avant le redémarrage peut donc être
 perdue. Cette limitation est volontaire ; aucune progression n’est reconstruite
 par estimation et aucune écriture SQLite supplémentaire n’est introduite.
+
+
+### Contrats de mode et de génération (IDL-05)
+
+| Opération Python | Précondition / transition | Mode final nominal |
+|---|---|---|
+| `lab.identify(name)` | Observation passive | Inchangé |
+| `board.refresh()` | Observation de la même génération | Inchangé |
+| `board.identify_live()` | Identification matérielle, stub temporaire si nécessaire et compatible | Initial |
+| `board.read_flash()` | Stub actif ou ouverture temporaire compatible | Initial |
+| `board.prepare_flash()` | Validation puis ouverture persistante si nécessaire | Stub |
+| `board.program_flash()` | Plan valide, stub actif, contrôle exclusif | Stub |
+| `board.erase_flash()` / `erase_flash_region()` | Confirmation, ouverture persistante si nécessaire, capacités réelles et sécurité vérifiées | Stub |
+| `board.reset()` | Console compatible uniquement | Console |
+| `board.read_uart()` | Consultation du tampon de la génération | Inchangé |
+
+Un objet Board est un instantané immuable, lié à une génération et non au mode
+courant. Les transitions internes préservent la génération. Utiliser refresh()
+pour actualiser le mode et les capacités sans accès matériel. identify_live()
+retourne les mesures matérielles et le mode final de la session, pas le mode
+transitoire de mesure. Une génération absente ou remplacée est refusée avec
+409 device_session_changed pour les requêtes liées à cette génération ; une
+recherche passive sans génération peut retourner 404 device_disconnected.
+Une perte d'autorisation peut être refusée avant le contrôle de génération.
+Aucune reconnexion implicite, aucun rejeu destructif. Les commandes explicites
+mode.loader, mode.console et mode.rom restent disponibles pour les usages avancés.
+Un échec de transition suit les règles de récupération existantes ; ne pas
+interpréter un retour console comme une preuve d'intégrité de la flash.

@@ -294,7 +294,106 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait({read}, timeout=0.02)
         self.assertFalse(read.done())
         await agent.close()
-        self.assertEqual((await asyncio.wait_for(read, timeout=1)).status, 404)
+        response = await asyncio.wait_for(read, timeout=1)
+        self.assertEqual((response.status, await response.json()), (409, {"error": "device_session_changed"}))
+
+    async def test_console_plan_reserves_transition_and_rechecks_capacity(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await agent.send_json({"mode": "console", "transport": "usb_uart"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        path = "/api/v1/devices/board"
+        images = [{"address": 0, "size": 4, "sha256": hashlib.sha256(b"data").hexdigest()}]
+        payload = {"generation": generation, "images": images}
+        task = asyncio.create_task(self.browser.post(path + "/flash/plan", headers=self.local, json=payload))
+        command = await agent.receive_json(timeout=2)
+        self.assertEqual(command["command"], "mode.loader")
+        refused = await self.browser.post(path + "/flash/plan", headers=self.local, json=payload)
+        self.assertEqual((refused.status, await refused.json()), (409, {"error": "device_busy"}))
+        await agent.send_json({"identity": {"mode": "loader", "loader": "stub", "transport": "usb_uart",
+            "chip": "esp32s3", "mac": "10:20:30:40:50:60", "flash_size": 16777216,
+            "programmable": True, "return_to_console": True}})
+        await agent.receive_json(timeout=2)
+        await agent.send_json({"result": command["id"]})
+        response = await task
+        self.assertEqual(response.status, 201)
+        self.assertEqual((await response.json())["images"], images)
+        await agent.close()
+
+    async def test_console_plan_records_exactly_one_campaign_preparation(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await agent.send_json({"mode": "console", "transport": "usb_uart"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        created = await self.browser.post("/api/v1/campaigns", headers=self.local,
+            json={"name": "Plan preparation"})
+        self.assertEqual(created.status, 201)
+        cid = (await created.json())["id"]
+        path = "/api/v1/devices/board/flash/plan"
+        payload = {"generation": generation, "campaign_id": cid,
+                   "images": [{"address": 0, "size": 4, "sha256": hashlib.sha256(b"data").hexdigest()}]}
+        task = asyncio.create_task(self.browser.post(path, headers=self.local, json=payload))
+        command = await agent.receive_json(timeout=2)
+        self.assertEqual(command["command"], "mode.loader")
+        await agent.send_json({"identity": {"mode": "loader", "loader": "stub", "transport": "usb_uart",
+            "chip": "esp32s3", "mac": "10:20:30:40:50:60", "flash_size": 16777216,
+            "programmable": True, "return_to_console": True}})
+        await agent.receive_json(timeout=2)
+        await agent.send_json({"result": command["id"]})
+        response = await task
+        self.assertEqual(response.status, 201)
+        self.assertEqual((await response.json())["images"], payload["images"])
+        history_path = "/api/v1/campaigns/" + cid + "/operations"
+        history = await self.browser.get(history_path, headers=self.local)
+        self.assertEqual(history.status, 200)
+        records = (await history.json())["items"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual((records[0]["id"], records[0]["command"], records[0]["state"]),
+                         (command["id"], "flash.prepare", "Terminée"))
+        repeated = await self.browser.post(path, headers=self.local, json=payload)
+        self.assertEqual(repeated.status, 201)
+        history = await self.browser.get(history_path, headers=self.local)
+        self.assertEqual((await history.json())["items"], records)
+        await agent.close()
+
+    async def test_console_plan_rejects_range_beyond_measured_capacity(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await agent.send_json({"mode": "console", "transport": "usb_uart"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        path = "/api/v1/devices/board"
+        images = [{"address": 16777216, "size": 4, "sha256": hashlib.sha256(b"data").hexdigest()}]
+        task = asyncio.create_task(self.browser.post(path + "/flash/plan", headers=self.local,
+            json={"generation": generation, "images": images}))
+        command = await agent.receive_json(timeout=2)
+        self.assertEqual(command["command"], "mode.loader")
+        await agent.send_json({"identity": {"mode": "loader", "loader": "stub", "transport": "usb_uart",
+            "chip": "esp32s3", "mac": "10:20:30:40:50:60", "flash_size": 16777216,
+            "programmable": True, "return_to_console": True}})
+        await agent.receive_json(timeout=2)
+        await agent.send_json({"result": command["id"]})
+        response = await task
+        self.assertEqual((response.status, await response.json()), (400, {"error": "invalid_flash_range"}))
+        refused = await self.browser.post(path + "/flash/program", headers=self.local,
+            json={"generation": generation, "plan_id": "invalid", "binaries": []})
+        self.assertEqual((refused.status, await refused.json()),
+                         (409, {"error": "flash_plan_confirmation_required"}))
+        await agent.close()
+
+    async def test_console_full_erase_uses_measured_capacity(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await agent.send_json({"mode": "console", "transport": "usb_uart"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        path = "/api/v1/devices/board/command"
+        task = asyncio.create_task(self.browser.post(path, headers=self.local,
+            json={"generation": generation, "command": "flash.erase", "confirmation": "board"}))
+        command = await agent.receive_json(timeout=2)
+        self.assertEqual(command["command"], "flash.erase")
+        await agent.send_json({"identity": {"mode": "loader", "loader": "stub", "transport": "usb_uart",
+            "chip": "esp32s3", "mac": "10:20:30:40:50:60", "flash_size": 4096, "erasable": True}})
+        await agent.receive_json(timeout=2)
+        await agent.send_json({"result": command["id"], "value": {"address": 0, "size": 4096, "first_non_ff": None}})
+        response = await task
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["result"]["size"], 4096)
+        await agent.close()
 
     async def test_loader_command_timeout_has_a_distinct_error(self):
         agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)

@@ -309,9 +309,11 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await self.connect()
         fresh = await asyncio.to_thread(self.client.identify, "test-board")
         self.assertNotEqual(old.generation, fresh.generation)
-        with self.assertRaises(IDLabHTTPError) as caught:
-            await asyncio.to_thread(old.read_flash, 0, 4)
-        self.assertEqual((caught.exception.status, caught.exception.code), (409, "device_session_changed"))
+        for method, args in ((old.read_flash, (0, 4)), (old.refresh, ()),
+                             (old.read_uart, ()), (old.activity, ())):
+            with self.assertRaises(IDLabHTTPError) as caught:
+                await asyncio.to_thread(method, *args)
+            self.assertEqual((caught.exception.status, caught.exception.code), (409, "device_session_changed"))
 
     async def test_erase_requires_confirmation_and_rejects_nonblank_readback(self):
         agent = await self.connect(erasable=True)
@@ -370,20 +372,58 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 await switch("mode.loader", loader)
                 plan, binaries = await preparing
                 self.assertEqual((plan["images"][0]["address"], binaries), (4096, [b"firmware"]))
+                current = await asyncio.to_thread(console.refresh)
+                self.assertEqual((current.mode, current.generation), ("loader", console.generation))
+                path.write_text(json.dumps({"builds": [{"chipFamily": "ESP32-C6", "parts": []}]}), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    await asyncio.to_thread(console.prepare_flash_manifest, path)
+                self.assertEqual((await asyncio.to_thread(console.refresh)).mode, "loader")
             back = asyncio.create_task(asyncio.to_thread(console.return_console))
             await switch("mode.console", {"mode": "console", "transport": "usb_uart"})
             console = await back
             erase = asyncio.create_task(asyncio.to_thread(console.erase_flash_region, 4096, 4096,
                                                           confirmation=console.name))
-            await switch("mode.loader", loader)
             request = await agent.receive_json(timeout=2)
             self.assertEqual((request["command"], request["address"], request["size"]), ("flash.erase.region", 4096, 4096))
+            await agent.send_json({"identity": loader})
+            await agent.receive_json(timeout=2)
             verified = {"address": 4096, "size": 4096, "first_non_ff": None}
             await agent.send_json({"result": request["id"], "value": verified})
             self.assertEqual(await erase, verified)
         history = await asyncio.to_thread(self.client.campaign_operations, campaign["id"])
         self.assertCountEqual([entry["command"] for entry in history["items"]],
-                              ["mode.loader", "mode.console", "mode.loader", "flash.erase.region"])
+                              ["flash.prepare", "mode.console", "flash.erase.region"])
+
+    async def test_manifest_reuses_stub_and_refuses_incompatible_or_stale_board(self):
+        agent = await self.connect(programmable=True)
+        campaign = await asyncio.to_thread(self.client.create_campaign, "Manifest QA")
+        async with self.control(agent) as board:
+            board = board.for_campaign(campaign["id"])
+            with TemporaryDirectory() as folder:
+                path = Path(folder) / "manifest.json"
+                (path.parent / "app.bin").write_bytes(b"firmware")
+                path.write_text(json.dumps({"builds": [
+                    {"chipFamily": "ESP32-S3", "parts": [{"path": "app.bin", "offset": 0}]}
+                ]}), encoding="utf-8")
+                plan, binaries = await asyncio.to_thread(board.prepare_flash_manifest, path)
+                self.assertEqual(binaries, [b"firmware"])
+                self.assertEqual(plan["images"][0]["address"], 0)
+                self.assertEqual((await asyncio.to_thread(board.refresh)).mode, "loader")
+                path.write_text(json.dumps({"builds": [
+                    {"chipFamily": "ESP32-C6", "parts": [{"path": "app.bin", "offset": 0}]}
+                ]}), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    await asyncio.to_thread(board.prepare_flash_manifest, path)
+                self.assertEqual((await asyncio.to_thread(board.refresh)).mode, "loader")
+        await agent.receive_json(timeout=2)
+        history = await asyncio.to_thread(self.client.campaign_operations, campaign["id"])
+        self.assertEqual(history["items"], [])
+        old = await asyncio.to_thread(self.client.identify, "test-board")
+        await agent.close()
+        await self.connect(programmable=True)
+        with self.assertRaises(IDLabHTTPError) as refused:
+            await asyncio.to_thread(old.prepare_flash_manifest, "unused.json")
+        self.assertEqual((refused.exception.status, refused.exception.code), (409, "device_session_changed"))
 
     async def test_erase_region_requires_exact_sector_bounds(self):
         agent = await self.connect(erasable=True)

@@ -20,3 +20,21 @@ export function importManifest(document, files, chip) {
     return {file: matches[0], address: '0x' + offset.toString(16)};
   });
 }
+
+export async function importManifestForBoard(document, files, card, generation, isSelected) {
+  const check = () => {
+    if (!generation || card.identity?.generation !== generation || !isSelected()) {
+      throw new Error('La carte ou sa session a changé.');
+    }
+  };
+  check();
+  let chip = card.identity.chip;
+  if (Array.isArray(document?.builds) && !chip) {
+    const prepared = await card.prepareFlashSession();
+    check();
+    if (prepared.generation !== generation) throw new Error('La session de la carte a changé.');
+    chip = prepared.chip;
+    if (!chip) throw new Error('Identité matérielle indisponible.');
+  }
+  return importManifest(document, files, chip);
+}
