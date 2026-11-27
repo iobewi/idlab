@@ -728,7 +728,8 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await grant.receive(timeout=2)).type.name, "CLOSE")
                     refused = await self.read("ambiguous", ambiguous_generation,
                         headers=self.script | {"Authorization": "Bearer " + session})
-                    self.assertIn(refused.status, (403, 409))
+                    self.assertEqual((refused.status, await refused.json()),
+                                     (401, {"error": "authentication_required"}))
                 operation = asyncio.create_task(self.read("distinct", distinct_generation))
                 await distinct.receive_json(timeout=2)
                 await distinct.send_bytes(b"data")
@@ -741,6 +742,49 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                 await original.close()
                 await ambiguous.close()
                 await distinct.close()
+
+    async def test_new_recovery_ambiguity_cancels_active_operation_without_early_release(self):
+        old, generation = await self.board("old", mac="10:20:30:40:50:61")
+        ambiguous = await self.browser.ws_connect("/agent?device=ambiguous", headers=self.local)
+        await ambiguous.send_json({"mode": "console", "transport": "usb_uart",
+            "port_key": "00000000-0000-4000-8000-000000000002"})
+        new_generation = (await ambiguous.receive_json(timeout=2))["generation"]
+
+        first = asyncio.create_task(self.read("old", generation))
+        await old.receive_json(timeout=2)
+        second = asyncio.create_task(self.read("ambiguous", new_generation))
+        command = await ambiguous.receive_json(timeout=2)
+        await old.close()
+        await first
+        self.assertEqual((await ambiguous.receive_json(timeout=2))["control"], "recovery_required")
+        self.assertEqual(await ambiguous.receive_json(timeout=2), {"cancel": command["id"]})
+        self.assertFalse(second.done())
+
+        blocked = await self.read("ambiguous", new_generation)
+        self.assertEqual((blocked.status, await blocked.json()),
+                         (409, {"error": "device_recovery_required"}))
+        path = "/api/v1/devices/ambiguous/control/recover"
+        premature = await self.browser.post(path, headers=self.local,
+            json={"generation": new_generation, "confirmation": "ambiguous"})
+        self.assertEqual((premature.status, await premature.json()), (409, {"error": "device_busy"}))
+        self.assertFalse(second.done())
+
+        await ambiguous.send_json({"result": command["id"], "error": "operation_cancelled",
+                                   "console_restored": True, "recovery_required": False})
+        response = await second
+        self.assertEqual((response.status, await response.json()), (409, {"error": "operation_cancelled"}))
+        self.assertEqual((await ambiguous.receive_json(timeout=2))["control"], "recovery_required")
+        blocked = await self.read("ambiguous", new_generation)
+        self.assertEqual((blocked.status, await blocked.json()),
+                         (409, {"error": "device_recovery_required"}))
+
+        original, recovered_generation = await self.board("old", mac="10:20:30:40:50:61")
+        recovered = await self.browser.post("/api/v1/devices/old/control/recover", headers=self.local,
+            json={"generation": recovered_generation, "confirmation": "old"})
+        self.assertEqual((recovered.status, await recovered.json()), (200, {"control": "available"}))
+        self.assertEqual((await ambiguous.receive_json(timeout=2))["control"], "available")
+        await original.close()
+        await ambiguous.close()
 
     async def test_reconnect_fenced_during_terminal_finalization(self):
         # Hold the supervisor after its socket close, while the agent handler
