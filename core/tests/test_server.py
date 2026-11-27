@@ -697,6 +697,104 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         await renamed.close()
         await other.close()
 
+    async def test_reconnect_fenced_during_terminal_finalization(self):
+        # Hold the supervisor after its socket close, while the agent handler
+        # independently removes the old generation. No timing-based sleeps.
+        from aiohttp import web
+        original_close = web.WebSocketResponse.close
+        for terminal in ("missing", "safe", "uncertain"):
+            with self.subTest(terminal=terminal):
+                name = "race_" + terminal
+                mac = "10:20:30:40:51:" + {"missing": "01", "safe": "02", "uncertain": "03"}[terminal]
+                old, generation = await self.board(name, mac=mac)
+                entered, release, removed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                target = None
+
+                async def close(socket, *args, **kwargs):
+                    nonlocal target
+                    if kwargs.get("code") == 1011 and target is None:
+                        target = socket
+                        result = await original_close(socket, *args, **kwargs)
+                        entered.set()
+                        await release.wait()
+                        return result
+                    result = await original_close(socket, *args, **kwargs)
+                    if socket is target:
+                        removed.set()
+                    return result
+
+                with patch.object(web.WebSocketResponse, "close", close):
+                    active = asyncio.create_task(self.read(name, generation))
+                    command = await old.receive_json(timeout=2)
+                    if terminal != "missing":
+                        await old.send_json({"result": command["id"], "error": "serial_timeout",
+                                             "recovery_required": terminal == "uncertain"})
+                    try:
+                        self.assertEqual((await old.receive(timeout=2)).type.name, "CLOSE")
+                        await asyncio.wait_for(entered.wait(), 2)
+                        await asyncio.wait_for(removed.wait(), 2)
+                        fresh, new_generation = await self.board(name, mac=mac)
+                        blocked = await self.read(name, new_generation)
+                        self.assertEqual((blocked.status, await blocked.json()),
+                                         (409, {"error": "device_recovery_required"}))
+                        path = "/api/v1/devices/" + name + "/control/recover"
+                        payload = {"generation": new_generation, "confirmation": name}
+                        premature = await self.browser.post(path, headers=self.local, json=payload)
+                        self.assertEqual(premature.status, 409)
+                    finally:
+                        release.set()
+                    await active
+                    if terminal == "safe":
+                        self.assertEqual((await fresh.receive_json(timeout=2))["control"], "available")
+                    else:
+                        blocked = await self.read(name, new_generation)
+                        self.assertEqual((blocked.status, await blocked.json()),
+                                         (409, {"error": "device_recovery_required"}))
+                        recovered = await self.browser.post(path, headers=self.local, json=payload)
+                        self.assertEqual((recovered.status, await recovered.json()), (200, {"control": "available"}))
+                        self.assertEqual((await fresh.receive_json(timeout=2))["control"], "available")
+                    await fresh.close()
+
+    async def test_unknown_mac_recovery_requires_explicit_identity_resolution(self):
+        port = "00000000-0000-4000-8000-000000000001"
+
+        async def console(name, port_key):
+            ws = await self.browser.ws_connect("/agent?device=" + name, headers=self.local)
+            await ws.send_json({"mode": "console", "transport": "usb_uart", "port_key": port_key})
+            return ws, (await ws.receive_json(timeout=2))["generation"]
+
+        old, generation = await console("unknown", port)
+        active = asyncio.create_task(self.read("unknown", generation))
+        await old.receive_json(timeout=2)
+        await old.close()
+        await active
+        renamed, generation = await console("renamed", port)
+        blocked = await self.read("renamed", generation)
+        self.assertEqual((blocked.status, await blocked.json()), (409, {"error": "device_recovery_required"}))
+        refused = await self.browser.post("/api/v1/devices/renamed/control/recover", headers=self.local,
+            json={"generation": generation, "confirmation": "renamed", "distinct": True})
+        self.assertEqual((refused.status, await refused.json()), (409, {"error": "recovery_identity_matched"}))
+        await renamed.close()
+
+        for distinct in (True, False):
+            other, generation = await console("ambiguous", "00000000-0000-4000-8000-000000000002")
+            path = "/api/v1/devices/ambiguous/control/recover"
+            payload = {"generation": generation, "confirmation": "ambiguous"}
+            blocked = await self.read("ambiguous", generation)
+            self.assertEqual((blocked.status, await blocked.json()), (409, {"error": "device_recovery_required"}))
+            response = await self.browser.post(path, headers=self.local, json=payload)
+            self.assertEqual((response.status, await response.json()),
+                             (409, {"error": "recovery_identity_indeterminate", "candidates": ["unknown"]}))
+            resolution = {"distinct": True} if distinct else {"candidate": "unknown"}
+            response = await self.browser.post(path, headers=self.local, json=payload | resolution)
+            self.assertEqual((response.status, await response.json()), (200, {"control": "available"}))
+            self.assertEqual((await other.receive_json(timeout=2))["control"], "available")
+            await other.close()
+        original, generation = await console("unknown", port)
+        response = await self.browser.get("/api/v1/devices/unknown", headers=self.local)
+        self.assertEqual((await response.json())["control"], "available")
+        await original.close()
+
     async def test_timeout_invalidates_session_without_replay(self):
         ws, generation = await self.board("board")
         read = asyncio.create_task(self.read("board", generation))
