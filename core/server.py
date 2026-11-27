@@ -1019,7 +1019,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         key = request[BOARD_KEY]
         board = boards.get(key)
         if not board or board.socket.closed:
-            return problem(404, "device_disconnected")
+            return problem(409 if "generation" in request.query else 404,
+                           "device_session_changed" if "generation" in request.query else "device_disconnected")
         if request.query.get("generation") != board.generation:
             return problem(409, "device_session_changed")
         start = board.uart_end - len(board.uart)
@@ -1040,7 +1041,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             except TimeoutError:
                 pass
             if boards.get(key) is not board or board.socket.closed:
-                return problem(404, "device_disconnected")
+                return problem(409, "device_session_changed")
             if scoped and (board.control is not control or control.stopped):
                 return problem(403, "control_session_required")
             start = board.uart_end - len(board.uart)
@@ -1053,7 +1054,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         key = request[BOARD_KEY]
         board = boards.get(key)
         if not board or board.socket.closed:
-            return problem(404, "device_disconnected")
+            return problem(409 if "generation" in request.query else 404,
+                           "device_session_changed" if "generation" in request.query else "device_disconnected")
         if request.query.get("generation") != board.generation:
             return problem(409, "device_session_changed")
         return web.json_response({"device": board.describe(), "external_control": bool(board.control),
@@ -1396,6 +1398,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
     async def identify(request):
         key = request[BOARD_KEY]
         board = boards.get(key)
+        generation = request.query.get("generation")
+        if generation is not None and (not board or board.socket.closed or generation != board.generation):
+            return problem(409, "device_session_changed")
         return web.json_response(board.describe()) if board and not board.socket.closed else problem(404, "device_disconnected")
 
     def supervise_operation(handler):
