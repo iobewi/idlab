@@ -319,6 +319,29 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await response.json())["images"], images)
         await agent.close()
 
+    async def test_console_plan_rejects_range_beyond_measured_capacity(self):
+        agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
+        await agent.send_json({"mode": "console", "transport": "usb_uart"})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        path = "/api/v1/devices/board"
+        images = [{"address": 16777216, "size": 4, "sha256": hashlib.sha256(b"data").hexdigest()}]
+        task = asyncio.create_task(self.browser.post(path + "/flash/plan", headers=self.local,
+            json={"generation": generation, "images": images}))
+        command = await agent.receive_json(timeout=2)
+        self.assertEqual(command["command"], "mode.loader")
+        await agent.send_json({"identity": {"mode": "loader", "loader": "stub", "transport": "usb_uart",
+            "chip": "esp32s3", "mac": "10:20:30:40:50:60", "flash_size": 16777216,
+            "programmable": True, "return_to_console": True}})
+        await agent.receive_json(timeout=2)
+        await agent.send_json({"result": command["id"]})
+        response = await task
+        self.assertEqual((response.status, await response.json()), (400, {"error": "invalid_flash_range"}))
+        refused = await self.browser.post(path + "/flash/program", headers=self.local,
+            json={"generation": generation, "plan_id": "invalid", "binaries": []})
+        self.assertEqual((refused.status, await refused.json()),
+                         (409, {"error": "flash_plan_confirmation_required"}))
+        await agent.close()
+
     async def test_console_full_erase_uses_measured_capacity(self):
         agent = await self.browser.ws_connect("/agent?device=board", headers=self.local)
         await agent.send_json({"mode": "console", "transport": "usb_uart"})
