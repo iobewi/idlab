@@ -161,8 +161,7 @@ async function prepareImages(card, generation, files, beforeLoader = () => {}) {
   if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
   if (canOpenLoader(card)) {
     beforeLoader();
-    await card.enterLoader();
-    if (card.identity?.generation !== generation) throw new Error('La session de la carte a changé.');
+    // The plan endpoint owns the transition and checks the generation.
   }
   return card.prepareProgram(images);
 }
