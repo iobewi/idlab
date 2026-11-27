@@ -300,6 +300,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
     async def campaign_storage(app):
         campaigns = Campaigns(campaign_db)
         app[CAMPAIGNS] = campaigns
+        recovery_keys.update(campaigns.recovery_keys())
         try:
             yield
         finally:
@@ -425,6 +426,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 return problem(400, "recovery_confirmation_required")
             if boards.get(key) is not board or board.pending or board.control or board.socket.closed:
                 return problem(409, "device_session_changed")
+            if not board.recovery_required:
+                return web.json_response({"control": board.describe()["control"]})
+            request.app[CAMPAIGNS].clear_recovery(key)
             recovery_keys.discard(key)
             board.recovery_required = False
             board.log("Récupération matérielle confirmée par l’opérateur")
@@ -636,6 +640,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 owners.append(None)
             request.app[CAMPAIGNS].require_owner(campaign_id, *owners)
             request.app[CAMPAIGNS].enter(campaign_id, record)
+        # Persist the intent before dispatch, so a process crash fails closed.
+        request.app[CAMPAIGNS].require_recovery(request[BOARD_KEY])
         operation.task = asyncio.current_task()
         board.pending = operation
         board.operations.appendleft(record)
@@ -663,6 +669,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             replacement = boards.get(request[BOARD_KEY])
             if replacement is not None:
                 replacement.recovery_required = True
+        else:
+            request.app[CAMPAIGNS].clear_recovery(request[BOARD_KEY])
         record["state"] = "Terminée" if result else "Échec"
         if not result:
             record.setdefault("detail", "Opération interrompue ou en échec.")
