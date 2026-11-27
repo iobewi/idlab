@@ -638,6 +638,8 @@ export class BoardConnector {
     });
   }
 
+  prepareFlashSession() { return this.#command('flash.prepare'); }
+
   enterLoader() { return this.#command('mode.loader'); }
 
   eraseFlash(confirmation) { return this.#command('flash.erase', {confirmation}); }
