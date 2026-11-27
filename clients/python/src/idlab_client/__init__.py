@@ -176,9 +176,8 @@ class Board:
             raise ValueError("Expected 1 to 16 nonempty flash images as bytes")
         descriptors = [{"address": address, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
                        for address, data in images]
-        board = self._flash_loader()
         return self._client._request(_board_path(self.name) + "/flash/plan",
-                                     {"generation": board.generation, "images": descriptors})
+                                     {"generation": self.generation, "images": descriptors})
 
     def prepare_flash_manifest(self, path: str | Path) -> tuple[dict, list[bytes]]:
         """Load a local manifest, validate its plan, and return the corresponding binaries."""
