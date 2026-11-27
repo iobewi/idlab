@@ -107,8 +107,15 @@ class Board:
 
     def identify_live(self) -> "Board":
         """Measure hardware identity, temporarily entering the loader if needed."""
-        board = self._client._board(self.name, self._operate("identify")["result"])
-        return replace(board, campaign_id=self.campaign_id)
+        response = self._operate("identify")
+        board = self._client._board(self.name, response)
+        measured = response.get("result")
+        if not isinstance(measured, dict):
+            raise IDLabError("Invalid measured board identity")
+        if board.generation != self.generation:
+            raise IDLabHTTPError(409, "device_session_changed")
+        return replace(board, chip=measured.get("chip"), mac=measured.get("mac"),
+                       flash_size=measured.get("flash_size"), campaign_id=self.campaign_id)
 
     def refresh(self) -> "Board":
         """Refresh the snapshot without changing hardware mode or accepting a new generation."""
