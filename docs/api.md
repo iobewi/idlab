@@ -405,6 +405,19 @@ curl --fail-with-body -H "$auth" -H 'Content-Type: application/json' \
 
 ## Erreurs à traiter
 
+Lorsqu'une opération matérielle rencontre une interruption HTTP incertaine,
+le SDK ferme le contrôle délégué et refuse de réutiliser cette session.
+Une demande d'annulation ne constitue pas une confirmation de terminaison.
+Les enregistrements d'opération peuvent inclure `cancelRequestedAt`,
+`termination` (`completed`, `cancelled` ou `unknown`) et
+`recoveryRequired`. Une terminaison inconnue ou un transfert interrompu
+nécessite une vérification de la carte avant toute nouvelle opération.
+Aucun rejeu automatique n'est effectué.
+
+Le marqueur SQLite est conservé entre générations et redémarrages. Il est rapproché par nom logique, `port_key` ou MAC connue, dans la session propriétaire. Une MAC distincte connue permet de distinguer les cartes sans interrogation supplémentaire. Si les identifiants disponibles ne permettent pas de trancher, la carte est bloquée à l'enregistrement et l'opérateur doit résoudre l'ambiguïté.
+
+`POST /api/v1/devices/{name}/control/recover` est réservé à l'opérateur Web. Corps JSON : `{"generation":"…","confirmation":"nom"}`. Après vérification physique de l'arrêt, il libère les marqueurs correspondants. En cas de `409 recovery_identity_indeterminate`, `candidates` liste les anciens noms possibles. Répéter avec `candidate` égal au nom effectivement récupéré, ou `distinct: true` si la carte est physiquement différente. Cette dernière attestation est limitée à la génération et ne supprime aucun marqueur. Une opération en finalisation refuse la récupération (`409`). Aucun reset automatique.
+
 Les erreurs métier utilisent un objet `{"error":"code"}`. Les erreurs de
 routage ou de taille émises par le serveur HTTP peuvent avoir un autre format.
 Les refus de négociation WebSocket conservent le statut HTTP et le code métier

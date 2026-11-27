@@ -5,7 +5,7 @@ import {BoardConnector, sha256} from '../board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
   readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
-  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false } = {}) {
+  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false, writeBarrier } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -71,6 +71,7 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
       assert.equal(options.flashSize, 'keep');
       assert.equal(options.flashMode, 'keep');
       assert.equal(options.flashFreq, 'keep');
+      if (writeBarrier) await writeBarrier();
       for (const [index, file] of options.fileArray.entries()) {
         writes.push(file);
         options.reportProgress(index, file.data.length, file.data.length);
@@ -163,6 +164,7 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
   port.readable = null;
   return {card, events, reads, progress, uart, writes,
     get lastResult() { return commandResult; },
+    cancel(id) { return socket.onmessage({data: JSON.stringify({cancel: id})}); },
     async program(images) {
       commandResult = null;
       await socket.onmessage({data: JSON.stringify({command: 'flash.program', id: 'write', images})});
@@ -170,6 +172,16 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
     },
     manualReset() { inDownload = false; deviceBaud = 115200; }};
 }
+
+test('recovery required rejects connector operations before HTTP dispatch', async () => {
+  const {card, reads} = fixture({inDownload: true});
+  await card.connect();
+  card.control = 'recovery_required';
+  await assert.rejects(card.readFlash(0, 3), /Carte indisponible/);
+  assert.equal(reads.length, 0);
+  assert.equal(card.busy, false);
+  await card.disconnect();
+});
 
 test('only unexpected disconnections report a lost board link', async () => {
   let losses = 0;
@@ -400,6 +412,26 @@ test('programs only the validated bytes, then hashes the actual flash readback',
   assert(progress.some(entry => entry.phase === 'verify'));
   assert.equal(card.mode, 'loader');
   await card.disconnect();
+});
+
+test('program cancellation waits for simulated write and reports recovery', async () => {
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const firmware = Uint8Array.of(1, 2, 3);
+  const {card, program, cancel, lastResult} = fixture({
+    inDownload: true, programPayload: firmware,
+    writeBarrier: async () => { entered.resolve(); await release.promise; },
+  });
+  await card.connect();
+  const active = program([{address: 4096, size: firmware.length, sha256: await sha256(firmware)}]);
+  await entered.promise;
+  await cancel('write');
+  assert.equal(card.busy, true);
+  release.resolve();
+  const terminal = await active;
+  assert.equal(terminal.error, 'operation_cancelled');
+  assert.equal(terminal.recovery_required, true);
+  assert.equal(card.busy, false);
 });
 
 test('a short chunk aborts the dump and an invalid range is rejected', async () => {

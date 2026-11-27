@@ -250,6 +250,8 @@ class IDLabClient:
         self._base = base_url.rstrip("/") + "/api/v1"
         self._token = os.environ.get("IDLAB_TOKEN") if token is None else token
         self._campaign_token = None
+        self._control_socket = None
+        self._control_invalidated = False
         self._timeout = timeout
         self._allow_insecure_http = allow_insecure_http
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
@@ -331,6 +333,7 @@ class IDLabClient:
             client = IDLabClient(self._base.removesuffix("/api/v1"), token=credential, timeout=self._timeout,
                                  allow_insecure_http=self._allow_insecure_http)
             client._campaign_token = self._token
+            client._control_socket = socket
             board = client.identify(name)
             if board.generation != generation:
                 raise IDLabHTTPError(409, "device_session_changed")
@@ -347,7 +350,19 @@ class IDLabClient:
         except (KeyError, TypeError, ValueError) as error:
             raise IDLabError("Invalid board identity") from error
 
+    def _invalidate_control(self):
+        if self._control_socket is not None and not self._control_invalidated:
+            self._control_invalidated = True
+            try:
+                self._control_socket.close()
+            except (OSError, WebSocketException):
+                pass  # Preserve the original operation error.
+
     def _request(self, path, arguments=None, *, expected_bytes=None, timeout=None, method=None):
+        if self._control_invalidated:
+            raise IDLabHTTPError(403, "control_stopped")
+        hardware_operation = arguments is not None and path.endswith(
+            ("/command", "/flash/read", "/flash/program"))
         headers = {"X-IDLab-Client": "python"}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
@@ -375,6 +390,19 @@ class IDLabClient:
                     code = payload.get("error") if isinstance(payload, dict) else None
                 except (ValueError, OSError, http.client.HTTPException):
                     code = None
+            if hardware_operation and (code in {"idlab_http_timeout", "idlab_http_unavailable"}
+                                       or (code is None and error.code >= 500)):
+                self._invalidate_control()
             raise IDLabHTTPError(error.code, code if isinstance(code, str) else "http_error") from None
+        except KeyboardInterrupt:
+            if hardware_operation:
+                self._invalidate_control()
+            raise
+        except IDLabError:
+            if hardware_operation:
+                self._invalidate_control()
+            raise
         except (OSError, ValueError, http.client.HTTPException) as error:
+            if hardware_operation:
+                self._invalidate_control()
             raise IDLabError("IDLab request failed or returned an invalid response") from error

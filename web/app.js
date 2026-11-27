@@ -15,6 +15,8 @@ const cards = new Map();
 let nextBoardNumber = 1;
 let selected = null;
 let adding = false;
+const needsRecovery = card => Boolean(card?.identity &&
+  (card.control === 'recovery_required' || card.observation?.device.control === 'recovery_required'));
 const manualConsoleReturn = 'Pour retrouver la console, déconnecte la carte dans IDLab, appuie sur RESET sans maintenir BOOT, puis reconnecte-la.';
 
 async function observeCard(card) {
@@ -39,7 +41,7 @@ async function observeCard(card) {
       if (journalChanged) renderJournal(card);
       else renderFlashProgress(card);
       if (historyChanged) {
-        renderRom(card, !externallyControlled(card) && !card.busy && !card.requesting);
+        renderRom(card, !externallyControlled(card) && !needsRecovery(card) && !card.busy && !card.requesting);
         renderOperationHistory(card);
       }
     }
@@ -101,6 +103,7 @@ function render() {
     card.status.textContent = {connecting: 'Connexion…', console: 'Connectée', loader: 'Connectée',
       closing: 'Déconnexion…', disconnected: 'Déconnectée'}[card.mode];
     card.status.dataset.state = {console: 'connected', loader: 'connected'}[card.mode] ?? card.mode;
+    if (needsRecovery(card)) card.status.textContent = 'Récupération requise';
     card.status.disabled = card.busy || card.requesting || card.mode === 'connecting' || card.mode === 'closing';
     card.remove.hidden = card.mode !== 'disconnected';
   }
@@ -139,7 +142,7 @@ function render() {
   }
   renderIdentification();
   const external = externallyControlled(selected);
-  const available = selected && !external && !selected.busy && !selected.requesting;
+  const available = selected && !external && !needsRecovery(selected) && !selected.busy && !selected.requesting;
   const loader = available && selected.mode === 'loader';
   renderRom(selected, available);
   const autoLoader = available && selected.mode === 'console' && selected.canEnterLoader;
@@ -157,9 +160,14 @@ function render() {
     : '';
   flashHint.hidden = !flashHint.textContent;
   const reset = $('reset-device');
-  reset.disabled = !(available && selected.mode === 'console' && selected.resetWait);
+  reset.disabled = needsRecovery(selected) ? Boolean(selected.busy || selected.requesting || selected.recovering)
+    : !(available && selected.mode === 'console' && selected.resetWait);
   reset.textContent = selected?.resetWait === 200 ? 'Reset USB' : 'Reset EN';
   reset.title = consoleUnavailable ? consolesTab.title : 'Redémarre la carte depuis la console.';
+  if (needsRecovery(selected)) {
+    reset.textContent = 'Confirmer la récupération';
+    reset.title = 'Après avoir vérifié physiquement la carte et arrêté toute opération précédente.';
+  }
   const modeButton = $('enter-loader');
   modeButton.textContent = selected?.mode === 'loader' ? 'Revenir à la console' : 'Ouvrir le chargeur flash';
   modeButton.disabled = !(autoLoader || (available && selected.canReturnToConsole));
@@ -355,7 +363,44 @@ navigator.serial?.addEventListener('disconnect', event => {
   }
 });
 
-$('reset-device').onclick = () => run(() => selected?.restart());
+$('reset-device').onclick = () => run(async () => {
+  const card = selected;
+  if (!card || $('reset-device').disabled) return;
+  if (!needsRecovery(card)) return card.restart();
+  const generation = card.identity.generation;
+  const confirmation = window.prompt('Vérifie physiquement que toute opération précédente est arrêtée. ' +
+    'Si nécessaire, redémarre la carte manuellement et vérifie son état. ' +
+    'La flash peut être partiellement modifiée. Pour confirmer la récupération, saisis le nom de la carte : ' + card.name);
+  if (confirmation !== card.name || card.identity?.generation !== generation) return;
+  card.recovering = true;
+  render();
+  try {
+    const recover = async extra => {
+      const response = await fetch('/api/v1/devices/' + card.name + '/control/recover', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({generation, confirmation, ...extra}),
+      });
+      return {response, result: await response.json()};
+    };
+    let {response, result} = await recover({});
+    if (result.error === 'recovery_identity_indeterminate') {
+      const candidate = window.prompt('Identité indéterminée. Saisis le nom de la carte précédente récupérée (' +
+        result.candidates.join(', ') + ') ou DISTINCTE si cette carte est physiquement différente.');
+      if (card.identity?.generation !== generation || candidate === null) return;
+      if (candidate === 'DISTINCTE') ({response, result} = await recover({distinct: true}));
+      else if (result.candidates.includes(candidate)) ({response, result} = await recover({candidate}));
+      else return;
+    }
+    if (!response.ok) throw new Error(result.error ?? ('HTTP ' + response.status));
+    if (card.identity?.generation !== generation) return;
+    card.control = result.control;
+    await observeCard(card);
+    say('Récupération confirmée pour « ' + card.name + ' ».', {temporary: true});
+  } finally {
+    card.recovering = false;
+    render();
+  }
+});
 $('enter-loader').onclick = () => run(async () => {
   const card = selected;
   if (!card || $('enter-loader').disabled) return;

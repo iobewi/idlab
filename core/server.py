@@ -44,6 +44,8 @@ class Operation:
     read_address: int | None = None
     read_progress: dict | None = None
     agent_disconnected: bool = False
+    task: asyncio.Task | None = None
+    cancel_requested_at: str | None = None
 
 
 @dataclass
@@ -77,10 +79,13 @@ class Board:
     operations: deque = field(default_factory=lambda: deque(maxlen=100))
     progress: dict | None = None
     program_plan: ProgramPlan | None = None
+    recovery_required: bool = False
+    recovery_exclusions: set = field(default_factory=set)
+    recovery_mac: str | None = None
 
     def describe(self):
         stopping = (self.control and self.control.stopped) or (self.pending and self.pending.cancelled)
-        state = ("stopping" if stopping else
+        state = ("recovery_required" if self.recovery_required else "stopping" if stopping else
                  "busy" if self.pending else "external" if self.control else "available")
         return {"generation": self.generation, **self.identity, "control": state}
 
@@ -221,8 +226,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         origins.add(public_origin)
     boards = {}
     detached_reads = {}
+    recovery_keys = set()
+    finalizing = set()
     tokens = {}
     sockets = set()
+    operation_tasks = set()
     CAMPAIGNS = web.AppKey("campaigns", Campaigns)
     OWNER = web.RequestKey("web_owner", str)
     BOARD_KEY = web.RequestKey("board_key", tuple)
@@ -295,6 +303,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
     async def campaign_storage(app):
         campaigns = Campaigns(campaign_db)
         app[CAMPAIGNS] = campaigns
+        recovery_keys.update(campaigns.recovery_keys())
         try:
             yield
         finally:
@@ -389,6 +398,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         cancelled = pending and not pending.future.done() and not pending.cancelled
         if cancelled:
             pending.cancelled = True
+            pending.cancel_requested_at = datetime.now(timezone.utc).isoformat()
+            record = next((entry for entry in board.operations if entry['id'] == pending.id), None)
+            if record is not None:
+                record['cancelRequestedAt'] = pending.cancel_requested_at
+            board.log('Annulation demandée', pending.source, pending.session_id)
         await publish_control(board, key)
         if cancelled and not board.socket.closed:
             try:
@@ -396,12 +410,90 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             except ConnectionError:
                 pass
 
+    def recovery_candidates(storage, key, board):
+        mac = board.identity.get("mac") or board.recovery_mac
+        matched = storage.matching_recovery(key, board.port_key, mac)
+        uncertain = storage.uncertain_recovery(key, board.port_key, mac)
+        # Distinct live ports are already registered; their in-flight intents
+        # alone do not establish an identity ambiguity.
+        uncertain -= {other for other, live in boards.items() if live.pending}
+        return matched, uncertain - board.recovery_exclusions
+
+    async def refresh_recovery(storage, *, exclude=None):
+        changed = []
+        active = {key for key, live in boards.items() if live.pending}
+        for key, board in boards.items():
+            if board is exclude:
+                continue
+            matched, uncertain = recovery_candidates(storage, key, board)
+            # Live operation intents are not unresolved terminations. A detached
+            # generation, in contrast, must remain fenced until finalized.
+            required = bool((matched - active) or uncertain or key in finalizing)
+            if board.pending and board.recovery_required:
+                # Never release a recovery fence while hardware is still active.
+                required = True
+            if required != board.recovery_required:
+                board.recovery_required = required
+                changed.append((key, board))
+        # Set all fences before the first await, then stop existing grants and
+        # request cooperative cancellation without releasing active operations.
+        for key, board in changed:
+            if board.recovery_required and board.control:
+                await stop_control(key, board, board.control, "device_recovery_required")
+            elif board.recovery_required and board.pending:
+                await request_operation_stop(key, board)
+            else:
+                await publish_control(board, key)
+
     async def manage_control(request):
         if not request[LOCAL_OPERATOR]:
             return problem(403, "local_operator_required")
         key = request[BOARD_KEY]
         action = request.match_info["action"]
         board = boards.get(key)
+        if action == "recover":
+            if not board or board.socket.closed:
+                return problem(404, "device_disconnected")
+            if board.pending or board.control or key in finalizing:
+                return problem(409, "device_busy")
+            try:
+                payload = await request.json()
+            except (ValueError, TypeError):
+                return problem(400, "invalid_json")
+            if (not isinstance(payload, dict) or
+                    payload.keys() - {"generation", "confirmation", "distinct", "candidate"} or
+                    payload.get("generation") != board.generation or payload.get("confirmation") != key[1] or
+                    ("distinct" in payload and payload["distinct"] is not True) or
+                    ("candidate" in payload and not isinstance(payload["candidate"], str)) or
+                    ("distinct" in payload and "candidate" in payload)):
+                return problem(400, "recovery_confirmation_required")
+            if boards.get(key) is not board or board.pending or board.control or board.socket.closed or key in finalizing:
+                return problem(409, "device_session_changed")
+            if not board.recovery_required:
+                return web.json_response({"control": board.describe()["control"]})
+            storage = request.app[CAMPAIGNS]
+            matched, uncertain = recovery_candidates(storage, key, board)
+            candidates = matched | uncertain
+            if candidates & finalizing or any(boards.get(k) and boards[k].pending for k in candidates):
+                return problem(409, "device_busy")
+            if payload.get("distinct"):
+                if matched:
+                    return problem(409, "recovery_identity_matched")
+                board.recovery_exclusions.update(uncertain)
+                board.log("Carte distincte confirmée par l’opérateur")
+            else:
+                candidate = (key[0], payload["candidate"]) if "candidate" in payload else None
+                if candidate is not None and candidate not in uncertain:
+                    return problem(400, "recovery_confirmation_required")
+                if uncertain and candidate is None:
+                    return web.json_response({"error": "recovery_identity_indeterminate",
+                                              "candidates": sorted(k[1] for k in uncertain)}, status=409)
+                for marker in matched | ({candidate} if candidate else set()):
+                    storage.clear_recovery(marker)
+                    recovery_keys.discard(marker)
+                board.log("Récupération matérielle confirmée par l’opérateur")
+            await refresh_recovery(storage)
+            return web.json_response({"control": board.describe()["control"]})
         if action == "token":
             if not board or board.socket.closed:
                 return problem(404, "device_disconnected")
@@ -438,6 +530,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return problem(404, "device_disconnected")
         if (board.port_key or board.identity["mac"]) != grant[1]:
             return problem(403, "control_token_device_mismatch")
+        if board.recovery_required:
+            return problem(409, "device_recovery_required")
         if board.control or board.pending:
             return problem(409, "device_busy")
         socket = web.WebSocketResponse(heartbeat=20)
@@ -478,6 +572,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             board = Board(uuid.uuid4().hex, socket, identity, port_key=port_key)
             if port_key:
                 board.operations.extend(detached_reads.pop((*key, port_key), ()))
+            board.recovery_mac = identity.get("mac")
+            matched, uncertain = recovery_candidates(request.app[CAMPAIGNS], key, board)
+            board.recovery_required = bool(matched or uncertain or key in finalizing)
             boards[key] = board
             await socket.send_json({"generation": board.generation, "has_token": key in tokens})
             async for message in socket:
@@ -488,6 +585,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                         break
                     if "identity" in event and pending:
                         board.identity = validate_identity(event["identity"])
+                        board.recovery_mac = board.identity.get("mac") or board.recovery_mac
+                        request.app[CAMPAIGNS].require_recovery(key, board.port_key, board.recovery_mac)
                         board.program_plan = None
                         await socket.send_json({"identity": board.describe()})
                     elif "uart" in event and board.identity.get("mode") == "console":
@@ -551,6 +650,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             pass
         finally:
             if boards.get(key) is board and board is not None:
+                if board.pending:
+                    # Reserve the logical identity until the old supervisor has finalized.
+                    finalizing.add(key)
+                    recovery_keys.add(key)
                 del boards[key]
                 if board.port_key:
                     # Keep recent failed reads in the existing history when the same connector reconnects.
@@ -571,6 +674,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         return socket
 
     def command_refusal(request, board):
+        if board.recovery_required:
+            return problem(409, "device_recovery_required")
         control = board.control
         if request[LOCAL_OPERATOR]:
             if control:
@@ -601,12 +706,40 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 owners.append(None)
             request.app[CAMPAIGNS].require_owner(campaign_id, *owners)
             request.app[CAMPAIGNS].enter(campaign_id, record)
+        # Persist the intent before dispatch, so a process crash fails closed.
+        request.app[CAMPAIGNS].require_recovery(request[BOARD_KEY], board.port_key, board.recovery_mac)
+        operation.task = asyncio.current_task()
         board.pending = operation
         board.operations.appendleft(record)
         board.log(f"Début · {command}", source, session_id)
         return operation, record, asyncio.get_running_loop().time()
 
-    def finish_operation(request, board, record, started, result):
+    async def finish_operation(request, board, record, started, result):
+        operation = board.pending
+        if operation:
+            if operation.cancel_requested_at:
+                record["cancelRequestedAt"] = operation.cancel_requested_at
+            if operation.agent_disconnected or not operation.future.done() or operation.future.cancelled():
+                record["termination"] = "unknown"
+                record["recoveryRequired"] = True
+            else:
+                response = operation.future.result()
+                record["termination"] = ("cancelled" if isinstance(response, dict)
+                                         and response.get("error") == "operation_cancelled"
+                                         else "completed" if response is not None else "unknown")
+                record["recoveryRequired"] = (record["termination"] == "unknown" or
+                                              isinstance(response, dict) and response.get("recovery_required") is True)
+        if record.get("recoveryRequired"):
+            recovery_keys.add(request[BOARD_KEY])
+            board.recovery_required = True
+            replacement = boards.get(request[BOARD_KEY])
+            if replacement is not None:
+                replacement.recovery_required = True
+        else:
+            request.app[CAMPAIGNS].clear_recovery(request[BOARD_KEY])
+            recovery_keys.discard(request[BOARD_KEY])
+
+        finalizing.discard(request[BOARD_KEY])
         record["state"] = "Terminée" if result else "Échec"
         if not result:
             record.setdefault("detail", "Opération interrompue ou en échec.")
@@ -618,6 +751,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         board.progress = board.pending = None
         if "campaign_id" in record:
             request.app[CAMPAIGNS].leave(record["campaign_id"], record)
+        await refresh_recovery(request.app[CAMPAIGNS])
 
     async def device_command(request):
         try:
@@ -687,7 +821,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             elif region_erase:
                 message.update(record_fields)
             await board.socket.send_json(message)
-            result = await asyncio.wait_for(operation.future, timeout=timeout)
+            result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=timeout)
+            if isinstance(result, dict) and result.get("recovery_required") is True:
+                await board.socket.close(code=1011)
             if control and control.stopped:
                 return problem(403, control.stopped)
             if operation.cancelled:
@@ -729,7 +865,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             await board.socket.close(code=1011)
             return problem(502, "device_session_changed")
         finally:
-            finish_operation(request, board, record, started, complete)
+            await finish_operation(request, board, record, started, complete)
             if control and control.stopped and board.control is control:
                 board.control = None
                 await publish_control(board, key)
@@ -826,7 +962,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             if stream:
                 message["stream"] = True
             await board.socket.send_json(message)
-            result = await asyncio.wait_for(operation.future, timeout=read_timeout if not stream else read_timeout * (1 + (size - 1) // MAX_READ))
+            result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=read_timeout if not stream else read_timeout * (1 + (size - 1) // MAX_READ))
             data = result if not stream else None
             capacity = board.identity["flash_size"]
             if stream and isinstance(result, dict) and not result.get("error") and operation.received == size:
@@ -863,10 +999,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                     (operation.cancelled and result.get("error") == "operation_cancelled") or
                     (stream and result.get("console_restored") is True and board.identity.get("mode") == "console")
                 )
-                if not complete and (not recoverable or control and control.stopped):
+                if (isinstance(result, dict) and result.get('recovery_required') is True or
+                        not complete and (not recoverable or control and control.stopped)):
                     await board.socket.close(code=1011)
             finally:
-                finish_operation(request, board, record, started, succeeded)
+                await finish_operation(request, board, record, started, succeeded)
                 if not succeeded:
                     board.log(f"{record['detail']} · {record['duration']}", operation.source, operation.session_id)
                 if control and control.stopped and board.control is control:
@@ -999,7 +1136,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         complete = False
         try:
             await board.socket.send_json({"id": operation.id, "command": "flash.program", "images": plan.images})
-            result = await asyncio.wait_for(operation.future, timeout=read_timeout * 2 * (1 + (total - 1) // MAX_READ))
+            result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=read_timeout * 2 * (1 + (total - 1) // MAX_READ))
+            if isinstance(result, dict) and result.get("recovery_required") is True:
+                await board.socket.close(code=1011)
             if control and control.stopped:
                 return problem(403, control.stopped)
             if operation.cancelled:
@@ -1033,9 +1172,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             await board.socket.close(code=1011)
             return problem(504, "flash_program_timeout")
         except ConnectionError:
+            operation.agent_disconnected = True
+            await board.socket.close(code=1011)
             return problem(502, "flash_program_failed")
         finally:
-            finish_operation(request, board, record, started, complete)
+            await finish_operation(request, board, record, started, complete)
             if control and control.stopped and board.control is control:
                 board.control = None
                 await publish_control(board, key)
@@ -1050,8 +1191,33 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         board = boards.get(key)
         return web.json_response(board.describe()) if board and not board.socket.closed else problem(404, "device_disconnected")
 
+    def supervise_operation(handler):
+        async def supervised(request):
+            task = asyncio.create_task(handler(request))
+            operation_tasks.add(task)
+
+            def finished(done):
+                operation_tasks.discard(done)
+                if not done.cancelled():
+                    done.exception()  # Retrieve errors even if the HTTP peer left.
+
+            task.add_done_callback(finished)
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                board = boards.get(request[BOARD_KEY])
+                if board and board.pending and board.pending.task is task:
+                    await request_operation_stop(request[BOARD_KEY], board)
+                elif not task.done():
+                    # No operation has been reserved yet; do not start one later.
+                    task.cancel()
+                raise
+        return supervised
+
     async def close_agents(app):
         await asyncio.gather(*(socket.close(code=1001) for socket in tuple(sockets)))
+        if operation_tasks:
+            await asyncio.gather(*tuple(operation_tasks), return_exceptions=True)
 
     async def revalidate_browser_files(request, response):
         if request.path in {"/", "/esptool.js"} or request.path.startswith("/web/"):
@@ -1083,14 +1249,14 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         web.post("/api/v1/campaigns/{id}/abort", abort_campaign),
         web.get("/api/v1/devices", devices),
         web.get("/api/v1/devices/{name}", identify),
-        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke}", manage_control),
+        web.post("/api/v1/devices/{name}/control/{action:token|stop|revoke|recover}", manage_control),
         web.get("/api/v1/devices/{name}/control/connect", connect_control),
-        web.post("/api/v1/devices/{name}/command", device_command),
+        web.post("/api/v1/devices/{name}/command", supervise_operation(device_command)),
         web.get("/api/v1/devices/{name}/uart", read_uart),
         web.get("/api/v1/devices/{name}/activity", read_activity),
-        web.post("/api/v1/devices/{name}/flash/read", read_flash),
+        web.post("/api/v1/devices/{name}/flash/read", supervise_operation(read_flash)),
         web.post("/api/v1/devices/{name}/flash/plan", prepare_program),
-        web.post("/api/v1/devices/{name}/flash/program", program_flash),
+        web.post("/api/v1/devices/{name}/flash/program", supervise_operation(program_flash)),
         web.get(r"/api/v1/devices/{name}/flash/program/{operation_id:[0-9a-f]{32}}/{index:[0-9]{1,2}}", program_image),
         web.get("/agent", agent),
         *(web.get(f"/web/{module}", serial_module) for module in SERIAL_MODULES),
@@ -1110,4 +1276,4 @@ if __name__ == "__main__":
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     app = create_app(port=public_port, token=os.environ.get("IDLAB_TOKEN"),
                      public_origin=os.environ.get("IDLAB_PUBLIC_ORIGIN"), campaign_db=state_dir / "campaigns.sqlite3")
-    web.run_app(app, host="127.0.0.1", port=port, shutdown_timeout=3)
+    web.run_app(app, host="127.0.0.1", port=port, shutdown_timeout=3, handler_cancellation=True)

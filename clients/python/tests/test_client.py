@@ -9,17 +9,32 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from aiohttp import ClientSession, ClientWSTimeout, CookieJar, web
 
-from idlab_client import IDLabClient, IDLabHTTPError
+from idlab_client import IDLabClient, IDLabError, IDLabHTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "core"))
 from server import create_app
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_uncertain_hardware_request_invalidates_control_even_if_caught(self):
+        for failure, expected in ((TimeoutError("timeout"), IDLabError),
+                                  (KeyboardInterrupt(), KeyboardInterrupt)):
+            with self.subTest(failure=type(failure).__name__):
+                client = IDLabClient("http://127.0.0.1:8080")
+                client._control_socket = Mock()
+                with patch.object(client._opener, "open", side_effect=failure) as opened:
+                    with self.assertRaises(expected):
+                        client._request("/devices/board/flash/read", {"size": 4})
+                    client._control_socket.close.assert_called_once()
+                    with self.assertRaises(IDLabHTTPError) as refused:
+                        client._request("/devices/board/activity")
+                    self.assertEqual(refused.exception.code, "control_stopped")
+                    opened.assert_called_once()
+
     def test_url_is_required_and_explicit_arguments_override_environment(self):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(ValueError, "IDLAB_URL"):

@@ -81,6 +81,14 @@ class Campaigns:
             if "owner" not in columns:
                 self.db.execute("ALTER TABLE campaigns ADD COLUMN owner TEXT")
             self.db.execute("CREATE TABLE IF NOT EXISTS web_sessions (id TEXT PRIMARY KEY)")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS device_recovery (
+                owner TEXT NOT NULL, device TEXT NOT NULL,
+                PRIMARY KEY (owner, device)
+            )""")
+            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(device_recovery)")}
+            for column in ("port_key", "mac"):
+                if column not in columns:
+                    self.db.execute(f"ALTER TABLE device_recovery ADD COLUMN {column} TEXT")
             self.db.execute("""
                 CREATE TABLE IF NOT EXISTS campaign_operations (
                     id TEXT PRIMARY KEY,
@@ -103,6 +111,32 @@ class Campaigns:
 
     def close(self):
         self.db.close()
+
+    def recovery_keys(self):
+        return {(row["owner"], row["device"]) for row in
+                self.db.execute("SELECT owner, device FROM device_recovery")}
+
+    def matching_recovery(self, key, port_key=None, mac=None):
+        return {(row["owner"], row["device"]) for row in self.db.execute(
+            "SELECT owner, device FROM device_recovery WHERE owner = ? AND "
+            "(device = ? OR port_key = ? OR mac = ?)", (*key, port_key, mac))}
+
+    def uncertain_recovery(self, key, port_key=None, mac=None):
+        matched = self.matching_recovery(key, port_key, mac)
+        return {(row["owner"], row["device"]) for row in self.db.execute(
+            "SELECT owner, device FROM device_recovery WHERE owner = ? AND "
+            "(mac IS NULL OR ? IS NULL)", (key[0], mac))} - matched
+
+    def require_recovery(self, key, port_key=None, mac=None):
+        with self.db:
+            self.db.execute("""INSERT INTO device_recovery (owner, device, port_key, mac) VALUES (?, ?, ?, ?)
+                ON CONFLICT(owner, device) DO UPDATE SET
+                port_key = COALESCE(excluded.port_key, device_recovery.port_key),
+                mac = COALESCE(excluded.mac, device_recovery.mac)""", (*key, port_key, mac))
+
+    def clear_recovery(self, key):
+        with self.db:
+            self.db.execute("DELETE FROM device_recovery WHERE owner = ? AND device = ?", key)
 
     def save_session(self, session_id):
         with self.db:
