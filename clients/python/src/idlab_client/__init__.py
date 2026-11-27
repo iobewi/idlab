@@ -181,17 +181,13 @@ class Board:
 
     def prepare_flash_manifest(self, path: str | Path) -> tuple[dict, list[bytes]]:
         """Load a local manifest, validate its plan, and return the corresponding binaries."""
-        board = self._flash_loader()
+        board = self.refresh()
+        if board.chip is None:
+            board = board.identify_live()
+        if board.chip is None:
+            raise IDLabError("Hardware identity is required to prepare a flash manifest")
         images = read_flash_manifest(path, board.chip)
         return board.prepare_flash(images), [data for _, data in images]
-
-    def _flash_loader(self) -> "Board":
-        board = self.refresh()
-        if board.mode == "console" and "mode.loader" in board.capabilities:
-            board = board.for_campaign(self.campaign_id).enter_loader()
-            if board.generation != self.generation:
-                raise IDLabHTTPError(409, "device_session_changed")
-        return board
 
     def program_flash(self, plan_id: str, binaries: Sequence[bytes]) -> dict:
         """Confirm a validated plan and return its flash write and readback result."""
