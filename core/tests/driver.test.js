@@ -10,6 +10,7 @@ class ReadFlashStub {
   ESP_READ_FLASH = 0xd2;
   FLASH_READ_TIMEOUT = 100000;
   constructor({transport}) {
+    this.transport = transport;
     this.frames = [];
     this.received = 0;
     transport.read = async timeout => {
