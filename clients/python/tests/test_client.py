@@ -369,13 +369,6 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                     {"chipFamily": "ESP32-S3", "parts": [{"path": "app.bin", "offset": 4096}]},
                 ]}), encoding="utf-8")
                 preparing = asyncio.create_task(asyncio.to_thread(console.prepare_flash_manifest, path))
-                identification = await agent.receive_json(timeout=2)
-                self.assertEqual(identification["command"], "identify")
-                await agent.send_json({"identity": loader})
-                measured = (await agent.receive_json(timeout=2))["identity"]
-                await agent.send_json({"identity": {"mode": "console", "transport": "usb_uart"}})
-                await agent.receive_json(timeout=2)
-                await agent.send_json({"result": identification["id"], "value": measured})
                 await switch("mode.loader", loader)
                 plan, binaries = await preparing
                 self.assertEqual((plan["images"][0]["address"], binaries), (4096, [b"firmware"]))
@@ -393,7 +386,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await erase, verified)
         history = await asyncio.to_thread(self.client.campaign_operations, campaign["id"])
         self.assertCountEqual([entry["command"] for entry in history["items"]],
-                              ["identify", "mode.console", "flash.erase.region"])
+                              ["flash.prepare", "mode.console", "flash.erase.region"])
 
     async def test_erase_region_requires_exact_sector_bounds(self):
         agent = await self.connect(erasable=True)
