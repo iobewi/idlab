@@ -75,6 +75,8 @@ class Board:
 
     def _command(self, command: str, **params) -> "Board":
         board = self._client._board(self.name, self._operate(command, **params))
+        if board.generation != self.generation:
+            raise IDLabHTTPError(409, "device_session_changed")
         return replace(board, campaign_id=self.campaign_id)
 
     def _operate(self, command: str, **params) -> dict:
@@ -119,7 +121,8 @@ class Board:
 
     def refresh(self) -> "Board":
         """Refresh the snapshot without changing hardware mode or accepting a new generation."""
-        board = self._client.identify(self.name)
+        board = self._client._board(self.name, self._client._request(
+            _board_path(self.name) + "?" + urlencode({"generation": self.generation})))
         if board.generation != self.generation:
             raise IDLabHTTPError(409, "device_session_changed")
         return replace(board, campaign_id=self.campaign_id)
@@ -368,7 +371,7 @@ class IDLabClient:
         if self._control_invalidated:
             raise IDLabHTTPError(403, "control_stopped")
         hardware_operation = arguments is not None and path.endswith(
-            ("/command", "/flash/read", "/flash/program"))
+            ("/command", "/flash/read", "/flash/program", "/flash/plan"))
         headers = {"X-IDLab-Client": "python"}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
