@@ -2,6 +2,7 @@ import { sha256 } from './board-connector.js';
 import { FLASH_SECTOR } from './esp-driver.js';
 import { $, element, FLASH_PREVIEW_BYTES, flashNumber, formatFlashPreview, run, say } from './dom.js';
 import { importManifest } from './flash-manifest.js';
+import { destructiveFlashMessage } from './flash-diagnostics.js';
 
 const plans = new WeakMap();
 const hex = address => '0x' + address.toString(16);
@@ -136,10 +137,7 @@ const errors = {
 };
 
 function flashError(error) {
-  if (['indeterminate', 'unverified'].includes(error.operation?.flashState)) {
-    return 'État flash non vérifié. Consulte le diagnostic et privilégie une relecture autorisée avant toute opération destructive.';
-  }
-  return errors[error.code ?? error.message] ?? error.message;
+  return destructiveFlashMessage(error, errors);
 }
 
 function appendFiles(plan, entries) {

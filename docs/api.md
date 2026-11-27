@@ -451,3 +451,30 @@ jetons révoqués ni surveillance WebSocket supplémentaire n'est nécessaire.
 
 En cas de perte de la réponse à la création d’une campagne, une nouvelle
 requête `POST /api/v1/campaigns` crée un autre identifiant.
+
+
+### Diagnostics des opérations flash destructives
+
+Les opérations de programmation et d’effacement réutilisent l’historique des
+opérations et les enregistrements de campagne existants. Une réponse HTTP
+échec après démarrage de l’opération peut contenir un objet `operation` avec
+le diagnostic final ; le SDK le rend disponible via `IDLabHTTPError.operation`.
+Un refus avant création d’une opération peut ne pas contenir cet objet.
+
+L’état `flashState` distingue `unchanged` (absence de modification par cette
+opération établie par un résultat terminal), `indeterminate` (état inconnu),
+`unverified` (phase de vérification interrompue), `mismatch` (relecture non
+conforme) et `verified` (vérification réussie). Un retour en console ne prouve
+pas l’intégrité de la flash. En cas d’état non vérifié, privilégier une
+relecture autorisée après la récupération de session requise ; ne pas rejouer
+automatiquement une opération destructive.
+
+**Limite de persistance :** les diagnostics terminaux des opérations rattachées
+à une campagne sont persistés dans SQLite. La progression intermédiaire est
+conservée en mémoire du serveur et n’est pas écrite périodiquement en base.
+Après un redémarrage brutal avec une opération inachevée, son enregistrement de
+campagne est marqué en échec (`server_restarted`), avec état `indeterminate`,
+terminaison inconnue, récupération requise et progression/offset inconnus
+(`null`). La dernière progression observée avant le redémarrage peut donc être
+perdue. Cette limitation est volontaire ; aucune progression n’est reconstruite
+par estimation et aucune écriture SQLite supplémentaire n’est introduite.

@@ -752,6 +752,47 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await observed.json())["operations"][0], record)
         await agent.close()
 
+    async def test_prepare_failure_and_lost_agent_have_distinct_flash_states(self):
+        created = await self.browser.post("/api/v1/campaigns", headers=self.local,
+                                          json={"name": "Prepare diagnostics"})
+        self.assertEqual(created.status, 201)
+        cid = (await created.json())["id"]
+        for disconnected in (False, True):
+            name = "lost" if disconnected else "prepare"
+            agent = await self.browser.ws_connect("/agent?device=" + name, headers=self.local)
+            await agent.send_json({"chip": "esp32s3", "mac": "10:20:30:40:50:61" if disconnected else "10:20:30:40:50:60",
+                "loader": "stub", "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
+                "programmable": True})
+            generation = (await agent.receive_json(timeout=2))["generation"]
+            path = "/api/v1/devices/" + name
+            data = b"abcd"
+            plan = await self.browser.post(path + "/flash/plan", headers=self.local,
+                json={"generation": generation, "images": [{"address": 4096, "size": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest()}]})
+            self.assertEqual(plan.status, 201)
+            active = asyncio.create_task(self.browser.post(path + "/flash/program", headers=self.local,
+                json={"generation": generation, "plan_id": (await plan.json())["plan_id"],
+                      "binaries": [base64.b64encode(data).decode()], "campaign_id": cid}))
+            command = await agent.receive_json(timeout=2)
+            if disconnected:
+                await agent.close()
+            else:
+                await agent.send_json({"result": command["id"], "error": "device_command_failed",
+                    "flash_diagnostic": {"phase": "prepare", "progress": None, "bytes_received": 0}})
+            response = await active
+            self.assertEqual(response.status, 502)
+            record = (await response.json())["operation"]
+            self.assertEqual(record["flashState"], "indeterminate" if disconnected else "unchanged")
+            self.assertEqual(record["phase"], None if disconnected else "prepare")
+            self.assertEqual(record["recoveryRequired"], disconnected)
+            self.assertIsNone(record["bytesWritten"])
+            history = await self.browser.get("/api/v1/campaigns/" + cid + "/operations", headers=self.local)
+            self.assertIn(record, (await history.json())["items"])
+            if not disconnected:
+                observed = await self.browser.get(path + "/activity?generation=" + generation, headers=self.local)
+                self.assertEqual((await observed.json())["operations"][0], record)
+                await agent.close()
+
     async def test_erase_diagnostic_matches_campaign_and_http(self):
         agent = await self.browser.ws_connect("/agent?device=erase", headers=self.local)
         await agent.send_json({"chip": "esp32s3", "mac": "10:20:30:40:50:60",
