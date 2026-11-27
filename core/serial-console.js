@@ -23,6 +23,7 @@ export async function openSerialConsole(port, baudRate, onText, onBytes = () => 
   }
   let closing;
   let ended = false;
+  let closeRequested = false;
   let writing = Promise.resolve();
   const decoder = onText ? new TextDecoder() : null;
   const encoder = new TextEncoder();
@@ -46,9 +47,9 @@ export async function openSerialConsole(port, baudRate, onText, onBytes = () => 
   return {
     done,
     write(text) {
-      if (closing || ended) return Promise.reject(new Error('Console déconnectée.'));
+      if (closeRequested || ended) return Promise.reject(new Error('Console déconnectée.'));
       writing = writing.catch(() => {}).then(async () => {
-        if (ended) throw new Error('Console déconnectée.');
+        if (closeRequested || ended) throw new Error('Console déconnectée.');
         const writer = port.writable.getWriter();
         try {
           await writer.write(typeof text === 'string' ? encoder.encode(text) : text);
@@ -59,11 +60,22 @@ export async function openSerialConsole(port, baudRate, onText, onBytes = () => 
       return writing;
     },
     close() {
+      closeRequested = true;
       closing ??= (async () => {
-        await reader.cancel().catch(() => {});
+        if (!ended) await reader.cancel().catch(() => {});
         await Promise.allSettled([done, writing]);
-        await port.close();
-      })();
+        // A removed port may already have released both streams.
+        if (port.readable === null && port.writable === null) return;
+        try {
+          await port.close();
+        } catch (error) {
+          if (port.readable !== null || port.writable !== null) throw error;
+        }
+      })().catch(error => {
+        // Keep ownership but allow a subsequent cleanup attempt.
+        closing = undefined;
+        throw error;
+      });
       return closing;
     },
   };

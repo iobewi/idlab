@@ -88,3 +88,61 @@ test('an explicit reset pulses RTS and leaves DTR deasserted', async () => {
     {dataTerminalReady: false, requestToSend: false},
   ]);
 });
+
+test('failed console close can be retried without reopening writes', async () => {
+  let attempts = 0;
+  const port = {
+    readable: new ReadableStream(),
+    writable: new WritableStream(),
+    async open() {},
+    async close() {
+      attempts++;
+      if (attempts === 1) throw new Error('close failed');
+      this.readable = this.writable = null;
+    },
+  };
+  const session = await openSerialConsole(port, 115200, null);
+  await assert.rejects(session.close(), /close failed/);
+  await assert.rejects(session.write('help'), /déconnectée/);
+  await Promise.all([session.close(), session.close()]);
+  assert.equal(attempts, 2);
+});
+
+test('physically removed console with released streams closes cleanly', async () => {
+  let input;
+  let attempts = 0;
+  const port = {
+    readable: new ReadableStream({start(controller) { input = controller; }}),
+    writable: new WritableStream(),
+    async open() {},
+    async close() {
+      attempts++;
+      throw new Error('already closed');
+    },
+  };
+  const session = await openSerialConsole(port, 115200, null);
+  input.error(new Error('device lost'));
+  port.readable = port.writable = null;
+  await assert.rejects(session.done, /device lost/);
+  await session.close();
+  await session.close();
+  assert.equal(attempts, 0);
+});
+
+test('console close tolerates rejection only when both streams are released', async () => {
+  let attempts = 0;
+  const port = {
+    readable: new ReadableStream(),
+    writable: new WritableStream(),
+    async open() {},
+    async close() {
+      attempts++;
+      this.readable = this.writable = null;
+      throw new Error('device removed during close');
+    },
+  };
+  const session = await openSerialConsole(port, 115200, null);
+  await session.close();
+  await session.close();
+  assert.equal(attempts, 1);
+});
