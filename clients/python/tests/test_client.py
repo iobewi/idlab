@@ -166,6 +166,8 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(IDLabHTTPError) as denied:
                     await task
                 self.assertEqual((denied.exception.status, denied.exception.code), (502, expected))
+                self.assertEqual(denied.exception.operation['flashState'], 'indeterminate')
+                self.assertEqual(denied.exception.operation['error'], expected)
 
     async def test_generated_recipe_releases_control_even_on_assertion_failure(self):
         agent = await self.connect(console=True)
@@ -319,6 +321,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(IDLabHTTPError) as failed:
                         await task
                     self.assertEqual(failed.exception.code, "flash_erase_verification_failed")
+                    self.assertEqual(failed.exception.operation["flashState"], "mismatch")
         self.assertEqual((await agent.receive_json(timeout=2))["control"], "available")
         history = (await asyncio.to_thread(self.client.identify, "test-board"))
         entries = (await asyncio.to_thread(history.activity))["operations"]

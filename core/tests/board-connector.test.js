@@ -418,11 +418,13 @@ test('programs only the validated bytes, then hashes the actual flash readback',
   const image = {address: 4096, size: 3, sha256: await sha256(firmware)};
   const bad = await program([{...image, sha256: await sha256(stored)}]);
   assert.equal(bad.error, 'device_command_failed');
+  assert.equal(bad.flash_diagnostic.phase, 'prepare');
   assert.equal(writes.length, 0);
   const result = await program([image]);
   assert.deepEqual(writes, [{address: 4096, data: firmware}]);
   assert.deepEqual(result.value, [await sha256(stored)]);
   assert.deepEqual(result.previews, ['010204']);
+  assert.equal(result.flash_diagnostic.phase, 'result');
   assert(progress.some(entry => entry.phase === 'write'));
   assert(progress.some(entry => entry.phase === 'verify'));
   assert.equal(card.mode, 'loader');
@@ -445,6 +447,7 @@ test('program cancellation waits for simulated write and reports recovery', asyn
   release.resolve();
   const terminal = await active;
   assert.equal(terminal.error, 'operation_cancelled');
+  assert.equal(terminal.flash_diagnostic.phase, 'write');
   assert.equal(terminal.recovery_required, true);
   assert.equal(card.busy, false);
 });

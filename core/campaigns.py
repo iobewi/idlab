@@ -105,6 +105,11 @@ class Campaigns:
             for row in self.db.execute("SELECT id, record FROM campaign_operations WHERE finished = 0").fetchall():
                 record = json.loads(row["record"])
                 record.update(state="Échec", detail="Interrompue par le redémarrage du serveur.", finishedAt=timestamp())
+                if record.get("command") in ("flash.program", "flash.erase", "flash.erase.region"):
+                    record.update(flashState="indeterminate", phase=None, error="server_restarted",
+                                  progress=None, recoveryRequired=True, termination="unknown",
+                                  bytesReceived=None, bytesTransferred=None, bytesWritten=None,
+                                  lastOffset=None, bytesPerSecond=None, consoleRestored=None)
                 self.db.execute("UPDATE campaign_operations SET record = ?, finished = 1 WHERE id = ?",
                                 (json.dumps(record), row["id"]))
         self.in_flight = {}

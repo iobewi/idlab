@@ -60,7 +60,7 @@ function renderIdentification() {
   const transport = info?.transport ?? card?.transport;
   const nativeUsb = transport === 'usb_otg' || transport === 'usb_serial_jtag';
   const activeBaud = card?.activeBaud;
-  const rate = card?.observation?.operations.find(entry => entry.bytesPerSecond)?.bytesPerSecond;
+  const rate = card?.observation?.operations.find(entry => entry.command === 'flash.read' && entry.bytesPerSecond)?.bytesPerSecond;
   const boot = card?.boot;
   const chip = boot?.chip?.toUpperCase().replace(/^ESP32(?=[A-Z])/, 'ESP32-');
   const chipHint = [chip, boot?.revision].filter(Boolean).join(' · ');

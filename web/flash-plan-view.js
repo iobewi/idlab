@@ -132,8 +132,15 @@ const errors = {
   invalid_flash_range: 'Les secteurs se chevauchent ou dépassent la capacité de la flash.',
   flash_plan_confirmation_required: 'Le plan doit être validé à nouveau.',
   flash_verification_failed: 'La relecture ne correspond pas au plan. Consulte le détail dans l’historique.',
-  flash_program_failed: 'Programmation interrompue. Consulte le journal avant de réessayer.',
+  flash_program_failed: 'Programmation interrompue. Consulte le diagnostic avant toute nouvelle opération destructive.',
 };
+
+function flashError(error) {
+  if (['indeterminate', 'unverified'].includes(error.operation?.flashState)) {
+    return 'État flash non vérifié. Consulte le diagnostic et privilégie une relecture autorisée avant toute opération destructive.';
+  }
+  return errors[error.code ?? error.message] ?? error.message;
+}
 
 function appendFiles(plan, entries) {
   const files = [...plan.files, ...entries];
@@ -242,7 +249,7 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
         }
         if (card === getSelected()) say('Écriture vérifiée par relecture SHA-256.');
       } catch (error) {
-        if (card === getSelected()) say(errors[error.message] ?? error.message);
+        if (card === getSelected()) say(flashError(error));
       } finally {
         plan.working = false;
         render();
@@ -315,6 +322,8 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
         }
         if (card === getSelected()) say(region ? 'Plage effacée et vérifiée à 0xFF.'
           : 'Effacement intégral vérifié. Tous les octets valent 0xFF.');
+      } catch (error) {
+        if (card === getSelected()) say(flashError(error));
       } finally {
         plan.working = false;
         render();
@@ -376,7 +385,7 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
       plan.generation = generation;
       plan.message = 'Plan validé. Sélectionne Programmer pour confirmer.';
     } catch (error) {
-      plan.message = errors[error.message] ?? error.message;
+      plan.message = flashError(error);
     } finally {
       plan.working = false;
       render();
@@ -403,7 +412,7 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
       const result = await writeImages(card, generation, planId, plan.files, () => card === getSelected());
       plan.message = result.detail;
     } catch (error) {
-      plan.message = errors[error.message] ?? error.message;
+      plan.message = flashError(error);
     } finally {
       plan.working = false;
       render();

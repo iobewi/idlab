@@ -44,6 +44,8 @@ class Operation:
     binaries: list[bytes] | None = None
     read_address: int | None = None
     read_progress: dict | None = None
+    flash_record: dict | None = None
+    flash_progress: dict | None = None
     agent_disconnected: bool = False
     task: asyncio.Task | None = None
     cancel_requested_at: str | None = None
@@ -617,6 +619,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                                 not 0 <= progress["received"] <= progress["total"] <= MAX_FLASH):
                             break
                         board.progress = progress | {"source": pending.source, "session_id": pending.session_id}
+                        if pending.flash_record is not None:
+                            candidate = flash_progress(pending.flash_record, progress)
+                            if candidate is not None:
+                                pending.flash_progress = candidate
                         previous = pending.read_progress
                         if (progress["address"] == pending.read_address and progress["total"] == pending.size and
                                 (previous is None or progress["received"] >= previous["received"])):
@@ -689,6 +695,68 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return problem(403, control.stopped)
         return None
 
+    def flash_progress(record, progress):
+        if not isinstance(progress, dict):
+            return None
+        phase = progress.get("phase")
+        program = record["command"] == "flash.program"
+        if phase not in (("write", "verify") if program else ("erase", "erase-verify")):
+            return None
+        address, received, total = (progress.get(k) for k in ("address", "received", "total"))
+        if any(type(v) is not int for v in (address, received, total)):
+            return None
+        if total != record["size"] or not 0 <= received <= total:
+            return None
+        valid_addresses = [image["address"] for image in record["images"]] if program else [record["address"]]
+        if address not in valid_addresses:
+            return None
+        clean = {"phase": phase, "address": address, "received": received, "total": total}
+        index, count = progress.get("imageIndex"), progress.get("imageReceived")
+        if program and phase == "verify" and type(index) is int and 0 <= index < len(record["images"]):
+            image = record["images"][index]
+            if (image["address"] == address and type(count) is int and 0 <= count <= image["size"]
+                    and received == sum(item["size"] for item in record["images"][:index]) + count):
+                clean["lastOffset"] = address + count
+        elif not program and phase == "erase-verify":
+            clean["lastOffset"] = address + received
+        return clean
+
+    def record_flash_diagnostic(operation, record, success):
+        response = operation.future.result() if operation.future.done() and not operation.future.cancelled() else None
+        response = response if isinstance(response, dict) else {}
+        diagnostic = response.get("flash_diagnostic")
+        diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
+        progress = flash_progress(record, diagnostic.get("progress")) or operation.flash_progress
+        phase = diagnostic.get("phase")
+        allowed = ("prepare", "write", "verify", "result") if record["command"] == "flash.program" else (
+            "prepare", "erase", "erase-verify", "result")
+        if phase not in allowed or (phase == "prepare" and progress is not None):
+            phase = progress["phase"] if progress else None
+        if success or "verification" in record:
+            phase = "result"
+            state = "verified" if success else "mismatch"
+        elif phase == "prepare" and response.get("error") and not record.get("recoveryRequired"):
+            state = "unchanged"
+        elif phase in ("verify", "erase-verify"):
+            state = "unverified"
+        else:
+            state = "indeterminate"
+        received = diagnostic.get("bytes_received")
+        if type(received) is not int or not 0 <= received <= record["size"]:
+            received = None
+        restored = response.get("console_restored")
+        record.update(phase=phase, flashState=state, progress=progress,
+                      bytesReceived=received, bytesTransferred=None, bytesWritten=None,
+                      lastOffset=progress.get("lastOffset") if progress else None,
+                      bytesPerSecond=None, consoleRestored=restored if type(restored) is bool else None)
+        if not success:
+            agent_error = agent_error_code(response.get("error"))
+            record.setdefault("error", agent_error or "operation_cancelled" if operation.cancelled else
+                              agent_error or ("agent_disconnected" if operation.agent_disconnected else "device_command_failed"))
+            if agent_error and agent_error != record["error"]:
+                record["agentError"] = agent_error
+            record["detail"] = f"{record.get('detail', 'Opération flash en échec.')} · {record['error']} · état flash : {state}"
+
     def start_operation(request, board, name, command, fields, campaign_id):
         if request[LOCAL_OPERATOR]:
             source = "web"
@@ -700,6 +768,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         record = {"id": operation.id, "device": name, "command": command, "state": "En cours",
                   "startedAt": datetime.now(timezone.utc).isoformat(), "source": source,
                   "session_id": session_id, **fields}
+        if command in ("flash.program", "flash.erase", "flash.erase.region"):
+            operation.flash_record = record
+            record.update(generation=board.generation, phase=None, flashState="indeterminate")
         if campaign_id:
             record.update(campaign_id=campaign_id, generation=board.generation)
             owners = [request[OWNER]]
@@ -730,6 +801,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                                          else "completed" if response is not None else "unknown")
                 record["recoveryRequired"] = (record["termination"] == "unknown" or
                                               isinstance(response, dict) and response.get("recovery_required") is True)
+        if operation and operation.flash_record is not None:
+            record_flash_diagnostic(operation, record, result)
         if record.get("recoveryRequired"):
             recovery_keys.add(request[BOARD_KEY])
             board.recovery_required = True
@@ -749,10 +822,23 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         record["duration"] = f"{round(1000 * elapsed)} ms"
         if result and record["command"] == "flash.read" and elapsed > 0:
             record["bytesPerSecond"] = round(record["bytesRead"] / elapsed)
+        if operation and operation.flash_record is not None:
+            board.log(record.get("detail", record["state"]), record["source"], record["session_id"])
         board.progress = board.pending = None
         if "campaign_id" in record:
             request.app[CAMPAIGNS].leave(record["campaign_id"], record)
         await refresh_recovery(request.app[CAMPAIGNS])
+
+    def flash_failure(record, status, code, detail=None):
+        record["error"] = code
+        if detail:
+            record["detail"] = detail
+        return problem(status, code)
+
+    def enrich_flash_failure(response, record):
+        if response is not None:
+            response.body = json.dumps({"error": record["error"], "detail": record["detail"],
+                                        "operation": record}).encode("utf-8")
 
     async def device_command(request):
         try:
@@ -813,6 +899,15 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         if erase:
             board.program_plan = None
         complete = False
+        failure_response = None
+
+        def failure(status, code, detail=None):
+            nonlocal failure_response
+            if erase:
+                failure_response = flash_failure(record, status, code, detail)
+                return failure_response
+            return web.json_response({"error": code, "detail": detail}, status=status) if detail else problem(status, code)
+
         try:
             message = {"id": operation.id, "command": command}
             if command == "uart.write":
@@ -826,31 +921,31 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             if isinstance(result, dict) and result.get("recovery_required") is True:
                 await board.socket.close(code=1011)
             if control and control.stopped:
-                return problem(403, control.stopped)
+                return failure(403, control.stopped)
             if operation.cancelled:
                 record["detail"] = "Arrêt demandé par l’opérateur."
-                return problem(409, "operation_cancelled")
+                return failure(409, "operation_cancelled")
             if not isinstance(result, dict):
-                return problem(502, "device_session_changed")
+                return failure(502, "device_session_changed")
             if result.get("error"):
                 code = agent_error_code(result.get("error")) or "device_command_failed"
                 detail = result.get("detail")
                 if (erase or command in ("mode.loader", "identify")) and isinstance(detail, str) and detail:
                     record["detail"] = detail[:500]
-                    return web.json_response({"error": code, "detail": record["detail"]}, status=agent_error_status(code))
-                return problem(agent_error_status(code), code)
+                    return failure(agent_error_status(code), code, record["detail"])
+                return failure(agent_error_status(code), code)
             value = result.get("value")
             if erase:
                 if (not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
                         value["address"] != address or value["size"] != size):
-                    return problem(502, "flash_erase_verification_incomplete")
+                    return failure(502, "flash_erase_verification_incomplete")
                 first = value["first_non_ff"]
                 if first is not None and (type(first) is not int or not address <= first < address + size):
-                    return problem(502, "flash_erase_verification_incomplete")
+                    return failure(502, "flash_erase_verification_incomplete")
                 record["verification"] = value
                 if first is not None:
                     record["detail"] = f"Premier octet différent de 0xFF à 0x{first:x}."
-                    return web.json_response({"error": "flash_erase_verification_failed", "detail": record["detail"]}, status=502)
+                    return failure(502, "flash_erase_verification_failed", record["detail"])
                 record["detail"] = ("Effacement de la zone vérifié. Tous les octets valent 0xFF." if region_erase
                                     else "Effacement intégral vérifié. Tous les octets valent 0xFF.")
             if command == "rom.jedec":
@@ -861,12 +956,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         except TimeoutError:
             record["detail"] = "Le connecteur n’a pas répondu à temps."
             await board.socket.close(code=1011)
-            return problem(504, "device_command_timeout")
+            return failure(504, "device_command_timeout")
         except ConnectionError:
             await board.socket.close(code=1011)
-            return problem(502, "device_session_changed")
+            return failure(502, "device_session_changed")
         finally:
             await finish_operation(request, board, record, started, complete)
+            enrich_flash_failure(failure_response, record)
             if control and control.stopped and board.control is control:
                 board.control = None
                 await publish_control(board, key)
@@ -1130,54 +1226,65 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         control = board.control
         total = sum(image["size"] for image in plan.images)
         operation, record, started = start_operation(
-            request, board, key[1], "flash.program", {"images": plan.images}, operation_campaign(payload),
+            request, board, key[1], "flash.program", {"images": plan.images, "size": total,
+                "address": plan.images[0]["address"] if len(plan.images) == 1 else None}, operation_campaign(payload),
         )
         board.program_plan = None
         operation.binaries = binaries
         complete = False
+        failure_response = None
+
+        def failure(status, code):
+            nonlocal failure_response
+            failure_response = flash_failure(record, status, code)
+            return failure_response
+
         try:
             await board.socket.send_json({"id": operation.id, "command": "flash.program", "images": plan.images})
             result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=read_timeout * 2 * (1 + (total - 1) // MAX_READ))
             if isinstance(result, dict) and result.get("recovery_required") is True:
                 await board.socket.close(code=1011)
             if control and control.stopped:
-                return problem(403, control.stopped)
+                return failure(403, control.stopped)
             if operation.cancelled:
-                return problem(409, "operation_cancelled")
+                return failure(409, "operation_cancelled")
             if not isinstance(result, dict) or result.get("error"):
                 if isinstance(result, dict) and isinstance(result.get("detail"), str):
                     record["detail"] = result["detail"][:500]
                 code = agent_error_code(result.get("error")) if isinstance(result, dict) else None
-                return problem(agent_error_status(code), code or "flash_program_failed")
+                return failure(agent_error_status(code), code or "flash_program_failed")
             digests = result.get("value")
             if not isinstance(digests, list) or len(digests) != len(plan.images) or any(
                     not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests):
-                return problem(502, "flash_program_failed")
+                return failure(502, "flash_program_failed")
             verification = [image | {"readback_sha256": digest, "matches": digest == image["sha256"]}
                             for image, digest in zip(plan.images, digests, strict=True)]
             if "previews" in result:
                 previews = result["previews"]
                 if not isinstance(previews, list) or len(previews) != len(verification):
-                    return problem(502, "flash_program_failed")
+                    return failure(502, "flash_program_failed")
                 for image, preview, binary in zip(verification, previews, binaries, strict=True):
                     length = min(image["size"], 256) * 2
                     if not isinstance(preview, str) or len(preview) != length or not re.fullmatch(r"[0-9a-f]+", preview):
-                        return problem(502, "flash_program_failed")
+                        return failure(502, "flash_program_failed")
                     image["readback_preview"] = preview
                     image["matches"] = image["matches"] and preview == binary[:256].hex()
             record["verification"] = verification
             complete = all(image["matches"] for image in verification)
+            if not complete:
+                record["error"] = "flash_verification_failed"
             record["detail"] = "Écriture vérifiée par relecture SHA-256." if complete else "La relecture diffère du binaire attendu."
         except TimeoutError:
             record["detail"] = "Le connecteur n’a pas répondu à temps."
             await board.socket.close(code=1011)
-            return problem(504, "flash_program_timeout")
+            return failure(504, "flash_program_timeout")
         except ConnectionError:
             operation.agent_disconnected = True
             await board.socket.close(code=1011)
-            return problem(502, "flash_program_failed")
+            return failure(502, "flash_program_failed")
         finally:
             await finish_operation(request, board, record, started, complete)
+            enrich_flash_failure(failure_response, record)
             if control and control.stopped and board.control is control:
                 board.control = None
                 await publish_control(board, key)

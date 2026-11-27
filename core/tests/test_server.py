@@ -671,7 +671,10 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                                        "recovery_required": True})
                 self.assertEqual((await agent.receive(timeout=2)).type.name, "CLOSE")
                 response = await active
-                self.assertEqual((response.status, await response.json()), (409, {"error": "operation_cancelled"}))
+                body = await response.json()
+                self.assertEqual((response.status, body["error"]), (409, "operation_cancelled"))
+                self.assertEqual(body["operation"]["flashState"], "indeterminate")
+                self.assertTrue(body["operation"]["recoveryRequired"])
                 fresh, new_generation = await self.board(name, mac="10:20:30:40:50:61" if name == "program" else "10:20:30:40:50:60")
                 blocked = await self.read(name, new_generation)
                 self.assertEqual((blocked.status, await blocked.json()), (409, {"error": "device_recovery_required"}))

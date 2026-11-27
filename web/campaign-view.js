@@ -57,7 +57,7 @@ function row(campaign) {
       const data = await response.json();
       operationsTitle.textContent = data.items.length + ' / ' + data.total + ' opérations récentes';
       operations.replaceChildren(...data.items.map(entry =>
-        element('li', entry.device + ' · ' + entry.command + ' · ' + entry.state + (entry.duration ? ' · ' + entry.duration : ''))));
+        element('li', entry.device + ' · ' + entry.command + ' · ' + entry.state + (entry.duration ? ' · ' + entry.duration : '') + (entry.error ? ' · ' + entry.error : '') + (entry.flashState ? ' · ' + entry.flashState : ''))));
     } catch (error) {
       operationsTitle.textContent = error.message;
     }

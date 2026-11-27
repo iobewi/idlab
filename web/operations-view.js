@@ -39,7 +39,7 @@ function operationDetails(entry) {
   actions.append(copy, save);
   toolbar.append(element('span', ['Détail de l’opération', operationOrigin(entry)].filter(Boolean).join(' · ')), actions);
   panel.append(toolbar);
-  if (entry.command === 'flash.read' && entry.error && entry.detail) {
+  if (entry.command.startsWith('flash.') && entry.error && entry.detail) {
     panel.append(element('p', entry.detail, 'hint padded'));
   }
   panel.append(element('pre', proof, 'operation-detail-json result'));

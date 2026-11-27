@@ -78,7 +78,7 @@ export function renderFlashProgress(card) {
   line.hidden = !progress;
   if (progress) {
     const {address, received, total, phase} = progress;
-    const labels = {write: 'Programmation flash', verify: 'Vérification flash', 'erase-verify': 'Vérification de l’effacement'};
+    const labels = {write: 'Programmation flash (progression estimée)', verify: 'Vérification flash', 'erase-verify': 'Vérification de l’effacement'};
     const label = labels[phase] ?? 'Lecture flash';
     const message = phase === 'erase' ? 'Effacement flash à 0x' + address.toString(16) + ' · ' +
       number.format(total) + ' octets…' : label + ' à 0x' + address.toString(16) + ' · ' +
