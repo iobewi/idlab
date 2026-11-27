@@ -1227,11 +1227,13 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             payload = await request.json()
         except (TypeError, ValueError):
             return problem(400, "invalid_json")
-        if not isinstance(payload, dict) or payload.keys() != {"generation", "images"}:
+        required = {"generation", "images"}
+        if not isinstance(payload, dict) or not required <= payload.keys() <= required | {"campaign_id"}:
             return problem(400, "invalid_arguments")
         board, refusal = programming_board(request, payload["generation"], allow_console=True)
         if refusal is not None:
             return refusal
+        campaign_id = operation_campaign(payload)
         images = payload["images"]
         if "mode.loader" in board.identity["capabilities"]:
             try:
@@ -1240,7 +1242,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 return problem(400, str(error))
             control = board.control
             key = request[BOARD_KEY]
-            operation, record, started = start_operation(request, board, key[1], "mode.loader", {}, None)
+            operation, record, started = start_operation(request, board, key[1], "flash.prepare", {}, campaign_id)
             complete = False
             try:
                 await board.socket.send_json({"id": operation.id, "command": "mode.loader"})
