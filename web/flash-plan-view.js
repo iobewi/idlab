@@ -299,10 +299,7 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
       plan.working = true;
       render();
       try {
-        if (canOpenLoader(card)) await card.enterLoader();
-        if (card.identity?.generation !== generation || card !== getSelected()) throw new Error('La carte ou sa session a changé.');
-        if (!card.identity.capabilities.includes(eraseCapability(region))) throw new Error('Effacement indisponible pour cette carte.');
-        if (region && !validRegion(card, region)) throw new Error('La plage dépasse la capacité mesurée.');
+        // The server reserves the operation; the connector validates actual stub capabilities.
         card.dump = null;
         if (!region) {
           card.partitions = null;
