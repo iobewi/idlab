@@ -904,7 +904,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 fields.update(("address", "size"))
             if payload.get("confirmation") != request.match_info["name"]:
                 return problem(400, "flash_erase_confirmation_required")
-        elif command not in ("mode.loader", "mode.console", "console.reset", "rom.jedec", "identify"):
+        elif command not in ("mode.loader", "mode.console", "console.reset", "rom.jedec", "identify", "flash.prepare"):
             return problem(409, "operation_unsupported")
         if not fields <= payload.keys() <= fields | {"campaign_id"}:
             return problem(400, "invalid_arguments")
@@ -921,7 +921,10 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return problem(409, "device_busy")
         capabilities = board.identity["capabilities"]
         automatic_erase = erase and "mode.loader" in capabilities
-        if command not in capabilities and not automatic_erase:
+        prepare = command == "flash.prepare"
+        if prepare and "flash.program" in capabilities:
+            return web.json_response(board.describe() | {"result": None})
+        if command not in capabilities and not automatic_erase and not (prepare and "mode.loader" in capabilities):
             return problem(409, "operation_unsupported")
         control = board.control
         record_fields = {}
@@ -949,7 +952,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return web.json_response({"error": code, "detail": detail}, status=status) if detail else problem(status, code)
 
         try:
-            message = {"id": operation.id, "command": command}
+            message = {"id": operation.id, "command": "mode.loader" if prepare else command}
             if command == "uart.write":
                 message["hex"] = payload["hex"]
             elif command == "mode.rom":
@@ -975,6 +978,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                     return failure(agent_error_status(code), code, record["detail"])
                 return failure(agent_error_status(code), code)
             value = result.get("value")
+            if prepare and "flash.program" not in board.identity["capabilities"]:
+                return failure(409, "operation_unsupported")
             if erase:
                 size = record["size"]
                 if (command not in board.identity["capabilities"] or type(size) is not int or
