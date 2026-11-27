@@ -421,16 +421,29 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
 
     async def refresh_recovery(storage, *, exclude=None):
         changed = []
+        active = {key for key, live in boards.items() if live.pending}
         for key, board in boards.items():
-            if board is exclude or board.pending or not board.recovery_required:
+            if board is exclude:
                 continue
             matched, uncertain = recovery_candidates(storage, key, board)
-            required = bool(matched or uncertain or key in finalizing)
+            # Live operation intents are not unresolved terminations. A detached
+            # generation, in contrast, must remain fenced until finalized.
+            required = bool((matched - active) or uncertain or key in finalizing)
+            if board.pending and board.recovery_required:
+                # Never release a recovery fence while hardware is still active.
+                required = True
             if required != board.recovery_required:
                 board.recovery_required = required
                 changed.append((key, board))
+        # Set all fences before the first await, then stop existing grants and
+        # request cooperative cancellation without releasing active operations.
         for key, board in changed:
-            await publish_control(board, key)
+            if board.recovery_required and board.control:
+                await stop_control(key, board, board.control, "device_recovery_required")
+            elif board.recovery_required and board.pending:
+                await request_operation_stop(key, board)
+            else:
+                await publish_control(board, key)
 
     async def manage_control(request):
         if not request[LOCAL_OPERATOR]:
@@ -738,7 +751,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         board.progress = board.pending = None
         if "campaign_id" in record:
             request.app[CAMPAIGNS].leave(record["campaign_id"], record)
-        await refresh_recovery(request.app[CAMPAIGNS], exclude=board)
+        await refresh_recovery(request.app[CAMPAIGNS])
 
     async def device_command(request):
         try:
