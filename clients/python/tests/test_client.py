@@ -309,9 +309,11 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await self.connect()
         fresh = await asyncio.to_thread(self.client.identify, "test-board")
         self.assertNotEqual(old.generation, fresh.generation)
-        with self.assertRaises(IDLabHTTPError) as caught:
-            await asyncio.to_thread(old.read_flash, 0, 4)
-        self.assertEqual((caught.exception.status, caught.exception.code), (409, "device_session_changed"))
+        for method, args in ((old.read_flash, (0, 4)), (old.refresh, ()),
+                             (old.read_uart, ()), (old.activity, ())):
+            with self.assertRaises(IDLabHTTPError) as caught:
+                await asyncio.to_thread(method, *args)
+            self.assertEqual((caught.exception.status, caught.exception.code), (409, "device_session_changed"))
 
     async def test_erase_requires_confirmation_and_rejects_nonblank_readback(self):
         agent = await self.connect(erasable=True)
@@ -367,6 +369,13 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                     {"chipFamily": "ESP32-S3", "parts": [{"path": "app.bin", "offset": 4096}]},
                 ]}), encoding="utf-8")
                 preparing = asyncio.create_task(asyncio.to_thread(console.prepare_flash_manifest, path))
+                identification = await agent.receive_json(timeout=2)
+                self.assertEqual(identification["command"], "identify")
+                await agent.send_json({"identity": loader})
+                measured = (await agent.receive_json(timeout=2))["identity"]
+                await agent.send_json({"identity": {"mode": "console", "transport": "usb_uart"}})
+                await agent.receive_json(timeout=2)
+                await agent.send_json({"result": identification["id"], "value": measured})
                 await switch("mode.loader", loader)
                 plan, binaries = await preparing
                 self.assertEqual((plan["images"][0]["address"], binaries), (4096, [b"firmware"]))
@@ -375,15 +384,16 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             console = await back
             erase = asyncio.create_task(asyncio.to_thread(console.erase_flash_region, 4096, 4096,
                                                           confirmation=console.name))
-            await switch("mode.loader", loader)
             request = await agent.receive_json(timeout=2)
             self.assertEqual((request["command"], request["address"], request["size"]), ("flash.erase.region", 4096, 4096))
+            await agent.send_json({"identity": loader})
+            await agent.receive_json(timeout=2)
             verified = {"address": 4096, "size": 4096, "first_non_ff": None}
             await agent.send_json({"result": request["id"], "value": verified})
             self.assertEqual(await erase, verified)
         history = await asyncio.to_thread(self.client.campaign_operations, campaign["id"])
         self.assertCountEqual([entry["command"] for entry in history["items"]],
-                              ["mode.loader", "mode.console", "mode.loader", "flash.erase.region"])
+                              ["identify", "mode.console", "flash.erase.region"])
 
     async def test_erase_region_requires_exact_sector_bounds(self):
         agent = await self.connect(erasable=True)
