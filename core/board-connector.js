@@ -405,7 +405,7 @@ export class BoardConnector {
       const now = performance.now();
       if (!force && received < total && now - lastUpdate < 250) return;
       lastUpdate = now;
-      socket.send(JSON.stringify({id, progress: {phase, address, received, total}}));
+      socket.send(JSON.stringify({id, progress: diagnostic.progress}));
     };
     for (const [index, image] of images.entries()) {
       check();
@@ -421,17 +421,20 @@ export class BoardConnector {
     for (const {size} of images) offsets.push(offsets.at(-1) + size);
     check();
     // An interrupted write or readback can leave the stub in a transfer.
-    this.flashTransferInterrupted = true;
-    progress('write', images[0].address, 0, true);
     await this.session.programFlash(files, check, (index, sent, compressed) => {
       const {address, size} = images[index];
-      progress('write', address, offsets[index] + Math.floor(size * sent / compressed), false, index);
+      if (Number.isFinite(compressed) && compressed > 0 && Number.isFinite(sent) && sent >= 0 && sent <= compressed) {
+        progress('write', address, offsets[index] + Math.floor(size * sent / compressed), false, index);
+      }
+    }, () => {
+      this.flashTransferInterrupted = true;
+      progress('write', images[0].address, 0, true, 0);
     });
     this.#log('Programmation terminée · relecture SHA-256');
     const digests = [];
     const previews = [];
-    progress('verify', images[0].address, 0, true);
     for (const [index, {address, size}] of images.entries()) {
+      progress('verify', address, offsets[index], true, index, 0);
       const readback = new Uint8Array(size);
       for (let offset = 0; offset < size; offset += MAX_FLASH_READ) {
         check();
@@ -464,11 +467,13 @@ export class BoardConnector {
       lastUpdate = now;
       socket.send(JSON.stringify({id, progress: {phase, address, received, total}}));
     };
-    this.flashTransferInterrupted = true;
     this.#log(region ? 'Effacement de la zone flash · vérification par relecture'
       : 'Effacement intégral · vérification de tous les octets après effacement');
     const result = await this.session.eraseFlash(check, received => progress('erase-verify', received), region,
-      phase => progress(phase, 0));
+      phase => {
+        if (phase === 'erase') this.flashTransferInterrupted = true;
+        progress(phase, 0);
+      });
     this.flashTransferInterrupted = false;
     diagnostic.phase = 'result';
     return result;

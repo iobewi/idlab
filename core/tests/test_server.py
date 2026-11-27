@@ -683,6 +683,48 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(recovered.status, 200)
                 await fresh.close()
 
+    async def test_program_diagnostic_validates_multi_image_progress_and_result(self):
+        agent = await self.browser.ws_connect("/agent?device=program", headers=self.local)
+        await agent.send_json({"chip": "esp32s3", "mac": "10:20:30:40:50:60",
+            "loader": "stub", "transport": "usb_uart", "flash_size": 16 * 1024 * 1024,
+            "programmable": True})
+        generation = (await agent.receive_json(timeout=2))["generation"]
+        path = "/api/v1/devices/program"
+        binaries = [b"abcd", b"efgh"]
+        images = [{"address": address, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                  for address, data in zip((4096, 16384), binaries)]
+        for malformed in (False, True):
+            plan = await self.browser.post(path + "/flash/plan", headers=self.local,
+                json={"generation": generation, "images": images})
+            self.assertEqual(plan.status, 201)
+            active = asyncio.create_task(self.browser.post(path + "/flash/program", headers=self.local,
+                json={"generation": generation, "plan_id": (await plan.json())["plan_id"],
+                      "binaries": [base64.b64encode(data).decode() for data in binaries]}))
+            command = await agent.receive_json(timeout=2)
+            progress = {"phase": "verify", "address": 16384, "received": 6, "total": 8,
+                        "imageIndex": 1, "imageReceived": 2}
+            await agent.send_json({"id": command["id"], "progress": progress})
+            await agent.send_json({"id": command["id"], "progress": progress | {"received": 5, "imageReceived": 1}})
+            if malformed:
+                await agent.send_json({"result": command["id"], "value": ["invalid"]})
+            else:
+                await agent.send_json({"result": command["id"], "error": "serial_timeout",
+                    "flash_diagnostic": {"phase": "prepare", "progress": progress | {"imageReceived": 99},
+                                         "bytes_received": 8}})
+            response = await active
+            self.assertEqual(response.status, 502)
+            body = await response.json()
+            record = body["operation"]
+            self.assertEqual(record["phase"], "result" if malformed else "verify")
+            self.assertEqual(record["flashState"], "indeterminate" if malformed else "unverified")
+            self.assertEqual(record["lastOffset"], 16386)
+            self.assertEqual(record["progress"]["received"], 6)
+            self.assertIsNone(record["bytesReceived"])
+            self.assertIsNone(record["bytesWritten"])
+            observed = await self.browser.get(path + "/activity?generation=" + generation, headers=self.local)
+            self.assertEqual((await observed.json())["operations"][0], record)
+        await agent.close()
+
     async def test_recovery_follows_renamed_card_and_preserves_distinct_board(self):
         old, generation = await self.board("old")
         read = asyncio.create_task(self.read("old", generation))

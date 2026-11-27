@@ -142,9 +142,10 @@ export class EspDriver {
     return data;
   }
 
-  async programFlash(images, checkSession, onProgress) {
+  async programFlash(images, checkSession, onProgress, onWrite = () => {}) {
     if (!this.loader.IS_STUB || !this.identity?.flash_size) throw new Error('operation_unsupported');
     checkSession();
+    onWrite();
     await this.loader.writeFlash({
       fileArray: images, flashSize: 'keep', flashMode: 'keep', flashFreq: 'keep',
       eraseAll: false, compress: true,

@@ -389,7 +389,8 @@ class IDLabClient:
             payload = None
             with error:
                 try:
-                    payload = json.loads(error.read(65537))
+                    raw = error.read(65537)
+                    payload = json.loads(raw) if len(raw) <= 65536 else None
                     code = payload.get("error") if isinstance(payload, dict) else None
                 except (ValueError, OSError, http.client.HTTPException):
                     code = None

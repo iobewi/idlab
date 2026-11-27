@@ -46,6 +46,7 @@ class Operation:
     read_progress: dict | None = None
     flash_record: dict | None = None
     flash_progress: dict | None = None
+    flash_images_served: set = field(default_factory=set)
     agent_disconnected: bool = False
     task: asyncio.Task | None = None
     cancel_requested_at: str | None = None
@@ -621,7 +622,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                         board.progress = progress | {"source": pending.source, "session_id": pending.session_id}
                         if pending.flash_record is not None:
                             candidate = flash_progress(pending.flash_record, progress)
-                            if candidate is not None:
+                            if candidate is not None and progress_advances(pending.flash_progress, candidate):
                                 pending.flash_progress = candidate
                         previous = pending.read_progress
                         if (progress["address"] == pending.read_address and progress["total"] == pending.size and
@@ -712,47 +713,76 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return None
         clean = {"phase": phase, "address": address, "received": received, "total": total}
         index, count = progress.get("imageIndex"), progress.get("imageReceived")
-        if program and phase == "verify" and type(index) is int and 0 <= index < len(record["images"]):
+        if program:
+            if type(index) is not int or not 0 <= index < len(record["images"]):
+                return None
             image = record["images"][index]
-            if (image["address"] == address and type(count) is int and 0 <= count <= image["size"]
-                    and received == sum(item["size"] for item in record["images"][:index]) + count):
+            before = sum(item["size"] for item in record["images"][:index])
+            if image["address"] != address or not before <= received <= before + image["size"]:
+                return None
+            clean["imageIndex"] = index
+            if phase == "verify":
+                if type(count) is not int or count != received - before:
+                    return None
+                clean["imageReceived"] = count
                 clean["lastOffset"] = address + count
-        elif not program and phase == "erase-verify":
+        elif phase == "erase-verify":
             clean["lastOffset"] = address + received
+        elif received != 0:
+            return None
         return clean
+
+    def progress_advances(previous, candidate):
+        if previous is None:
+            return True
+        ranks = {"write": 0, "erase": 0, "verify": 1, "erase-verify": 1}
+        return (ranks[candidate["phase"]], candidate["received"], candidate.get("imageIndex", 0)) >= (
+            ranks[previous["phase"]], previous["received"], previous.get("imageIndex", 0))
 
     def record_flash_diagnostic(operation, record, success):
         response = operation.future.result() if operation.future.done() and not operation.future.cancelled() else None
         response = response if isinstance(response, dict) else {}
         diagnostic = response.get("flash_diagnostic")
         diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
-        progress = flash_progress(record, diagnostic.get("progress")) or operation.flash_progress
+        progress = operation.flash_progress
+        terminal_progress = flash_progress(record, diagnostic.get("progress"))
+        if terminal_progress is not None and progress_advances(progress, terminal_progress):
+            progress = terminal_progress
         phase = diagnostic.get("phase")
         allowed = ("prepare", "write", "verify", "result") if record["command"] == "flash.program" else (
             "prepare", "erase", "erase-verify", "result")
-        if phase not in allowed or (phase == "prepare" and progress is not None):
+        if (phase not in allowed or
+                (phase == "prepare" and (progress is not None or diagnostic.get("progress") is not None)) or
+                (phase not in ("prepare", "result") and (progress is None or phase != progress["phase"])) or
+                (phase == "result" and (progress is None or progress["phase"] not in ("verify", "erase-verify")
+                                        or progress["received"] != record["size"]))):
             phase = progress["phase"] if progress else None
+        if record.get("resultInvalid"):
+            phase = "result"
         if success or "verification" in record:
             phase = "result"
             state = "verified" if success else "mismatch"
-        elif phase == "prepare" and response.get("error") and not record.get("recoveryRequired"):
+        elif (phase == "prepare" and agent_error_code(response.get("error")) and
+              record.get("termination") in ("completed", "cancelled") and not record.get("recoveryRequired")):
             state = "unchanged"
         elif phase in ("verify", "erase-verify"):
             state = "unverified"
         else:
             state = "indeterminate"
+        offered = (sum(record["images"][i]["size"] for i in operation.flash_images_served)
+                   if record["command"] == "flash.program" else None)
         received = diagnostic.get("bytes_received")
-        if type(received) is not int or not 0 <= received <= record["size"]:
+        if type(received) is not int or offered is None or not 0 <= received <= offered:
             received = None
         restored = response.get("console_restored")
         record.update(phase=phase, flashState=state, progress=progress,
-                      bytesReceived=received, bytesTransferred=None, bytesWritten=None,
+                      bytesReceived=received, bytesTransferred=None, bytesOffered=offered, bytesWritten=None,
                       lastOffset=progress.get("lastOffset") if progress else None,
                       bytesPerSecond=None, consoleRestored=restored if type(restored) is bool else None)
         if not success:
             agent_error = agent_error_code(response.get("error"))
-            record.setdefault("error", agent_error or "operation_cancelled" if operation.cancelled else
-                              agent_error or ("agent_disconnected" if operation.agent_disconnected else "device_command_failed"))
+            record.setdefault("error", "agent_disconnected" if operation.agent_disconnected else
+                              "operation_cancelled" if operation.cancelled else agent_error or "device_command_failed")
             if agent_error and agent_error != record["error"]:
                 record["agentError"] = agent_error
             record["detail"] = f"{record.get('detail', 'Opération flash en échec.')} · {record['error']} · état flash : {state}"
@@ -822,6 +852,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         record["duration"] = f"{round(1000 * elapsed)} ms"
         if result and record["command"] == "flash.read" and elapsed > 0:
             record["bytesPerSecond"] = round(record["bytesRead"] / elapsed)
+        if operation and operation.flash_record is not None and result and elapsed > 0:
+            record["verifiedBytesPerSecond"] = round(record["size"] / elapsed)
         if operation and operation.flash_record is not None:
             board.log(record.get("detail", record["state"]), record["source"], record["session_id"])
         board.progress = board.pending = None
@@ -938,9 +970,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             if erase:
                 if (not isinstance(value, dict) or value.keys() != {"address", "size", "first_non_ff"} or
                         value["address"] != address or value["size"] != size):
+                    record["resultInvalid"] = True
                     return failure(502, "flash_erase_verification_incomplete")
                 first = value["first_non_ff"]
                 if first is not None and (type(first) is not int or not address <= first < address + size):
+                    record["resultInvalid"] = True
                     return failure(502, "flash_erase_verification_incomplete")
                 record["verification"] = value
                 if first is not None:
@@ -1199,6 +1233,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         index = int(request.match_info["index"])
         if index >= len(operation.binaries):
             return problem(404, "flash_image_not_found")
+        operation.flash_images_served.add(index)
         return web.Response(body=operation.binaries[index], content_type="application/octet-stream")
 
     async def program_flash(request):
@@ -1256,16 +1291,19 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             digests = result.get("value")
             if not isinstance(digests, list) or len(digests) != len(plan.images) or any(
                     not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests):
+                record["resultInvalid"] = True
                 return failure(502, "flash_program_failed")
             verification = [image | {"readback_sha256": digest, "matches": digest == image["sha256"]}
                             for image, digest in zip(plan.images, digests, strict=True)]
             if "previews" in result:
                 previews = result["previews"]
                 if not isinstance(previews, list) or len(previews) != len(verification):
+                    record["resultInvalid"] = True
                     return failure(502, "flash_program_failed")
                 for image, preview, binary in zip(verification, previews, binaries, strict=True):
                     length = min(image["size"], 256) * 2
                     if not isinstance(preview, str) or len(preview) != length or not re.fullmatch(r"[0-9a-f]+", preview):
+                        record["resultInvalid"] = True
                         return failure(502, "flash_program_failed")
                     image["readback_preview"] = preview
                     image["matches"] = image["matches"] and preview == binary[:256].hex()
@@ -1291,7 +1329,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             elif operation.cancelled and not control:
                 await publish_control(board, key)
         if not complete:
-            return web.json_response({"error": "flash_verification_failed", "operation": record}, status=502)
+            return web.json_response({"error": "flash_verification_failed", "detail": record["detail"], "operation": record}, status=502)
         return web.json_response(record)
 
     async def identify(request):
