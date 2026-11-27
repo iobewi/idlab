@@ -3,6 +3,7 @@ from io import BytesIO
 from urllib.error import HTTPError
 from contextlib import asynccontextmanager
 import hashlib
+from importlib.metadata import version
 import json
 import os
 from pathlib import Path
@@ -15,13 +16,21 @@ from unittest.mock import Mock, patch
 
 from aiohttp import ClientSession, ClientWSTimeout, CookieJar, web
 
-from idlab_client import IDLabClient, IDLabError, IDLabHTTPError
+from idlab_client import IDLabClient, IDLabError, IDLabHTTPError, __version__
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "core"))
 from server import create_app
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_installed_version_matches_cli_without_configuration(self):
+        self.assertEqual(__version__, version("idlab-client"))
+        env = {k: v for k, v in os.environ.items() if not k.startswith("IDLAB_")}
+        with TemporaryDirectory() as project:
+            result = subprocess.run(["idlab", "--version"], cwd=project, env=env,
+                                    check=True, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.stdout.strip(), f"idlab {__version__}")
+
     def test_uncertain_hardware_request_invalidates_control_even_if_caught(self):
         for failure, expected in ((TimeoutError("timeout"), IDLabError),
                                   (KeyboardInterrupt(), KeyboardInterrupt)):
@@ -116,6 +125,27 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             yield board
         finally:
             await asyncio.to_thread(context.__exit__, None, None, None)
+
+    async def test_control_context_invalidates_all_snapshots(self):
+        agent = await self.connect()
+        for exceptional in (False, True):
+            token = await self.issue_token(agent)
+            context = self.client.control("test-board", token)
+            board = await asyncio.to_thread(context.__enter__)
+            await agent.receive_json(timeout=2)
+            refreshed = await asyncio.to_thread(board.refresh)
+            error = RuntimeError("recipe failed") if exceptional else None
+            await asyncio.to_thread(context.__exit__, type(error) if error else None, error, None)
+            await agent.receive_json(timeout=2)
+            with patch.object(board._client._opener, "open") as opened:
+                for snapshot in (board, refreshed):
+                    with self.assertRaises(IDLabHTTPError) as refused:
+                        await asyncio.to_thread(snapshot.refresh)
+                    self.assertEqual((refused.exception.status, refused.exception.code),
+                                     (403, "control_stopped"))
+                opened.assert_not_called()
+            self.assertEqual((await asyncio.to_thread(self.client.identify, board.name)).generation,
+                             board.generation)
 
     async def test_control_preserves_handshake_refusals(self):
         socket = await self.connect()

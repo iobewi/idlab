@@ -3,6 +3,8 @@ from importlib.resources import files
 from pathlib import Path
 import sys
 
+from . import __version__
+
 
 def init() -> int:
     target = Path("tests") / "hardware"
@@ -27,6 +29,7 @@ def init() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="idlab", description="IDLab hardware test tools")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser(
         "init", help="generate a pytest hardware recipe in the current project",

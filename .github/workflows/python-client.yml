@@ -37,6 +37,7 @@ jobs:
           python -m pip check
       - name: Test the installed client against the server
         run: |
+          idlab --version
           idlab init --help
           python -m unittest discover -s clients/python/tests -v
       - uses: actions/setup-node@v4
