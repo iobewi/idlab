@@ -259,11 +259,14 @@ export class BoardConnector {
       if (socket.readyState !== 1 || this.socket !== socket || this.lost) throw new Error('device_session_changed');
     };
     let terminal;
+    const legacyRead = command.command === 'flash.read' && !command.stream;
+    let legacyData;
     let recoveryRequired = false;
     try {
       check();
       if (command.command === 'flash.read') {
-        const capacity = await this.#withLoader(() => this.#readFlashBlocks(socket, command, check), readDiagnostic);
+        const capacity = await this.#withLoader(() => this.#readFlashBlocks(socket, command, check,
+          legacyRead ? data => { legacyData = data; } : data => socket.send(data)), readDiagnostic);
         check();
         terminal = {result: command.id, value: capacity};
       } else if (command.command === 'flash.program') {
@@ -304,7 +307,9 @@ export class BoardConnector {
       this.busy = false;
       if (terminal && socket.readyState === 1) {
         if (recoveryRequired) terminal.recovery_required = true;
-        socket.send(JSON.stringify(terminal));
+        // Legacy reads use the binary frame itself as the terminal response.
+        if (legacyRead && !terminal.error && !recoveryRequired && legacyData) socket.send(legacyData);
+        else socket.send(JSON.stringify(terminal));
       }
       if (recoveryRequired) socket.close();
       if (this.mode === 'connecting') await this.#clearSession();
@@ -322,10 +327,10 @@ export class BoardConnector {
     }
   }
 
-  async #readFlashBlocks(socket, {id, address, size}, check) {
+  async #readFlashBlocks(socket, {id, address, size, stream}, check, emit) {
     const capacity = this.identity.flash_size;
     if (!this.identity.capabilities.includes('flash.read') || !Number.isSafeInteger(address) ||
-        !Number.isSafeInteger(size) || address < 0 || size < 1 || address + size > capacity) {
+        !Number.isSafeInteger(size) || address < 0 || size < 1 || address + size > capacity || (!stream && size > MAX_FLASH_READ)) {
       throw new Error('invalid_flash_range');
     }
     let lastUpdate = -Infinity;
@@ -348,7 +353,7 @@ export class BoardConnector {
         const data = await this.session.readFlash(address + offset, length, check, count => progress(offset + count));
         if (received < offset + data.length) progress(offset + data.length);
         check();
-        socket.send(data);
+        emit(data);
       }
     } catch (error) {
       // Preserve the latest count even when the last packet fell inside the UI throttle window.
