@@ -85,6 +85,10 @@ class Campaigns:
                 owner TEXT NOT NULL, device TEXT NOT NULL,
                 PRIMARY KEY (owner, device)
             )""")
+            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(device_recovery)")}
+            for column in ("port_key", "mac"):
+                if column not in columns:
+                    self.db.execute(f"ALTER TABLE device_recovery ADD COLUMN {column} TEXT")
             self.db.execute("""
                 CREATE TABLE IF NOT EXISTS campaign_operations (
                     id TEXT PRIMARY KEY,
@@ -112,9 +116,17 @@ class Campaigns:
         return {(row["owner"], row["device"]) for row in
                 self.db.execute("SELECT owner, device FROM device_recovery")}
 
-    def require_recovery(self, key):
+    def matching_recovery(self, key, port_key=None, mac=None):
+        return {(row["owner"], row["device"]) for row in self.db.execute(
+            "SELECT owner, device FROM device_recovery WHERE owner = ? AND "
+            "(device = ? OR port_key = ? OR mac = ?)", (*key, port_key, mac))}
+
+    def require_recovery(self, key, port_key=None, mac=None):
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO device_recovery VALUES (?, ?)", key)
+            self.db.execute("""INSERT INTO device_recovery (owner, device, port_key, mac) VALUES (?, ?, ?, ?)
+                ON CONFLICT(owner, device) DO UPDATE SET
+                port_key = COALESCE(excluded.port_key, device_recovery.port_key),
+                mac = COALESCE(excluded.mac, device_recovery.mac)""", (*key, port_key, mac))
 
     def clear_recovery(self, key):
         with self.db:
