@@ -546,9 +546,25 @@ SDK : 630 s), soit N le nombre de tranches de 4 Mio arrondi au supérieur :
 | Programmation | 1200 × N s | 1260 × N s |
 | Effacement | 30 + 600 × N s | 630 × (1 + N) s |
 
-Pour un effacement global, le calcul utilise le plafond de 64 Mio ; pour une
-lecture non streaming, la taille est limitée à 4 Mio et le délai serveur
-reste 600 s. Ces plafonds ne sont pas des durées prévues. Le timeout SDK
+Pour la programmation, N est calculé sur la somme des tailles des binaires
+(non encodés en base64), et non sur l'étendue des adresses ou sur le volume
+des secteurs effacés. Pour un effacement régional, N dépend de la taille
+de la région demandée.
+
+Pour un effacement global, le serveur calcule N sur la capacité flash
+connue à l'admission de la commande, avec un repli à 64 Mio si elle est
+inconnue (notamment depuis la console). Le SDK utilise systématiquement
+64 Mio pour ce calcul, même lorsque la capacité est connue.
+
+| Capacité connue du serveur à l'admission | Délai serveur par défaut | Délai SDK par défaut |
+|---|---:|---:|
+| 4 Mio | 630 s | 10 710 s |
+| 16 Mio | 2 430 s | 10 710 s |
+| 32 Mio | 4 830 s | 10 710 s |
+| 64 Mio ou inconnue | 9 630 s | 10 710 s |
+
+Pour une lecture non streaming, la taille est limitée à 4 Mio et le délai
+serveur reste 600 s. Ces plafonds ne sont pas des durées prévues. Le timeout SDK
 est configurable et ne modifie pas les délais de réception série ni ceux
 du serveur.
 
