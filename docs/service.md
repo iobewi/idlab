@@ -50,9 +50,31 @@ with lab.control("board_1", getpass("Jeton de pilotage : ")) as board:
     print(f"{len(data)} octets, curseur {cursor}, {dropped} octets perdus")
 ```
 
-Réserver `IDLAB_ALLOW_INSECURE_HTTP=true` aux réseaux privés de confiance.
-Sur HTTP, les jetons circulent en clair. Pour une instance HTTPS, utiliser
-l’URL HTTPS sans cette option.
+Réserver `IDLAB_ALLOW_INSECURE_HTTP=true` aux réseaux privés de confiance,
+isolés des utilisateurs et équipements non autorisés. HTTP et WebSocket
+non chiffré exposent les jetons, credentials, captures et données flash à
+l'interception ou à l'altération sur le réseau. Le SDK autorise HTTP sur
+localhost, 127.0.0.1 et ::1 sans cette option. Pour une instance HTTPS,
+utiliser l'URL HTTPS sans cette option.
+
+### Secret exposé : procédure de renouvellement
+
+- Jeton de carte : révoquer via **Autorisations**, vérifier la fin du contrôle,
+  puis générer un nouveau jeton. Un simple arrêt ne révoque pas le jeton.
+- Credential de session : interrompre le contrôle et, si le jeton de carte
+  a aussi pu être exposé, le révoquer ; obtenir un nouveau contrôle seulement
+  après résolution de toute récupération requise.
+- `IDLAB_TOKEN` ou `IDLAB_MANAGER_TOKEN` : remplacer le secret concerné
+  dans la configuration du service et des consommateurs ; planifier avec
+  l'opérateur un redémarrage/recréation autorisé du processus ou conteneur
+  concerné pour appliquer la configuration. Vérifier que l'ancien secret
+  est refusé et que le nouveau fonctionne sans l'afficher. Ne pas redémarrer
+  pendant une opération incertaine.
+
+Ne pas copier les secrets dans les issues, journaux, commandes persistées,
+captures ou dépôts. Retirer les copies exposées lorsque possible ; leur
+suppression ne remplace pas la révocation. Aucune rotation automatique
+ni changement de modèle d'authentification n'est impliqué.
 
 ## Depuis VS Code sur Windows
 

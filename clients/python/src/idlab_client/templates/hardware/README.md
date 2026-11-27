@@ -35,3 +35,15 @@ Les objets `Board` sont des instantanés liés à la génération et au contexte
 contrôle. Utiliser `board.refresh()` pour actualiser l'état sans commande
 matérielle. Ne pas conserver un objet délégué pour une utilisation après la
 sortie de la fixture.
+
+
+La fixture utilise un timeout SDK de 10 secondes, adapté à cette observation
+passive et non à une recette flash longue. `read_uart(cursor=None)` peut
+restituer l'historique antérieur encore disponible ; il ne purge pas le tampon.
+Pour suivre les pages suivantes, réutiliser le curseur retourné dans la même
+génération et examiner `dropped`. La recette accepte une capture vide ou
+avec pertes ; elle ne démontre ni le démarrage du firmware ni l'intégrité de
+la flash. Ajouter des tests métier et des critères explicites avant de conclure
+à une qualification matérielle. Ne pas rejouer automatiquement une opération
+interrompue. Révoquer un jeton exposé via **Autorisations** avant d'en créer un
+nouveau ; ne jamais le conserver dans les fichiers de recette.

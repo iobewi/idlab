@@ -101,17 +101,23 @@ par jeton de carte et sert notamment à l’observation globale. Connecter la ca
 dans le navigateur avant de demander son jeton de pilotage.
 
 ```python
-from idlab_client import IDLabClient
+from getpass import getpass
+from idlab_client import IDLabClient, __version__
 
+print(__version__)
 lab = IDLabClient()
-with lab.control("ma-carte", token_de_pilotage) as board:
-    if board.mode == "console":
-        board.write_uart("status\n")
-        board = board.enter_loader()
-    data = board.read_flash(address=0x10000, size=4096)
-    if "mode.console" in board.capabilities:
-        board = board.return_console()
+with lab.control("ma-carte", getpass("Board token: ")) as board:
+    current = board.refresh()
+    data, cursor, dropped = current.read_uart()
 ```
+
+Cet exemple est passif vis-à-vis du matériel : il consulte la capture disponible,
+qui peut contenir des octets antérieurs à l'essai. Pour une lecture flash
+explicitement autorisée, utiliser `board.read_flash(address=0x10000, size=4096)`
+si `flash.read` est annoncé et si la plage est adaptée à la carte. Depuis
+une console compatible, IDLab ouvre temporairement le stub et tente de
+revenir en console ; depuis un stub actif, il le conserve.
+Voir les [contrats de mode](docs/api.md#contrats-de-mode-et-de-génération-idl-05).
 
 Dans **Autorisations**, le bouclier avec un plus crée un jeton de pilotage.
 Le bouclier coché indique que le jeton est émis. Clique à nouveau sur
@@ -145,6 +151,9 @@ Un manifeste ESP Web Tools et ses binaires locaux peuvent aussi alimenter ce
 plan. Le SDK 0.1.3 expose le même parcours via `Board.prepare_flash()` ou
 `Board.prepare_flash_manifest()`, puis `Board.program_flash()`.
 Voir la [référence de programmation](docs/api.md#programmation-flash).
+Une image fusionnée contenant des zones remplies de `0xFF` peut effacer les
+partitions de configuration couvertes. Préférer les binaires séparés si leurs
+secteurs ne recouvrent pas les données à préserver.
 
 **Plan flash → Effacement global** efface toute la flash et vérifie sa relecture
 à `0xFF`. Saisis le nom de la carte dans la boîte de confirmation. Sur un port
@@ -174,7 +183,8 @@ préserve les fichiers existants. `idlab init --help` affiche son aide.
 Installer les dépendances de la recette avec `python -m pip install -r tests/hardware/requirements.txt`,
 puis suivre `tests/hardware/README.md` pour renseigner l’URL, le nom de la
 carte et son jeton de pilotage. Lancer `pytest tests/hardware/ -v` pour tester
-la réservation exclusive et la lecture de la capture UART.
+la réservation exclusive et la lecture de la capture UART. Cette recette ne
+valide ni le démarrage du firmware ni l'intégrité de la flash.
 
 ## Appeler l'API HTTP
 
@@ -202,8 +212,10 @@ d’entrée est publié sur la boucle locale par défaut. Voir les
 Pour lire, envoyer `{"generation":"…","address":0,"size":4096}` avec le
 type `application/json`. La génération de l'identification empêche
 d'exécuter la demande sur une autre session. Une seule lecture est active
-par carte. Une lecture incomplète ferme la session sans rendre de
-résultat partiel. Pour lire de nouveau, reconnecter la carte et l'identifier.
+par carte. Une lecture incomplète ne rend aucun résultat partiel. La session
+peut rester ouverte si la récupération est confirmée ; sinon elle peut être
+fermée. Consulter le diagnostic avant toute nouvelle opération et appliquer
+la [procédure de récupération](docs/api.md#procédure-opérationnelle-de-récupération).
 Le navigateur autorise et ouvre le port Web Serial. Une fois la carte
 connectée, le web et Python utilisent les mêmes commandes et les mêmes
 routes de consultation. Les données UART reçues passent du connecteur au

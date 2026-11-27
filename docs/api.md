@@ -147,7 +147,12 @@ RX en hexadécimal, le prochain curseur et le nombre d’octets perdus avant
 ce curseur (`hex`, `cursor`, `dropped`). Sans curseur, la lecture commence
 au plus ancien octet conservé. Le serveur conserve au plus 1 Mio par carte
 et renvoie jusqu’à 64 Kio par appel. L’observation utilise le jeton général
-ou celui de la session de pilotage. En Python, utiliser `board.read_uart()`.
+ou celui de la session de pilotage. En Python, `board.read_uart(cursor=None)`
+restitue l'historique encore disponible : ce n'est ni une purge ni un début
+d'essai. Réutiliser le curseur retourné avec `board.read_uart(cursor=cursor)`.
+`dropped` compte les octets devenus indisponibles depuis le curseur demandé ;
+avec `None`, il vaut zéro même si des octets plus anciens ont été évincés.
+Ne jamais réutiliser un curseur pour une autre génération.
 L’interface web utilise `wait_ms=5000`. Au bout du journal, le serveur
 attend l’arrivée de nouveaux octets ou l’expiration du délai. La réponse
 est immédiate si des octets sont déjà disponibles. `wait_ms` est compris
@@ -187,8 +192,9 @@ Le corps d’une lecture contient la génération actuelle, une adresse entière
 positive ou nulle et une taille entière de 1 octet jusqu’à la capacité de
 la flash, avec un maximum de 64 Mio. Le connecteur transmet les octets
 au serveur par blocs de 4 Mio maximum. Le champ `campaign_id` est facultatif. Une carte accepte une
-lecture à la fois. Une lecture incomplète renvoie une erreur, ferme la session
-et ne livre aucun résultat partiel.
+lecture à la fois. Une lecture incomplète renvoie une erreur et ne livre aucun résultat partiel.
+Une récupération confirmée peut permettre de conserver la session ; dans les
+autres cas le serveur peut la fermer. Consulter les diagnostics ci-dessous.
 
 L’historique conserve le dernier nombre d’octets communiqué par l’agent
 (`bytesReceived`), l’offset absolu de fin exclue (`lastOffset`) et le nombre
@@ -203,6 +209,15 @@ connecteur dans la session Web en cours, dans la limite de l’historique. Les
 lectures associées à une campagne conservent leur diagnostic dans la campagne.
 
 ## Programmation flash
+
+Une image fusionnée est traitée comme une plage binaire entière, y compris
+les octets `0xFF` de remplissage. Les secteurs de 4 Kio couverts sont concernés
+par l'effacement et la programmation ; une partition NVS, EKV ou autre
+configuration incluse peut donc être effacée. Les binaires séparés préservent
+les secteurs non couverts, à condition que leurs plages arrondies aux secteurs
+ne recouvrent pas la configuration. Vérifier la table de partitions et les
+plages avant confirmation ; un SHA-256 conforme ne prouve pas la préservation
+des données hors des images.
 
 La programmation exige un stub actif, une capacité connue et la capacité
 `flash.program`. La préparation du plan peut ouvrir ce stub depuis une console
@@ -382,30 +397,44 @@ Pour chercher un essai terminé, utiliser par exemple
 
 ### Exemple de bout en bout
 
-Cet exemple utilise `jq`, une carte déjà connectée nommée `ma-carte` et
-le jeton `IDLAB_TOKEN`.
+Le jeton général `IDLAB_TOKEN` autorise les campagnes de service, pas les
+commandes matérielles. Le jeton de carte ouvre un WebSocket de contrôle
+exclusif ; seul le credential obtenu pour cette session autorise la lecture.
+Le SDK transmet aussi `X-IDLab-API-Authorization` pour rattacher l'opération
+à une campagne de service.
 
-```sh
-base=http://127.0.0.1:8080/api/v1
-auth="Authorization: Bearer ${IDLAB_TOKEN}"
+Exemple à exécuter uniquement après autorisation de la lecture sur la carte
+et validation de la plage. Configurer `IDLAB_URL` et `IDLAB_TOKEN` dans
+l'environnement ; saisir le jeton de carte sans le journaliser.
 
-campaign=$(curl -fsS -H "$auth" -H 'Content-Type: application/json' \
-  --data '{"name":"Lecture de référence"}' "$base/campaigns" | jq -er .id)
-generation=$(curl -fsS -H "$auth" "$base/devices/ma-carte" | jq -er .generation)
+```python
+from getpass import getpass
+from pathlib import Path
+from idlab_client import IDLabClient
 
-payload=$(jq -n --arg generation "$generation" --arg campaign "$campaign" \
-  '{generation:$generation,address:0,size:4096,campaign_id:$campaign}')
-curl --fail-with-body -H "$auth" -H 'Content-Type: application/json' \
-  --data "$payload" "$base/devices/ma-carte/flash/read" --output readback.bin
+lab = IDLabClient()
+campaign = lab.create_campaign("Reference read", metadata={"scenario": "backup"})
+with lab.control("ma-carte", getpass("Board token: ")) as board:
+    current = board.refresh()
+    if "flash.read" not in current.capabilities:
+        lab.finish_campaign(campaign["id"], "BLOCKED")
+    else:
+        data = current.for_campaign(campaign["id"]).read_flash(0x10000, 4096)
+        Path("readback.bin").write_bytes(data)
+        lab.finish_campaign(campaign["id"], "PASS" if len(data) == 4096 else "FAIL")
 ```
 
-Après vérification du fichier, le script peut clôturer l’essai. Cet appel
-illustre un verdict `PASS` décidé par le script.
+Le verdict PASS de cet exemple concerne uniquement la lecture exacte et la
+sauvegarde locale, pas le contenu attendu du firmware. En cas d'exception,
+consulter l'historique et la session avant de clôturer explicitement la
+campagne avec le verdict justifié ; ne pas relancer automatiquement.
+Le fichier doit être conservé par le consommateur dans un emplacement protégé.
 
-```sh
-curl --fail-with-body -H "$auth" -H 'Content-Type: application/json' \
-  --data '{"verdict":"PASS"}' "$base/campaigns/$campaign/finish"
-```
+Conventions de qualification (le serveur accepte une chaîne libre) :
+PASS = critères vérifiés et satisfaits ; FAIL = non-conformité démontrée ;
+BLOCKED = précondition manquante ; INDETERMINATE = preuves insuffisantes.
+L'état de campagne et son verdict sont distincts. Un arrêt de campagne ne
+confirme pas à lui seul l'arrêt physique d'une opération.
 
 ## Erreurs à traiter
 
@@ -484,7 +513,86 @@ perdue. Cette limitation est volontaire ; aucune progression n’est reconstruit
 par estimation et aucune écriture SQLite supplémentaire n’est introduite.
 
 
+### Procédure opérationnelle de récupération
+
+1. Conserver le code HTTP et le diagnostic : génération, commande, progression,
+   offset, débit, `consoleRestored`, `termination` et `flashState` si disponibles.
+2. Vérifier l'état de la session sans commande matérielle. Si une lecture a
+   échoué mais que la console a été rétablie et que la session reste valide,
+   une observation passive peut confirmer le mode courant ; l'échec demeure.
+3. Si la génération ou le contrôle est perdu, ne pas réutiliser l'ancien
+   objet Board ; obtenir un nouveau contrôle après reconnexion autorisée.
+4. Si `recoveryRequired` est vrai ou si l'arrêt est incertain, faire vérifier
+   physiquement l'arrêt et l'identité par l'opérateur avant la récupération
+   Web décrite plus haut. Ne pas contourner le marqueur en renommant la carte.
+5. Si une écriture a pu modifier la flash, n'autoriser une relecture de
+   vérification qu'après récupération ; ne jamais rejouer automatiquement.
+
+Une lecture plus courte réussie après `serial_timeout` ne prouve pas que
+la lecture initiale est corrigée. Conserver la taille, l'offset, le transport
+et le diagnostic d'origine ; qualifier à nouveau le scénario initial sous
+autorisation explicite. Un retour console n'établit pas l'intégrité de la flash.
+
+### Délais par couche
+
+Le timeout de réception série est distinct des plafonds serveur et SDK.
+Avec les valeurs par défaut (serveur : commande 30 s, lecture 600 s ;
+SDK : 630 s), soit N le nombre de tranches de 4 Mio arrondi au supérieur :
+
+| Opération | Serveur | SDK |
+|---|---:|---:|
+| Commande standard / préparation | 30 s | 630 s |
+| Lecture streaming | 600 × N s | 630 × N s |
+| Programmation | 1200 × N s | 1260 × N s |
+| Effacement | 30 + 600 × N s | 630 × (1 + N) s |
+
+Pour la programmation, N est calculé sur la somme des tailles des binaires
+(non encodés en base64), et non sur l'étendue des adresses ou sur le volume
+des secteurs effacés. Pour un effacement régional, N dépend de la taille
+de la région demandée.
+
+Pour un effacement global, le serveur calcule N sur la capacité flash
+connue à l'admission de la commande, avec un repli à 64 Mio si elle est
+inconnue (notamment depuis la console). Le SDK utilise systématiquement
+64 Mio pour ce calcul, même lorsque la capacité est connue.
+
+| Capacité connue du serveur à l'admission | Délai serveur par défaut | Délai SDK par défaut |
+|---|---:|---:|
+| 4 Mio | 630 s | 10 710 s |
+| 16 Mio | 2 430 s | 10 710 s |
+| 32 Mio | 4 830 s | 10 710 s |
+| 64 Mio ou inconnue | 9 630 s | 10 710 s |
+
+Pour une lecture non streaming, la taille est limitée à 4 Mio et le délai
+serveur reste 600 s. Ces plafonds ne sont pas des durées prévues. Le timeout SDK
+est configurable et ne modifie pas les délais de réception série ni ceux
+du serveur.
+
 ### Contrats de mode et de génération (IDL-05)
+
+Les capacités annoncées par le serveur dépendent du transport et de l'identité.
+La colonne ROM/stub suppose un agent déclarant explicitement le mode loader.
+
+| Capacité | Console UART/JTAG | Console OTG/unknown | ROM | Stub |
+|---|---|---|---|---|
+| identify | oui | oui | oui | oui |
+| uart.write | oui | oui | non | non |
+| mode.loader / console.reset | oui | non | non | non |
+| mode.rom | oui | oui | non | oui |
+| mode.console | non | non | conditionnel | conditionnel |
+| rom.jedec | non | non | oui | non |
+| flash.read | oui | non | non | capacité flash connue |
+| flash.program | non | non | non | capacité connue et programmable |
+| flash.erase | non | non | non | capacité connue et erasable |
+| flash.erase.region | non | non | non | capacité connue, erasable et erasable_region |
+
+Les consoles compatibles peuvent ouvrir automatiquement le stub pour la
+préparation ou l'effacement même sans annoncer les capacités destructives.
+`mode.console` exige une possibilité de retour annoncée et un transport
+UART/JTAG. Les capacités annoncées ne garantissent pas une réussite : les
+préconditions, le contrôle exclusif et la récupération restent applicables.
+L'identité enregistrée en console peut avoir chip, MAC et taille flash à null ;
+une identification matérielle compatible est distincte de l'observation passive.
 
 | Opération Python | Précondition / transition | Mode final nominal |
 |---|---|---|
