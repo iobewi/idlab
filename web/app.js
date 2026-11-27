@@ -1,3 +1,4 @@
+import { usbReconnect } from './usb-reconnect.js';
 import { BoardConnector } from './board-connector.js';
 import { ConsoleBuffer } from './console-buffer.js';
 import { BootIdentity } from './boot-identity.js';
@@ -188,9 +189,21 @@ function addCard(name, port, flashBaud) {
       if (!card.identity) card.observation = null;
       render();
       onRomCardChange(card);
+      card.usbReconnect?.changed();
     },
   });
   Object.assign(card, {follow: true, pausedAt: null, capture: new ConsoleBuffer(), boot: new BootIdentity()});
+  card.usbReconnect = usbReconnect(card, {
+    connect: async () => {
+      await ensureWebSession();
+      if (cards.get(name) !== card || card.mode !== 'disconnected') return;
+      // Reattach without automatically identifying/resetting a running firmware.
+      await card.connect();
+      if (card === selected) say(card.name + ' reconnectée.', {temporary: true});
+    },
+    report: error => say('Reconnexion de « ' + name + ' » : ' + error.message),
+    isRegistered: () => cards.get(name) === card,
+  });
   const row = element('div', undefined, 'active-board');
   card.row = row;
   card.nameButton = element('button', name, 'board-name');
@@ -204,10 +217,12 @@ function addCard(name, port, flashBaud) {
   };
   card.status.onclick = () => run(async () => {
     if (card.mode === 'disconnected') return connectCard(card);
+    card.usbReconnect.disable();
     await card.disconnect();
     if (card === selected) say(card.name + ' déconnectée.', {temporary: true});
   });
   card.remove.onclick = () => run(async () => {
+    card.usbReconnect.disable();
     await card.disconnect();
     cards.delete(name);
     row.remove();
@@ -312,6 +327,7 @@ $('control-token-dialog').onclose = () => {
 async function connectCard(card) {
   if (card === selected) say('Détection de « ' + card.name + ' »…');
   await ensureWebSession();
+  card.usbReconnect.enable();
   const identificationWarning = await card.connect({identifyOnConnect: true});
   if (card !== selected) return;
   if (identificationWarning) say('Identification partielle de « ' + card.name + ' ». ' + identificationWarning);
@@ -359,7 +375,12 @@ $('add-device').onclick = addFromPicker;
 $('add-device-id').onkeydown = event => { if (event.key === 'Enter') addFromPicker(); };
 navigator.serial?.addEventListener('disconnect', event => {
   for (const card of cards.values()) {
-    if (event.target === card.port || event.port === card.port) run(() => card.disconnect(true));
+    if (event.target === card.port || event.port === card.port) run(() => card.usbReconnect.removed());
+  }
+});
+navigator.serial?.addEventListener('connect', event => {
+  for (const card of cards.values()) {
+    if (event.target === card.port || event.port === card.port) card.usbReconnect.added();
   }
 });
 
