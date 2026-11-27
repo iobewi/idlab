@@ -22,7 +22,8 @@ from flash_plan import MAX_FLASH, MAX_PROGRAM_BODY, SECTOR_SIZE, decode_images, 
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT.parent / "web"
 BUNDLE = ROOT / "node_modules/esptool-js/bundle.js"
-SERIAL_MODULES = ("board-connector.js", "esp-driver.js", "serial-console.js", "serial-transport.js")
+SERIAL_MODULES = ("board-connector.js", "esp-driver.js", "serial-console.js", "serial-transport.js",
+                  "flash-read.js", "md5.js")
 MAX_READ = 4 * 1024 * 1024
 UART_BUFFER = 1024 * 1024
 UART_PAGE = 64 * 1024
