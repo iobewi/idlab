@@ -1,8 +1,45 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {createHash} from 'node:crypto';
 import { connectionPlan, EspDriver } from '../esp-driver.js';
 import { serialTransport } from '../serial-transport.js';
 import * as upstream from '../node_modules/esptool-js/bundle.js';
+
+// Simulate the stub wire protocol, not the removed loader.readFlash API.
+class ReadFlashStub {
+  ESP_READ_FLASH = 0xd2;
+  FLASH_READ_TIMEOUT = 100000;
+  constructor({transport}) {
+    this.frames = [];
+    this.received = 0;
+    transport.read = async timeout => {
+      assert.equal(timeout, this.FLASH_READ_TIMEOUT);
+      assert(this.frames.length, 'unexpected read');
+      const frame = this.frames.shift();
+      if (this.frames.length) this.received += frame.length;
+      return frame;
+    };
+    transport.write = async ack => {
+      assert.equal(ack.length, 4);
+      assert.equal(new DataView(ack.buffer, ack.byteOffset, ack.byteLength).getUint32(0, true), this.received);
+    };
+  }
+  prepareRead(opcode, packet, makeBlock) {
+    assert.equal(opcode, this.ESP_READ_FLASH);
+    assert.equal(packet.length, 16);
+    assert.equal(this.frames.length, 0, 'previous digest must be consumed');
+    const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+    const address = view.getUint32(0, true), size = view.getUint32(4, true);
+    assert.equal(view.getUint32(8, true), 4096);
+    assert.equal(view.getUint32(12, true), 1024);
+    const block = makeBlock(address, size);
+    assert.equal(block.length, size);
+    this.received = 0;
+    for (let i = 0; i < size; i += 4096) this.frames.push(block.subarray(i, i+4096));
+    this.frames.push(new Uint8Array(createHash('md5').update(block).digest()));
+    return 0;
+  }
+}
 
 test('transport and loader choices are independent', () => {
   const uart = { usbVendorId: 0x10c4, usbProductId: 0xea60 };
@@ -39,7 +76,7 @@ test('a ROM boot banner does not discard the first synchronization response', as
 
 test('ROM identifies without launching a stub; production reads use one reader', async () => {
   const port = { getInfo: () => ({ usbVendorId: 0x303a, usbProductId: 18 }) };
-  class FakeLoader {
+  class FakeLoader extends ReadFlashStub {
     chip = {
       CHIP_NAME: 'ESP32-P4',
       readMac: async () => '10:20:30:40:50:60',
@@ -49,11 +86,8 @@ test('ROM identifies without launching a stub; production reads use one reader',
     async usesUsbOtg() { return true; }
     async runStub() { this.IS_STUB = true; }
     async readFlashId() { return 0x1940c8; }
-    async readFlash(address, size, onPacket) {
-      const block = new Uint8Array(size).fill(address ? 2 : 1);
-      onPacket(block.subarray(0, 1), 1);
-      if (size > 1) onPacket(block.subarray(1), size);
-      return block;
+    async checkCommand(_description, opcode, packet) {
+      return this.prepareRead(opcode, packet, (address, size) => new Uint8Array(size).fill(address ? 2 : 1));
     }
   }
 
@@ -70,7 +104,7 @@ test('ROM identifies without launching a stub; production reads use one reader',
   assert.equal(loaded.transport, 'usb_otg');
   const progress = [];
   const bytes = await stub.readFlash(0, 1048577, () => {}, received => progress.push(received));
-  assert.deepEqual(progress, [1, 1048576, 1048577]);
+  assert.deepEqual(progress, [...Array.from({length: 256}, (_, i) => (i + 1) * 4096), 1048577]);
   assert.equal(bytes[0], 1);
   assert.equal(bytes.at(-1), 2);
   await assert.rejects(stub.readFlash(0, 1, () => { throw new Error('closed'); }), /closed/);
@@ -81,7 +115,7 @@ test('full erase verifies every block and denies erase when security is unknown 
   let eraseCalls = 0;
   let dirtyAddress = null;
   const reads = [];
-  class Loader {
+  class Loader extends ReadFlashStub {
     ESP_ERASE_REGION = 0xd1;
     ERASE_REGION_TIMEOUT_PER_MB = 30_000;
     chip = {CHIP_NAME: 'ESP32-S3', readMac: async () => '10:20:30:40:50:60'};
@@ -91,18 +125,17 @@ test('full erase verifies every block and denies erase when security is unknown 
     async eraseFlash() { eraseCalls++; }
     timeoutPerMb() { return 30_000; }
     async checkCommand(_description, opcode, packet, checksum, responseSize, timeout) {
+      if (opcode === this.ESP_READ_FLASH) return this.prepareRead(opcode, packet, (address, size) => {
+        reads.push(address);
+        const block = new Uint8Array(size).fill(0xff);
+        if (dirtyAddress !== null && address <= dirtyAddress && dirtyAddress < address + size) {
+          block[dirtyAddress - address] = 0xfe;
+        }
+        return block;
+      });
       assert.equal(opcode, this.ESP_ERASE_REGION);
       assert.deepEqual([...packet], [0, 16, 0, 0, 0, 32, 0, 0]);
       assert.deepEqual([checksum, responseSize, timeout], [0, 0, 30_000]);
-    }
-    async readFlash(address, size, progress) {
-      reads.push(address);
-      const block = new Uint8Array(size).fill(0xff);
-      if (dirtyAddress !== null && address <= dirtyAddress && dirtyAddress < address + size) {
-        block[dirtyAddress - address] = 0xfe;
-      }
-      progress(null, size);
-      return block;
     }
   }
   const driver = new EspDriver({getInfo: () => ({usbVendorId: 0x303a, usbProductId: 0x1001})},
@@ -123,7 +156,7 @@ test('full erase verifies every block and denies erase when security is unknown 
     assert.deepEqual(await driver.eraseFlash(() => {}, bytes => progress.push(bytes)),
       {address: 0, size: 2 * mib, first_non_ff: dirtyAddress});
     assert.deepEqual(reads, [0, mib]);
-    assert.deepEqual(progress, [mib, 2 * mib]);
+    assert.deepEqual(progress, Array.from({length: 512}, (_, i) => (i + 1) * 4096));
   }
   assert.equal(eraseCalls, 2);
   reads.length = 0;

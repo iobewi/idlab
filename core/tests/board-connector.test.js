@@ -6,7 +6,7 @@ import {BoardConnector, sha256} from '../board-connector.js';
 
 function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flashBaud, failBaud = false,
   readBlock, shortResponseAt, campaignId, onLinkLost, failLoader = false, stubTimeout = false,
-  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false, writeBarrier } = {}) {
+  romIdentificationTimeout = false, programPayload, partialRead = 0, failReset = false, writeBarrier, badDigest = false } = {}) {
   const events = [];
   const reads = [];
   const progress = [];
@@ -67,7 +67,9 @@ function fixture({ vid = 0x10c4, pid, failRead = false, inDownload = false, flas
         const block = readBlock ? readBlock(address, size) : bytes;
         assert.equal(size, block.length);
         for (let offset = 0; offset < size; offset += 4096) this.frames.push(block.subarray(offset, offset + 4096));
-        this.frames.push(new Uint8Array(createHash('md5').update(block).digest()));
+        const digest = new Uint8Array(createHash('md5').update(block).digest());
+        if (badDigest) digest[0] ^= 1;
+        this.frames.push(digest);
         return 0;
       }
       assert.equal(opcode, 0x0f);
@@ -528,4 +530,67 @@ test('the ROM action can request a reset from a console on a supported transport
   assert.equal(card.consoleUnavailable, true);
   assert.deepEqual(events, ['detect:no_reset', 'close-loader', 'console', 'close-console', 'detect:default_reset']);
   await card.disconnect();
+});
+
+test('persistent loader read failures require recovery and do not retry', async () => {
+  for (const [options, code] of [[{failRead: true}, 'serial_timeout'],
+      [{badDigest: true}, 'flash_read_digest_mismatch']]) {
+    const scenario = fixture({inDownload: true, ...options});
+    const {card, reads, events} = scenario;
+    await card.connect();
+    const socket = card.socket;
+    await assert.rejects(card.readFlash(0, 3), new RegExp(code));
+    assert.equal(scenario.lastResult.error, code);
+    assert.equal(scenario.lastResult.recovery_required, true);
+    assert.equal(socket.readyState, 3);
+    assert.equal(card.mode, 'disconnected');
+    assert.equal(card.busy, false);
+    assert.equal(reads.length, 1);
+    assert.equal(events.filter(e => e === 'reset').length, 0);
+    await assert.rejects(card.readFlash(0, 3), /Carte indisponible/);
+    assert.equal(reads.length, 1);
+  }
+});
+
+test('successful persistent loader reads keep the same reusable session', async () => {
+  const scenario = fixture({inDownload: true});
+  const {card, reads, events} = scenario;
+  await card.connect();
+  const session = card.session, socket = card.socket;
+  for (let i = 0; i < 2; i++) {
+    const {blob} = await card.readFlash(i * 4096, 3);
+    assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), Uint8Array.of(0,255,13));
+    assert.equal(scenario.lastResult.recovery_required, undefined);
+    assert.equal(card.session, session);
+    assert.equal(card.socket, socket);
+    assert.equal(card.mode, 'loader');
+    assert.equal(card.busy, false);
+  }
+  assert.equal(reads.length, 2);
+  assert.equal(events.filter(e => e === 'reset').length, 0);
+  await card.disconnect();
+});
+
+test('temporary loader digest failure restores console without replay', async () => {
+  const scenario = fixture({badDigest: true});
+  const {card, reads, events} = scenario;
+  await card.connect();
+  await assert.rejects(card.readFlash(0, 3), /flash_read_digest_mismatch/);
+  assert.deepEqual(scenario.lastResult.read_diagnostic,
+    {error: 'flash_read_digest_mismatch', console_restored: true});
+  assert.equal(scenario.lastResult.recovery_required, false);
+  assert.equal(card.mode, 'console');
+  assert.equal(reads.length, 1);
+  assert.equal(events.filter(e => e === 'reset').length, 1);
+  await card.disconnect();
+});
+
+test('temporary loader timeout remains the primary error when console reset fails', async () => {
+  const scenario = fixture({failRead: true, failReset: true});
+  await scenario.card.connect();
+  await assert.rejects(scenario.card.readFlash(0, 3), /serial_timeout/);
+  assert.deepEqual(scenario.lastResult.read_diagnostic,
+    {error: 'serial_timeout', console_restored: false, console_error: 'serial_closed'});
+  assert.equal(scenario.lastResult.recovery_required, true);
+  assert.equal(scenario.reads.length, 1);
 });

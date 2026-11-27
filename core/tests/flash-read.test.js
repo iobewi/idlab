@@ -68,3 +68,52 @@ test('Web Serial recoverable receive errors become terminal and retain exact cod
     assert.equal(released,1);
   }
 });
+
+test('receive error wakes pending read, releases lock and permits clean reconnect', async () => {
+  for (const [name, code] of [['BufferOverrunError','serial_buffer_overrun'],
+      ['FramingError','serial_framing_error'], ['BreakError','serial_break_error'],
+      ['ParityError','serial_parity_error']]) {
+    let opens = 0, closes = 0, stream;
+    class Transport {
+      SLIP_END = 0xc0;
+      SLIP_ESC = 0xdb;
+      constructor(device) { this.device = device; }
+      async connect() { opens++; this.device.readable = stream; }
+      async disconnect() {
+        if (this.device.readable.locked) await this.reader.cancel();
+        assert.equal(this.device.readable.locked, false);
+        this.device.readable = null;
+        closes++;
+      }
+      appendArray(a,b) { return Uint8Array.of(...a,...b); }
+    }
+    let controller;
+    const makeStream = () => new ReadableStream({start(c) { controller = c; }});
+    const T = serialTransport(Transport, Error);
+    const t = new T({});
+    stream = makeStream();
+    await t.connect();
+    const first = t.readLoop();
+    const pending = assert.rejects(t.read(100000), new RegExp(code));
+    controller.error(Object.assign(Error(name), {name}));
+    await pending;
+    await first;
+    assert.equal(stream.locked, false);
+    await assert.rejects(t.write(Uint8Array.of(1)), new RegExp(code));
+    await t.disconnect();
+    stream = makeStream();
+    await t.connect();
+    assert.equal(t.readFailure, null);
+    assert.equal(t.closed, false);
+    assert.equal(t.buffer.length, 0);
+    const second = t.readLoop();
+    const read = t.read(100000);
+    controller.enqueue(Uint8Array.of(0xc0,42,0xc0));
+    assert.deepEqual(await read, Uint8Array.of(42));
+    await t.disconnect();
+    await second;
+    assert.equal(stream.locked, false);
+    assert.equal(opens, 2);
+    assert.equal(closes, 2);
+  }
+});
