@@ -1,7 +1,7 @@
 import { sha256 } from './board-connector.js';
 import { FLASH_SECTOR } from './esp-driver.js';
 import { $, element, FLASH_PREVIEW_BYTES, flashNumber, formatFlashPreview, run, say } from './dom.js';
-import { importManifest } from './flash-manifest.js';
+import { importManifestForBoard } from './flash-manifest.js';
 import { destructiveFlashMessage } from './flash-diagnostics.js';
 
 const plans = new WeakMap();
@@ -341,13 +341,15 @@ export function wireFlashPlan({getSelected, render, observeCard}) {
     const card = getSelected();
     const plan = planFor(card);
     const manifest = $('manifest').files[0];
-    if (!plan || plan.working || !manifest) return;
+    if (!plan || plan.working || !manifest || !card.identity) return;
+    const generation = card.identity.generation;
     const files = [...$('manifest-files').files, ...$('manifest-directory').files];
     plan.working = true;
     render();
     try {
-      const chip = card.identity?.chip ?? card.lastIdentity?.chip;
-      const entries = importManifest(JSON.parse(await manifest.text()), files, chip);
+      const entries = await importManifestForBoard(JSON.parse(await manifest.text()), files, card,
+        generation, () => card === getSelected());
+      if (card.identity?.generation !== generation || card !== getSelected()) throw new Error('La carte ou sa session a changé.');
       appendFiles(plan, entries);
       for (const id of ['manifest', 'manifest-files', 'manifest-directory']) $(id).value = '';
       plan.message = 'Manifeste ajouté au plan. Vérifie les adresses avant validation.';
