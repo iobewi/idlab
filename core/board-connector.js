@@ -515,7 +515,7 @@ export class BoardConnector {
 
   async #exclusive(action) {
     const available = ['console', 'loader'].includes(this.mode);
-    if (this.control === 'external' || this.control === 'stopping' || this.requesting || this.busy || !available) {
+    if (['external', 'stopping', 'recovery_required'].includes(this.control) || this.requesting || this.busy || !available) {
       throw new Error('Carte indisponible.');
     }
     this.requesting = true;
