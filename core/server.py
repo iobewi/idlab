@@ -225,6 +225,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
     boards = {}
     detached_reads = {}
     recovery_keys = set()
+    finalizing = set()
     tokens = {}
     sockets = set()
     operation_tasks = set()
@@ -416,7 +417,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         if action == "recover":
             if not board or board.socket.closed:
                 return problem(404, "device_disconnected")
-            if board.pending or board.control:
+            if board.pending or board.control or key in finalizing:
                 return problem(409, "device_busy")
             try:
                 payload = await request.json()
@@ -424,7 +425,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 return problem(400, "invalid_json")
             if payload != {"generation": board.generation, "confirmation": key[1]}:
                 return problem(400, "recovery_confirmation_required")
-            if boards.get(key) is not board or board.pending or board.control or board.socket.closed:
+            if boards.get(key) is not board or board.pending or board.control or board.socket.closed or key in finalizing:
                 return problem(409, "device_session_changed")
             if not board.recovery_required:
                 return web.json_response({"control": board.describe()["control"]})
@@ -512,7 +513,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             board = Board(uuid.uuid4().hex, socket, identity, port_key=port_key)
             if port_key:
                 board.operations.extend(detached_reads.pop((*key, port_key), ()))
-            board.recovery_required = key in recovery_keys
+            board.recovery_required = key in request.app[CAMPAIGNS].recovery_keys() or key in finalizing
             boards[key] = board
             await socket.send_json({"generation": board.generation, "has_token": key in tokens})
             async for message in socket:
@@ -586,7 +587,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             pass
         finally:
             if boards.get(key) is board and board is not None:
-                if board.pending and (not board.pending.future.done() or board.pending.future.cancelled()):
+                if board.pending:
+                    # Reserve the logical identity until the old supervisor has finalized.
+                    finalizing.add(key)
                     recovery_keys.add(key)
                 del boards[key]
                 if board.port_key:
@@ -671,6 +674,11 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                 replacement.recovery_required = True
         else:
             request.app[CAMPAIGNS].clear_recovery(request[BOARD_KEY])
+            recovery_keys.discard(request[BOARD_KEY])
+            replacement = boards.get(request[BOARD_KEY])
+            if replacement is not None and replacement is not board:
+                replacement.recovery_required = False
+        finalizing.discard(request[BOARD_KEY])
         record["state"] = "Terminée" if result else "Échec"
         if not result:
             record.setdefault("detail", "Opération interrompue ou en échec.")
