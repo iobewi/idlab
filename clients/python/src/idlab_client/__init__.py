@@ -186,7 +186,7 @@ class Board:
         """Load a local manifest, validate its plan, and return the corresponding binaries."""
         board = self.refresh()
         if board.chip is None:
-            board = board.identify_live()
+            board = board._command("flash.prepare")
         if board.chip is None:
             raise IDLabError("Hardware identity is required to prepare a flash manifest")
         images = read_flash_manifest(path, board.chip)
