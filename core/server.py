@@ -1191,7 +1191,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             detail.append("Récupération console non renseignée")
         record["detail"] = " · ".join(detail)
 
-    def programming_board(request, generation):
+    def programming_board(request, generation, *, allow_console=False):
         board = boards.get(request[BOARD_KEY])
         if not board or board.socket.closed or generation != board.generation:
             return None, problem(409, "device_session_changed")
@@ -1200,7 +1200,8 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return None, refusal
         if board.pending:
             return None, problem(409, "device_busy")
-        if "flash.program" not in board.identity["capabilities"]:
+        capabilities = board.identity["capabilities"]
+        if "flash.program" not in capabilities and not (allow_console and "mode.loader" in capabilities):
             return None, problem(409, "operation_unsupported")
         return board, None
 
@@ -1211,10 +1212,58 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             return problem(400, "invalid_json")
         if not isinstance(payload, dict) or payload.keys() != {"generation", "images"}:
             return problem(400, "invalid_arguments")
-        board, refusal = programming_board(request, payload["generation"])
+        board, refusal = programming_board(request, payload["generation"], allow_console=True)
         if refusal is not None:
             return refusal
         images = payload["images"]
+        if "mode.loader" in board.identity["capabilities"]:
+            try:
+                validate_images(images, MAX_FLASH)
+            except ValueError as error:
+                return problem(400, str(error))
+            control = board.control
+            key = request[BOARD_KEY]
+            operation, record, started = start_operation(request, board, key[1], "mode.loader", {}, None)
+            complete = False
+            try:
+                await board.socket.send_json({"id": operation.id, "command": "mode.loader"})
+                result = await asyncio.wait_for(asyncio.shield(operation.future), timeout=command_timeout)
+                if isinstance(result, dict) and result.get("recovery_required") is True:
+                    await board.socket.close(code=1011)
+                    return problem(502, "device_session_changed")
+                if control and control.stopped:
+                    return problem(403, control.stopped)
+                if operation.cancelled:
+                    return problem(409, "operation_cancelled")
+                if not isinstance(result, dict) or board.socket.closed or boards.get(key) is not board:
+                    return problem(502, "device_session_changed")
+                if result.get("error"):
+                    code = agent_error_code(result["error"]) or "device_command_failed"
+                    return problem(agent_error_status(code), code)
+                complete = True
+                if "flash.program" not in board.identity["capabilities"]:
+                    return problem(409, "operation_unsupported")
+                try:
+                    validate_images(images, board.identity["flash_size"])
+                except ValueError as error:
+                    return problem(400, str(error))
+                plan = ProgramPlan(secrets.token_urlsafe(32), images, control, asyncio.get_running_loop().time() + 600)
+                board.program_plan = plan
+                return web.json_response({"plan_id": plan.id, "images": plan.images}, status=201)
+            except TimeoutError:
+                await board.socket.close(code=1011)
+                return problem(504, "device_command_timeout")
+            except ConnectionError:
+                await board.socket.close(code=1011)
+                return problem(502, "device_session_changed")
+            finally:
+                await finish_operation(request, board, record, started, complete)
+                if control and control.stopped and board.control is control:
+                    board.control = None
+                    board.program_plan = None
+                    await publish_control(board, key)
+                elif operation.cancelled and not control:
+                    await publish_control(board, key)
         try:
             validate_images(images, board.identity["flash_size"])
         except ValueError as error:
@@ -1403,7 +1452,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         web.get("/api/v1/devices/{name}/uart", read_uart),
         web.get("/api/v1/devices/{name}/activity", read_activity),
         web.post("/api/v1/devices/{name}/flash/read", supervise_operation(read_flash)),
-        web.post("/api/v1/devices/{name}/flash/plan", prepare_program),
+        web.post("/api/v1/devices/{name}/flash/plan", supervise_operation(prepare_program)),
         web.post("/api/v1/devices/{name}/flash/program", supervise_operation(program_flash)),
         web.get(r"/api/v1/devices/{name}/flash/program/{operation_id:[0-9a-f]{32}}/{index:[0-9]{1,2}}", program_image),
         web.get("/agent", agent),
