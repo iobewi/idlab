@@ -651,7 +651,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         board.log(f"Début · {command}", source, session_id)
         return operation, record, asyncio.get_running_loop().time()
 
-    def finish_operation(request, board, record, started, result):
+    async def finish_operation(request, board, record, started, result):
         operation = board.pending
         if operation:
             if operation.cancel_requested_at:
@@ -690,6 +690,9 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
         board.progress = board.pending = None
         if "campaign_id" in record:
             request.app[CAMPAIGNS].leave(record["campaign_id"], record)
+        replacement = boards.get(request[BOARD_KEY])
+        if replacement is not None and replacement is not board:
+            await publish_control(replacement, request[BOARD_KEY])
 
     async def device_command(request):
         try:
@@ -803,7 +806,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             await board.socket.close(code=1011)
             return problem(502, "device_session_changed")
         finally:
-            finish_operation(request, board, record, started, complete)
+            await finish_operation(request, board, record, started, complete)
             if control and control.stopped and board.control is control:
                 board.control = None
                 await publish_control(board, key)
@@ -941,7 +944,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
                         not complete and (not recoverable or control and control.stopped)):
                     await board.socket.close(code=1011)
             finally:
-                finish_operation(request, board, record, started, succeeded)
+                await finish_operation(request, board, record, started, succeeded)
                 if not succeeded:
                     board.log(f"{record['detail']} · {record['duration']}", operation.source, operation.session_id)
                 if control and control.stopped and board.control is control:
@@ -1114,7 +1117,7 @@ def create_app(*, port=8080, token=None, read_timeout=600, public_origin=None,
             await board.socket.close(code=1011)
             return problem(502, "flash_program_failed")
         finally:
-            finish_operation(request, board, record, started, complete)
+            await finish_operation(request, board, record, started, complete)
             if control and control.stopped and board.control is control:
                 board.control = None
                 await publish_control(board, key)
