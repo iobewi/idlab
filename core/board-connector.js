@@ -97,6 +97,7 @@ export class BoardConnector {
       await this.#clearSession();
       throw error;
     }
+    if (this.control === 'recovery_required') return 'Récupération matérielle requise.';
     if (!identifyOnConnect) return;
     if (this.mode === 'console' && !this.lastIdentity?.flash_size && this.canEnterLoader) {
       try {
