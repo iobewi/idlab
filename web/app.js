@@ -363,7 +363,33 @@ navigator.serial?.addEventListener('disconnect', event => {
   }
 });
 
-$('reset-device').onclick = () => run(() => selected?.restart());
+$('reset-device').onclick = () => run(async () => {
+  const card = selected;
+  if (!card || $('reset-device').disabled) return;
+  if (!needsRecovery(card)) return card.restart();
+  const generation = card.identity.generation;
+  const confirmation = window.prompt('Vérifie physiquement que toute opération précédente est arrêtée. ' +
+    'Si nécessaire, redémarre la carte manuellement et vérifie son état. ' +
+    'La flash peut être partiellement modifiée. Pour confirmer la récupération, saisis le nom de la carte : ' + card.name);
+  if (confirmation !== card.name || card.identity?.generation !== generation) return;
+  card.recovering = true;
+  render();
+  try {
+    const response = await fetch('/api/v1/devices/' + card.name + '/control/recover', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({generation, confirmation}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error ?? ('HTTP ' + response.status));
+    if (card.identity?.generation !== generation) return;
+    card.control = result.control;
+    await observeCard(card);
+    say('Récupération confirmée pour « ' + card.name + ' ».', {temporary: true});
+  } finally {
+    card.recovering = false;
+    render();
+  }
+});
 $('enter-loader').onclick = () => run(async () => {
   const card = selected;
   if (!card || $('enter-loader').disabled) return;
